@@ -252,6 +252,112 @@ final class DevinPermissionLevelTests: XCTestCase {
         }
     }
 
+    func testGrokAcceptSelectsScopedAllowOrCancelsWithDiagnostic() async throws {
+        let cases: [(options: String, decision: AgentApprovalDecision, expectedID: String?, offeredIDs: [String])] = [
+            (
+                #"[{"optionId":"enable-always-approve","kind":"allow_once"},{"optionId":"reject_once","kind":"reject_once"}]"#,
+                .accept, nil, ["enable-always-approve", "reject_once"]
+            ),
+            (
+                #"[{"optionId":"reject_always","kind":"reject_always"},{"optionId":"allow_always","kind":"allow_always"}]"#,
+                .accept, nil, ["reject_always", "allow_always"]
+            ),
+            (
+                #"[{"optionId":"reject_always","kind":"reject_always"},{"optionId":"allow_always","kind":"allow_always"}]"#,
+                .acceptForSession, "allow_always", ["reject_always", "allow_always"]
+            )
+        ]
+        for (options, decision, expectedID, offeredIDs) in cases {
+            let directory = try makeTestDirectory(name: "GrokPermissionSelection")
+            let executable = directory.appendingPathComponent("grok")
+            let record = directory.appendingPathComponent("response.json")
+            let script = #"""
+            #!/usr/bin/env python3
+            import json
+            import signal
+            import sys
+            signal.alarm(10)
+            def send(message):
+                print(json.dumps({"jsonrpc": "2.0", **message}), flush=True)
+            prompt_id = None
+            for line in sys.stdin:
+                request = json.loads(line)
+                method = request.get("method")
+                if method == "initialize":
+                    send({"id": request["id"], "result": {"agentCapabilities": {}, "authMethods": []}})
+                elif method == "session/new":
+                    send({"id": request["id"], "result": {"sessionId": "test-session"}})
+                elif method == "session/prompt":
+                    prompt_id = request["id"]
+                    send({"id": "permission-1", "method": "session/request_permission", "params": {
+                        "sessionId": "test-session", "toolCall": {"toolCallId": "tool-1", "title": "Shell command"},
+                        "options": json.loads(r'\#(options)')
+                    }})
+                elif request.get("id") == "permission-1":
+                    with open(r"\#(record.path)", "w", encoding="utf-8") as output:
+                        json.dump(request["result"]["outcome"], output)
+                    send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+            """#
+            try script.write(to: executable, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+            let request = ACPRunRequest(
+                agentKind: .grokBuild,
+                modelString: nil,
+                workspacePath: directory.path,
+                resumeSessionID: nil,
+                attachments: [],
+                taskLabelKind: nil
+            )
+            let controller = try ACPAgentSessionController(
+                provider: GrokBuildACPAgentProvider(config: GrokBuildAgentConfig(
+                    commandName: executable.path,
+                    includeRepoPromptMCPServer: false
+                )),
+                runRequest: request
+            )
+            var responder: Task<(Int, [String]), Never>?
+            do {
+                _ = try await controller.bootstrap()
+                let events = await controller.events
+                responder = Task {
+                    var approvalCount = 0
+                    var errors: [String] = []
+                    for await event in events {
+                        switch event {
+                        case let .approvalRequested(approval):
+                            approvalCount += 1
+                            await controller.respondToPermissionRequest(id: approval.requestID.displayValue, decision: decision)
+                        case let .stream(result) where result.type == "error":
+                            errors.append(result.text ?? "")
+                        default:
+                            break
+                        }
+                    }
+                    return (approvalCount, errors)
+                }
+                try await controller.prompt(AgentMessage(userMessage: "Run"), request: request)
+                await controller.shutdown()
+            } catch {
+                await controller.shutdown()
+                throw error
+            }
+            let (approvalCount, errors) = await responder?.value ?? (0, [])
+            XCTAssertEqual(approvalCount, 1)
+            let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: record)) as? [String: String])
+            XCTAssertEqual(response["outcome"], expectedID == nil ? "cancelled" : "selected")
+            XCTAssertEqual(response["optionId"], expectedID)
+            if expectedID == nil {
+                let error = try XCTUnwrap(errors.first)
+                XCTAssertEqual(errors.count, 1)
+                for optionID in offeredIDs {
+                    XCTAssertTrue(error.contains(optionID), "missing offered option ID \(optionID): \(error)")
+                }
+            } else {
+                XCTAssertTrue(errors.isEmpty)
+            }
+        }
+    }
+
     func testDevinClassifiesOnlyThoughtLevel() {
         let provider = DevinACPAgentProvider(config: DevinAgentConfig())
         XCTAssertTrue(provider.supportsParameterizedModelPicker)

@@ -1263,9 +1263,10 @@ actor ACPAgentSessionController {
         guard let pending = pendingPermissionRequests.removeValue(forKey: id) else {
             return
         }
-        let result: [String: Any] = switch decision {
+        let result: [String: Any]
+        switch decision {
         case .cancel:
-            [
+            result = [
                 "outcome": [
                     "outcome": "cancelled"
                 ]
@@ -1275,20 +1276,26 @@ actor ACPAgentSessionController {
                 for: pending.options,
                 sessionScoped: decision != .accept
             ) {
-                ["outcome": ["outcome": "selected", "optionId": optionID]]
+                result = ["outcome": ["outcome": "selected", "optionId": optionID]]
             } else {
-                ["outcome": ["outcome": "cancelled"]]
+                let scope = decision == .accept ? "once" : "session"
+                let offeredOptionIDs = pending.options.map(\.optionID).joined(separator: ", ")
+                emit(.stream(AIStreamResult(
+                    type: "error",
+                    text: "ACP approval cancelled: no eligible allow option for the requested \(scope) scope. Offered option IDs: [\(offeredOptionIDs)]."
+                )))
+                result = ["outcome": ["outcome": "cancelled"]]
             }
         case .decline:
             if let optionID = preferredRejectOptionID(for: pending.options) {
-                [
+                result = [
                     "outcome": [
                         "outcome": "selected",
                         "optionId": optionID
                     ]
                 ]
             } else {
-                [
+                result = [
                     "outcome": [
                         "outcome": "cancelled"
                     ]
