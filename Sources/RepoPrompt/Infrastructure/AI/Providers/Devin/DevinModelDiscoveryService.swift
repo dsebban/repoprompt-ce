@@ -89,14 +89,8 @@ actor DevinModelDiscoveryService {
         if waiterCount == 0 {
             inFlight = nil
         }
-        if !Task.isCancelled {
-            lastAttempt = outcome.isReusable ? outcome : nil
-            switch outcome {
-            case .discovered:
-                break // The successful probe published the current-process ACP catalog.
-            case .notInstalled, .noModelsAdvertised, .failed:
-                AgentACPModelRegistry.shared.invalidateLiveSnapshot(for: .devin)
-            }
+        if !Task.isCancelled, outcome.isReusable {
+            lastAttempt = outcome
         }
         return outcome
     }

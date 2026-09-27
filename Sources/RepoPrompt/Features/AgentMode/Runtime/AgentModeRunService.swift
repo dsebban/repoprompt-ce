@@ -143,9 +143,7 @@ final class AgentModeRunService {
             session: session,
             workspacePath: workspacePath,
             attachments: attachments,
-            runtimePermission: runtimePermission,
-            autoEffortSelection: autoEffortSelection,
-            autoEffortEnabled: GlobalSettingsStore.shared.autoEffortEnabled()
+            runtimePermission: runtimePermission
         )
 
         let windowID = dependencies.windowID
@@ -284,40 +282,13 @@ final class AgentModeRunService {
         session: AgentTabSession,
         workspacePath: String?,
         attachments: [AgentImageAttachment],
-        runtimePermission: AgentProviderRuntimePermissionBinding,
-        autoEffortSelection: AutoEffortTurnSelection? = nil,
-        autoEffortEnabled: Bool = false
+        runtimePermission: AgentProviderRuntimePermissionBinding
     ) -> ACPRunRequest? {
         let selectedAgent = session.selectedAgent
         guard selectedAgent.acpProviderID != nil else { return nil }
         let selectedModelString = session.selectedModelRaw == AgentModel.defaultModel.rawValue
             ? nil
             : session.selectedModelRaw
-        let automaticThinkingSelection: ACPModelParameterSelection? = {
-            guard selectedAgent == .devin, let selection = autoEffortSelection,
-                  let parameterSet = ACPModelParameterResolver.parameterSet(
-                      providerID: .devin, selectedModelRaw: session.selectedModelRaw
-                  ),
-                  let definition = parameterSet.definition(kind: .thinking),
-                  let choice = definition.choice(matching: selection.effortRaw),
-                  AutoEffortModelPolicy.devinEfforts(modelRaw: session.selectedModelRaw).contains(choice.rawValue)
-            else { return nil }
-            let manual = ACPModelParameterResolver.effectiveSelections(
-                providerID: .devin,
-                selectedModelRaw: session.selectedModelRaw,
-                persistedSelections: session.acpModelParameterSelections
-            ).first(where: { $0.kind == .thinking })?.valueRaw
-            guard selection.isCurrent(
-                provider: selectedAgent,
-                selectedModelRaw: session.selectedModelRaw,
-                manualEffortRaw: manual,
-                enabled: autoEffortEnabled
-            ) else { return nil }
-            return ACPModelParameterSelection(
-                providerID: .devin, baseModelRaw: parameterSet.baseModelRaw, kind: .thinking,
-                configID: definition.configID, valueRaw: choice.rawValue
-            )
-        }()
         return ACPRunRequest(
             agentKind: selectedAgent,
             modelString: selectedModelString,
@@ -335,8 +306,7 @@ final class AgentModeRunService {
                     selectedModelRaw: session.selectedModelRaw,
                     persistedSelections: session.acpModelParameterSelections
                 )
-            } ?? [],
-            automaticThinkingSelection: automaticThinkingSelection
+            } ?? []
         )
     }
 

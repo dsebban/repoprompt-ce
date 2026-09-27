@@ -1,4 +1,4 @@
-@_spi(TestSupport) @testable import RepoPromptApp
+@testable import RepoPromptApp
 import XCTest
 
 final class AutoEffortPolicyTests: XCTestCase {
@@ -106,32 +106,6 @@ final class AutoEffortPolicyTests: XCTestCase {
             modelRaw: "claude-opus-4-7",
             advertised: [.low, .medium, .high]
         ).isEmpty)
-    }
-
-    func testDevinAutoEffortUsesOnlyAdvertisedJevCompatibleThinkingChoices() {
-        AgentACPModelRegistry.shared.test_reset(providerID: .devin)
-        defer { AgentACPModelRegistry.shared.test_reset(providerID: .devin) }
-        let model = "swe-2-high"
-        XCTAssertTrue(AutoEffortModelPolicy.devinEfforts(modelRaw: model).isEmpty)
-        AgentACPModelRegistry.shared.updateDiscoveredModels(
-            ACPDiscoveredSessionModels(
-                options: [AgentModelOption(rawValue: model, displayName: "SWE-2", description: nil, isDefault: true)],
-                currentModelRaw: model,
-                modelParameterSets: [ACPModelParameterSet(
-                    baseModelRaw: model,
-                    parameters: [ACPModelParameterDefinition(
-                        kind: .thinking, configID: "thought_level", displayName: "Thinking",
-                        choices: ["low", "medium", "high", "ultra"].map {
-                            ACPModelParameterChoice(rawValue: $0, displayName: $0)
-                        },
-                        currentValueRaw: "medium"
-                    )]
-                )]
-            ),
-            for: .devin
-        )
-        XCTAssertEqual(AutoEffortModelPolicy.devinEfforts(modelRaw: model), ["low", "medium", "high"])
-        XCTAssertTrue(AutoEffortModelPolicy.devinEfforts(modelRaw: "not-advertised").isEmpty)
     }
 
     func testWorkflowAdmissionKeepsCustomTemplateLocal() {

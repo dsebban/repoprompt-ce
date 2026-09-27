@@ -84,24 +84,6 @@ enum AutoEffortModelPolicy {
         return permitted.filter { advertised.contains($0) }.map(\.rawValue)
     }
 
-    static func devinEfforts(modelRaw: String) -> [String] {
-        guard let snapshot = AgentACPModelRegistry.shared.currentSnapshot(for: .devin),
-              snapshot.options.contains(where: {
-                  !$0.isPlaceholderDefault && $0.rawValue.caseInsensitiveCompare(modelRaw) == .orderedSame
-              }),
-              let definition = ACPModelParameterResolver.parameterSet(
-                  providerID: .devin, selectedModelRaw: modelRaw
-              )?.definition(kind: .thinking),
-              !definition.configID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return [] }
-        let supported: Set = ["low", "medium", "high", "xhigh", "max"]
-        let values = definition.choices.map(\.rawValue).filter { supported.contains($0) }
-        guard (2 ... AgentTaskRoutingEnvelopeBuilder.maximumCandidates).contains(values.count),
-              Set(values.map { $0.lowercased() }).count == values.count
-        else { return [] }
-        return values
-    }
-
     static func claudeEfforts(modelRaw: String, advertised: [ClaudeCodeEffortLevel]) -> [String] {
         guard let base = ClaudeModelSpecifier(raw: modelRaw).baseModel?.lowercased(),
               claudeModels.contains(base)

@@ -3,7 +3,6 @@ import Foundation
 @MainActor
 final class AgentModeProviderBindingService {
     let preferences: AgentProviderPreferenceSnapshotStore
-    private var devinModeUpdates: [UUID: (id: UUID, task: Task<Void, Never>)] = [:]
 
     convenience init() {
         self.init(preferences: AgentProviderPreferenceSnapshotStore())
@@ -208,34 +207,7 @@ final class AgentModeProviderBindingService {
                 // Avoid an eager untracked shutdown that could race a newly started run.
                 break
             case .devin:
-                let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
-                guard session.runState.isActive,
-                      let controller = session.acpController else { continue }
-                let sessionModeID = runtime.acpSessionModeID
-                let predecessor = devinModeUpdates[session.tabID]?.task
-                let updateID = UUID()
-                let task = Task { @MainActor [weak self] in
-                    await predecessor?.value
-                    defer {
-                        if self?.devinModeUpdates[session.tabID]?.id == updateID {
-                            self?.devinModeUpdates.removeValue(forKey: session.tabID)
-                        }
-                    }
-                    guard session.runState.isActive, session.acpController === controller else { return }
-                    do {
-                        if let sessionModeID {
-                            try await controller.setSessionMode(sessionModeID, reportFailure: true)
-                        } else {
-                            try await controller.restoreOpenedSessionMode(reportFailure: true)
-                        }
-                    } catch {
-                        if AgentRuntimeProviderService.enableDebugLogging { print("[ACP-Runner] tab=\(session.tabID) failed to apply Devin session mode=\(sessionModeID ?? "default") error=\(error.localizedDescription)") }
-                    }
-                    if session.tabID == currentTabID, session.acpController === controller {
-                        updateActiveBindings(session)
-                    }
-                }
-                devinModeUpdates[session.tabID] = (updateID, task)
+                break
             case .openCode, .antigravity:
                 let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
                 guard let sessionModeID = runtime.acpSessionModeID,

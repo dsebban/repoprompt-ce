@@ -357,13 +357,7 @@ final class RouterSettingsViewModel: ObservableObject {
                 target: candidate.target
             )
         }
-        policyCanBuildCandidates = [configuration.primaryProvider, configuration.subagentProvider].contains { preferred in
-            let scoped = AgentTaskRoutingCandidateBuilder.providers(preferring: preferred, from: providers)
-            return (try? AgentTaskRoutingCandidateBuilder().build(
-                allowedProviders: scoped,
-                availability: availability
-            ))?.isEmpty == false
-        }
+        policyCanBuildCandidates = !targetPreviews.isEmpty
     }
 
     static func effectiveRoles(

@@ -923,8 +923,6 @@ Use `./conductor build` to package the debug app, then `./conductor smoke --laun
 | Agent reasoning | Agent Mode → Devin model and thinking picker | `agent_manage list_agents` advertises per-model `thought_level`; `agent_run` with `model_parameters` applies the selected value before `session/prompt`. The model menu shows the advertised default effort without changing the model ID. |
 | Context Builder | Models → All Agent Models → Context Builder Agent | Select Devin and a thinking pin with Cua Driver, then run `context_builder`; its ACP trace must apply model and effort before prompting. Headless Devin uses top-level `--permission-mode auto` and does not inherit Agent Mode's Full Approval setting. |
 | Oracle picker | Models → All Agent Models → Oracle Models | Open the Devin submenu with Cua Driver; model rows show their advertised default effort and retain their raw model identity on selection. |
-| Jev Model Router | Settings → Router → select Devin as the primary or subagent provider, then start a fresh task | With a verified Jev key and Devin models discovered, inspect the route audit and ACP trace: the chosen advertised model ID and thinking parameter reach `session/prompt`. An unselected Devin provider is not added to the automatic Codex/Claude frontier. |
-| Jev Auto effort | Enable Auto effort, select a Devin model with at least two advertised Jev-compatible thinking levels, then submit a user turn | Inspect the audit and ACP trace for the chosen `thought_level` before `session/prompt`; after the provider turn the controller restores the pre-turn value, and a later reused turn reapplies any manual pin. The saved model/parameter selection remains unchanged. |
 
 ## Handoff checklist
 

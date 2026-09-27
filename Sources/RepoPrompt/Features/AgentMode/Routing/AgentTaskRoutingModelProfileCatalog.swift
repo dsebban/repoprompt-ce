@@ -8,23 +8,18 @@ import Foundation
 /// aliases, published evaluations, or prices change.
 enum AgentTaskRoutingModelProfileCatalog {
     static let evidenceVersion = "rpce.model-routing-evidence.2026-09-23"
-    static let rubricVersion = "rpce.automatic-utility-frontier.v3-devin"
+    static let rubricVersion = "rpce.automatic-utility-frontier.v2-evidence-2026-09-23"
 
     static func description(for target: AgentRoutingExecutableTarget) -> String {
-        let evidence = profile(for: target)
+        let modelIdentity = normalizedModelIdentity(for: target)
+        let evidence = profile(for: modelIdentity)
         let effort = effortDescription(for: target)
         return "Evidence snapshot 2026-09-23 (provider-published; API list price is a comparison proxy and CLI or subscription billing may differ): \(evidence) \(effort)"
     }
 
     static func modelDescription(for target: AgentRoutingExecutableTarget) -> String {
-        "Evidence snapshot 2026-09-23 (provider-published; API list price is a comparison proxy and CLI or subscription billing may differ): \(profile(for: target))"
-    }
-
-    private static func profile(for target: AgentRoutingExecutableTarget) -> String {
-        guard target.agentRaw != AgentProviderKind.devin.rawValue else {
-            return "Devin advertises this model through ACP, but no audited Devin capability or billing profile is available. Do not infer pricing from an upstream model name."
-        }
-        return profile(for: normalizedModelIdentity(for: target))
+        let modelIdentity = normalizedModelIdentity(for: target)
+        return "Evidence snapshot 2026-09-23 (provider-published; API list price is a comparison proxy and CLI or subscription billing may differ): \(profile(for: modelIdentity))"
     }
 
     private static func profile(for modelIdentity: String) -> String {
@@ -73,17 +68,13 @@ enum AgentTaskRoutingModelProfileCatalog {
         return raw
     }
 
-    static func selectedEffortRaw(for target: AgentRoutingExecutableTarget) -> String? {
-        target.reasoningEffortRaw
-            ?? (
-                target.agentRaw == AgentProviderKind.claudeCode.rawValue
-                    ? ClaudeModelSpecifier(raw: target.modelRaw).effortLevel?.rawValue : nil
-            )
-            ?? target.modelParameters.first(where: { $0.kind == .thinking })?.valueRaw
-    }
-
     static func effortDescription(for target: AgentRoutingExecutableTarget) -> String {
-        guard let effort = selectedEffortRaw(for: target)?.lowercased() else {
+        let codexEffort = target.reasoningEffortRaw?.lowercased()
+        let claudeEffort = target.agentRaw == AgentProviderKind.claudeCode.rawValue
+            ? ClaudeModelSpecifier(raw: target.modelRaw).effortLevel?.rawValue
+            : nil
+        let parameterEffort = target.modelParameters.first(where: { $0.kind == .thinking })?.valueRaw.lowercased()
+        guard let effort = codexEffort ?? claudeEffort ?? parameterEffort else {
             return "Effort is provider-default or unspecified, so total task cost and quality are less predictable."
         }
 

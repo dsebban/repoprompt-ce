@@ -166,7 +166,7 @@ struct RouterSettingsView: View {
             get: { viewModel.providerLimit(for: scope) },
             set: { viewModel.setProviderLimit($0, scope: scope) }
         )) {
-            Text("Automatic (supported providers)").tag(AgentProviderKind?.none)
+            Text("Automatic (all connected)").tag(AgentProviderKind?.none)
             ForEach(viewModel.visibleProviders, id: \.rawValue) { provider in
                 Text(
                     viewModel.providerIsAvailable(provider)

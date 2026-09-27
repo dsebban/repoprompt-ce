@@ -277,7 +277,6 @@ actor ACPAgentSessionController {
     private var eventStreamFinished = false
     private var loadSessionSupported = false
     private var discoveredSessionModels: ACPDiscoveredSessionModels?
-    private var automaticThinkingToRestore: ACPModelParameterSelection?
     private var sessionModelConfigOptionID: String?
     /// True when the provider conforms to `ACPDirectSessionModelProvider` and the session
     /// advertised no modern `configOptions` model selector, so model application flows
@@ -1019,23 +1018,16 @@ actor ACPAgentSessionController {
         )
     }
 
-    func setSessionMode(_ modeID: String, reportFailure: Bool = false) async throws {
-        do {
-            try await configurationMutationMutex.withLock { [weak self] in
-                guard let self else { throw CancellationError() }
-                try await setSessionModeSerialized(modeID)
-            }
-        } catch {
-            if reportFailure, !(error is CancellationError) {
-                emit(.stream(AIStreamResult(type: "error", text: displayText(for: provider.normalizeError(error)))))
-            }
-            throw error
+    func setSessionMode(_ modeID: String) async throws {
+        try await configurationMutationMutex.withLock { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await setSessionModeSerialized(modeID)
         }
     }
 
-    func restoreOpenedSessionMode(reportFailure: Bool = false) async throws {
+    func restoreOpenedSessionMode() async throws {
         guard let openedSessionModeID else { return }
-        try await setSessionMode(openedSessionModeID, reportFailure: reportFailure)
+        try await setSessionMode(openedSessionModeID)
     }
 
     func applySessionModelParameterSelections(
@@ -1139,77 +1131,6 @@ actor ACPAgentSessionController {
             ))
         }
         return .init(applied: applied, alreadyCurrent: alreadyCurrent, skipped: [])
-    }
-
-    /// Restore an earlier turn's temporary choice before applying the next turn's model and manual pins.
-    func restoreAutomaticThinkingIfNeeded() async throws {
-        try await configurationMutationMutex.withLock { [weak self] in
-            guard let self else { throw CancellationError() }
-            try await restoreAutomaticThinkingSerialized()
-        }
-    }
-
-    private func restoreAutomaticThinkingSerialized() async throws {
-        guard let restore = automaticThinkingToRestore,
-              let current = currentDevinThinkingSelection() else { return }
-        guard current.identity == restore.identity else {
-            automaticThinkingToRestore = nil
-            return
-        }
-        let report = try await applySessionModelParameterSelectionsSerialized([restore])
-        try report.validateNoSkippedSelections()
-        automaticThinkingToRestore = nil
-    }
-
-    /// Fails unless the turn-scoped choice still matches the live Devin thinking selector.
-    func applyAutomaticThinking(_ selection: ACPModelParameterSelection) async throws {
-        try await configurationMutationMutex.withLock { [weak self] in
-            guard let self else { throw CancellationError() }
-            try await applyAutomaticThinkingSerialized(selection)
-        }
-    }
-
-    private func applyAutomaticThinkingSerialized(_ selection: ACPModelParameterSelection) async throws {
-        guard provider.providerID == .devin, selection.providerID == .devin,
-              selection.kind == .thinking, automaticThinkingToRestore == nil,
-              let current = currentDevinThinkingSelection(),
-              selection.identity == current.identity,
-              selection.configID == current.configID,
-              let parameterSet = discoveredSessionModels?.modelParameterSets.first(where: {
-                  ACPModelParameterIdentity.canonicalBaseModelRaw($0.baseModelRaw, providerID: .devin)
-                      == ACPModelParameterIdentity.canonicalBaseModelRaw(current.baseModelRaw, providerID: .devin)
-              }),
-              let definition = parameterSet.definition(kind: .thinking),
-              definition.choice(matching: selection.valueRaw) != nil,
-              definition.choice(matching: current.valueRaw) != nil
-        else {
-            throw ControllerError.requestFailed("Automatic Devin thinking no longer matches the live session configuration.")
-        }
-        guard current.valueRaw != selection.valueRaw else { return }
-        automaticThinkingToRestore = current
-        let report = try await applySessionModelParameterSelectionsSerialized([selection])
-        try report.validateNoSkippedSelections()
-    }
-
-    private func currentDevinThinkingSelection() -> ACPModelParameterSelection? {
-        guard provider.providerID == .devin,
-              let models = discoveredSessionModels,
-              let model = models.currentModelRaw,
-              models.contains(rawModel: model)
-        else { return nil }
-        let identity = ACPModelParameterIdentity.canonicalBaseModelRaw(model, providerID: .devin)
-        let matches = models.modelParameterSets.filter {
-            ACPModelParameterIdentity.canonicalBaseModelRaw($0.baseModelRaw, providerID: .devin) == identity
-        }
-        guard matches.count == 1, let set = matches.first,
-              let definition = set.definition(kind: .thinking),
-              let choice = definition.choice(matching: definition.currentValueRaw),
-              !definition.configID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        else { return nil }
-        return ACPModelParameterSelection(
-            providerID: .devin, baseModelRaw: set.baseModelRaw, kind: .thinking,
-            configID: definition.configID, valueRaw: choice.rawValue
-        )
     }
 
     private func setSessionModeSerialized(_ modeID: String) async throws {
@@ -1603,7 +1524,6 @@ actor ACPAgentSessionController {
         processWaitTask = nil
         process = nil
         discoveredSessionModels = nil
-        automaticThinkingToRestore = nil
         sessionModelConfigOptionID = nil
         sessionModelDirectSelectionSupported = false
         sessionModelSnapshotHasLiveAuthority = false
@@ -2333,7 +2253,7 @@ actor ACPAgentSessionController {
     /// selection. Admit the complete effective request using only live session
     /// authority, immediately before dispatching the prompt.
     private func validatePromptModelParameterSelections(_ request: ACPRunRequest) throws {
-        guard provider.supportsParameterizedModelPicker,
+        guard provider.providerID == .devin,
               !request.modelParameterSelections.isEmpty
         else { return }
         guard sessionModelSnapshotHasLiveAuthority,
@@ -2658,7 +2578,6 @@ actor ACPAgentSessionController {
 
     private func beginOpeningSessionConfiguration() {
         discoveredSessionModels = nil
-        automaticThinkingToRestore = nil
         sessionModelConfigOptionID = nil
         sessionModelDirectSelectionSupported = false
         sessionModelSnapshotHasLiveAuthority = false
@@ -3702,6 +3621,12 @@ actor ACPAgentSessionController {
             return nil
         }
 
+        let filteredOptions = safePermissionOptionsForAutoSelection(options)
+        if provider.providerID == .devin {
+            guard let selectedOptionID = filteredOptions.first(where: { $0.optionID == "allow_once" })?.optionID else { return nil }
+            return AutoApprovalSelection(optionID: selectedOptionID, match: match)
+        }
+
         let preferences: [PermissionOptionPreference] = switch provider.providerID {
         case .openCode, .cursor, .antigravity:
             [
@@ -3712,8 +3637,6 @@ actor ACPAgentSessionController {
                 .optionID("allow_once"),
                 .kind("allow_once")
             ]
-        case .devin:
-            [.optionID("allow_once")]
         case .grokBuild:
             // Strict RepoPrompt MCP auto-approval is per-request: never select Grok's
             // session-scoped `allow-edits-session` here.
@@ -3723,14 +3646,11 @@ actor ACPAgentSessionController {
                 .optionID("allow_once"),
                 .kind("allow_once")
             ]
+        case .devin:
+            []
         }
 
-        let filteredOptions = safePermissionOptionsForAutoSelection(options)
-        let selectedOptionID: String? = if provider.providerID == .devin {
-            filteredOptions.first(where: { $0.optionID == "allow_once" })?.optionID
-        } else {
-            optionID(for: filteredOptions, preferences: preferences)
-        }
+        let selectedOptionID = optionID(for: filteredOptions, preferences: preferences)
         guard let selectedOptionID else { return nil }
         return AutoApprovalSelection(optionID: selectedOptionID, match: match)
     }
