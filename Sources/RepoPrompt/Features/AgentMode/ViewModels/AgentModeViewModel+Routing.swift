@@ -222,7 +222,7 @@ extension AgentModeViewModel {
                 )
             }
             routedAudit.chosenModelRaw = selected.target.modelRaw
-            routedAudit.chosenEffortRaw = selected.target.reasoningEffortRaw
+            routedAudit.chosenEffortRaw = AgentTaskRoutingModelProfileCatalog.selectedEffortRaw(for: selected.target)
             guard composerSubmitClaimIsCurrent(claim),
                   sessions[destinationTabID] === session,
                   modelRouterSettingsStore.modelRouterConfiguration().revision == configuration.revision,
@@ -344,10 +344,16 @@ extension AgentModeViewModel {
                 )
             )
             manualEffortRaw = claudeCoordinator.currentClaudeEffortLevel(for: session).rawValue
+        case .devin:
+            modelID = modelRaw
+            efforts = AutoEffortModelPolicy.devinEfforts(modelRaw: modelRaw)
+            manualEffortRaw = manualDevinThinkingEffortRaw(for: session)
         default:
             return ineligibleAutoEffortChoice()
         }
-        guard efforts.count >= 2 else { return ineligibleAutoEffortChoice() }
+        guard efforts.count >= 2,
+              provider != .devin || (manualEffortRaw.map(efforts.contains) ?? true)
+        else { return ineligibleAutoEffortChoice() }
         let judgmentID = UUID()
         session.autoEffortJudgmentID = judgmentID
         if currentTabID == session.tabID { syncStatusPillsUIState() }
@@ -371,13 +377,15 @@ extension AgentModeViewModel {
               session.selectedAgent == provider,
               session.selectedModelRaw == modelRaw,
               !session.runState.isActive,
-              let chosen, efforts.contains(chosen)
+              let chosen, efforts.contains(chosen),
+              provider != .devin || AutoEffortModelPolicy.devinEfforts(modelRaw: modelRaw) == efforts
         else {
             return (nil, .init(configured: true, eligible: true, judgmentRequested: true, decision: .fallback, fallbackApplied: true))
         }
         let currentManualEffortRaw: String? = switch provider {
         case .codexExec: codexCoordinator.effectiveCodexSelection(for: session).reasoningEffort
         case .claudeCode: claudeCoordinator.currentClaudeEffortLevel(for: session).rawValue
+        case .devin: manualDevinThinkingEffortRaw(for: session)
         default: nil
         }
         guard currentManualEffortRaw == manualEffortRaw else {
@@ -395,6 +403,14 @@ extension AgentModeViewModel {
                 chosenModelRaw: modelRaw, chosenEffortRaw: chosen
             )
         )
+    }
+
+    private func manualDevinThinkingEffortRaw(for session: TabSession) -> String? {
+        ACPModelParameterResolver.effectiveSelections(
+            providerID: .devin,
+            selectedModelRaw: session.selectedModelRaw,
+            persistedSelections: session.acpModelParameterSelections
+        ).first(where: { $0.kind == .thinking })?.valueRaw
     }
 
     private func ineligibleAutoEffortChoice() -> (
@@ -438,7 +454,10 @@ extension AgentModeViewModel {
         }
         switch result.outcome {
         case let .selected(opaqueKey, _):
-            return result.candidates.only(where: { $0.opaqueKey == opaqueKey })?.target
+            guard let target = result.candidates.only(where: { $0.opaqueKey == opaqueKey })?.target else { return nil }
+            guard target.agentRaw != AgentProviderKind.devin.rawValue
+                || AgentTaskRoutingCandidateBuilder.isValidDevinTarget(target) else { return nil }
+            return target
         case .cancelled:
             throw GlobalModelRoutingError.cancelled
         case .abstained, .failed:
@@ -638,7 +657,8 @@ extension AgentModeViewModel {
 
     private func applyRoutingTarget(_ target: AgentRoutingExecutableTarget, to session: TabSession) -> Bool {
         guard let agent = AgentProviderKind(rawValue: target.agentRaw),
-              AgentModelCatalog.isAgentAvailable(agent, availability: modelRouterAvailabilityContext)
+              AgentModelCatalog.isAgentAvailable(agent, availability: modelRouterAvailabilityContext),
+              agent != .devin || AgentTaskRoutingCandidateBuilder.isValidDevinTarget(target)
         else { return false }
         session.selectedAgent = agent
         session.selectedModelRaw = target.modelRaw

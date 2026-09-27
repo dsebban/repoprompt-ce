@@ -69,7 +69,7 @@ struct AgentTaskRoutingCandidateBuilder {
                 && AgentModelCatalog.isAgentAvailable($0.provider, availability: availability)
         }
         var seenTargets: Set<AgentRoutingExecutableTarget> = []
-        let candidates = definitions.compactMap { definition -> Candidate? in
+        var candidates = definitions.compactMap { definition -> Candidate? in
             guard let option = resolveModelOption(definition, availability: availability),
                   let baseModelRaw = Self.baseModelRaw(option.rawValue, provider: definition.provider)
             else { return nil }
@@ -108,6 +108,47 @@ struct AgentTaskRoutingCandidateBuilder {
                 )
             )
         }
+        if allowedProviders.contains(.devin), surface.allows(.devin),
+           AgentModelCatalog.isAgentAvailable(.devin, availability: availability),
+           AgentACPModelRegistry.shared.currentSnapshot(for: .devin) != nil
+        {
+            let options = modelOptions(.devin, availability)
+                .filter { !$0.isPlaceholderDefault && !$0.rawValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                    && $0.rawValue.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) != .orderedSame
+                }
+                .sorted { $0.rawValue.localizedCaseInsensitiveCompare($1.rawValue) == .orderedAscending }
+            var seenModels = Set<String>()
+            for option in options where candidates.count < AgentTaskRoutingEnvelopeBuilder.maximumCandidates {
+                let identity = ACPModelParameterIdentity.canonicalBaseModelRaw(option.rawValue, providerID: .devin)
+                guard seenModels.insert(identity).inserted else { continue }
+                let target = AgentRoutingExecutableTarget(
+                    agentRaw: AgentProviderKind.devin.rawValue,
+                    modelRaw: option.rawValue,
+                    reasoningEffortRaw: nil,
+                    modelParameters: []
+                )
+                guard seenTargets.insert(target).inserted else { continue }
+                let references = roleDefaults.filter {
+                    $0.provider == .devin
+                        && ACPModelParameterIdentity.canonicalBaseModelRaw($0.modelRaw, providerID: .devin) == identity
+                }
+                let key = opaqueKey()
+                candidates.append(Candidate(
+                    opaqueKey: key,
+                    utilityTier: "devin:\(identity)",
+                    target: target,
+                    descriptor: AgentTaskRoutingCandidateDescriptor(
+                        opaqueKey: key,
+                        roleLabels: ["devin:\(identity)"],
+                        targetDescription: Self.modelDescription(
+                            target, displayName: option.displayName, roleDefaults: references
+                        ),
+                        rubricVersion: AgentTaskRoutingModelProfileCatalog.rubricVersion,
+                        rubric: "Judge this ACP-advertised Devin model by its expected task reliability. Its capability and billing are unaudited; do not assume it is cheap or strong."
+                    )
+                ))
+            }
+        }
         guard !candidates.isEmpty else { throw BuildError.noAvailableTargets }
         return candidates
     }
@@ -118,6 +159,46 @@ struct AgentTaskRoutingCandidateBuilder {
     ) throws -> [Candidate] {
         guard let provider = AgentProviderKind(rawValue: model.target.agentRaw) else {
             throw BuildError.noAvailableTargets
+        }
+        if provider == .devin {
+            guard Self.isValidDevinTarget(model.target),
+                  let option = modelOptions(.devin, availability).first(where: {
+                      $0.rawValue.caseInsensitiveCompare(model.target.modelRaw) == .orderedSame
+                  })
+            else { throw BuildError.noAvailableTargets }
+            guard let definition = ACPModelParameterResolver.parameterSet(
+                providerID: .devin, selectedModelRaw: option.rawValue
+            )?.definition(kind: .thinking) else {
+                return [model]
+            }
+            let choices = definition.choices
+            guard !choices.isEmpty,
+                  choices.count <= AgentTaskRoutingEnvelopeBuilder.maximumCandidates
+            else { throw BuildError.noAvailableTargets }
+            return choices.map { choice in
+                let target = AgentRoutingExecutableTarget(
+                    agentRaw: AgentProviderKind.devin.rawValue,
+                    modelRaw: option.rawValue,
+                    reasoningEffortRaw: nil,
+                    modelParameters: [ACPModelParameterSelection(
+                        providerID: .devin, baseModelRaw: option.rawValue, kind: .thinking,
+                        configID: definition.configID, valueRaw: choice.rawValue
+                    )]
+                )
+                let key = opaqueKey()
+                return Candidate(
+                    opaqueKey: key,
+                    utilityTier: choice.rawValue,
+                    target: target,
+                    descriptor: AgentTaskRoutingCandidateDescriptor(
+                        opaqueKey: key,
+                        roleLabels: ["effort:\(choice.rawValue)"],
+                        targetDescription: "Already selected model: \(option.displayName). \(AgentTaskRoutingModelProfileCatalog.effortDescription(for: target))",
+                        rubricVersion: AgentTaskRoutingModelProfileCatalog.rubricVersion,
+                        rubric: "Choose the lowest advertised thinking level with a clear reliability margin; raise it for ambiguity, review depth, or long-horizon reasoning."
+                    )
+                )
+            }
         }
         let selectedBase = Self.baseModelRaw(model.target.modelRaw, provider: provider)?.lowercased()
         guard let selectedBase else { throw BuildError.noAvailableTargets }
@@ -165,8 +246,12 @@ struct AgentTaskRoutingCandidateBuilder {
         availability: AgentModelCatalog.AvailabilityContext,
         surface: AgentModelCatalog.AgentSelectionSurface = .general
     ) -> Set<AgentProviderKind> {
-        Set([AgentProviderKind.codexExec, .claudeCode].filter {
+        Set([AgentProviderKind.codexExec, .claudeCode, .devin].filter {
             surface.allows($0) && AgentModelCatalog.isAgentAvailable($0, availability: availability)
+                && (
+                    $0 != .devin || AgentACPModelRegistry.shared.currentSnapshot(for: .devin)?.options
+                        .contains(where: { !$0.isPlaceholderDefault }) == true
+                )
         })
     }
 
@@ -179,8 +264,30 @@ struct AgentTaskRoutingCandidateBuilder {
     ) -> Set<AgentProviderKind> {
         guard let preferredProvider,
               availableProviders.contains(preferredProvider)
-        else { return availableProviders }
+        else { return availableProviders.subtracting([.devin]) }
         return [preferredProvider]
+    }
+
+    static func isValidDevinTarget(_ target: AgentRoutingExecutableTarget) -> Bool {
+        guard target.agentRaw == AgentProviderKind.devin.rawValue,
+              target.reasoningEffortRaw == nil,
+              let snapshot = AgentACPModelRegistry.shared.currentSnapshot(for: .devin),
+              snapshot.options.contains(where: {
+                  !$0.isPlaceholderDefault && $0.rawValue.caseInsensitiveCompare(target.modelRaw) == .orderedSame
+              })
+        else { return false }
+        guard !target.modelParameters.isEmpty else { return true }
+        guard target.modelParameters.count == 1,
+              let selection = target.modelParameters.first,
+              selection.providerID == .devin, selection.kind == .thinking,
+              selection.identity.canonicalBaseModelRaw == ACPModelParameterIdentity.canonicalBaseModelRaw(target.modelRaw, providerID: .devin),
+              let definition = ACPModelParameterResolver.parameterSet(
+                  providerID: .devin, selectedModelRaw: target.modelRaw
+              )?.definition(kind: .thinking),
+              definition.configID == selection.configID,
+              definition.choice(matching: selection.valueRaw) != nil
+        else { return false }
+        return true
     }
 
     private static let modelDefinitions: [ModelDefinition] = [

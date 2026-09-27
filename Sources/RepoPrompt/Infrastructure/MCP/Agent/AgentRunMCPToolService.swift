@@ -558,7 +558,7 @@ struct AgentRunMCPToolService {
                         "entryPoint": "agent_run.start",
                         "provider": routed.agentRaw,
                         "model": routed.modelRaw,
-                        "effort": routed.reasoningEffortRaw ?? "provider-default",
+                        "effort": AgentTaskRoutingModelProfileCatalog.selectedEffortRaw(for: routed) ?? "provider-default",
                         "overrodeRequestedModel": "false"
                     ])
                 #endif

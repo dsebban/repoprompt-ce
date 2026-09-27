@@ -1,5 +1,5 @@
 import Foundation
-@testable import RepoPromptApp
+@_spi(TestSupport) @testable import RepoPromptApp
 import XCTest
 
 final class AgentTaskRouterCoreTests: XCTestCase {
@@ -850,6 +850,69 @@ final class AgentTaskRoutingCandidateBuilderPolicyTests: XCTestCase {
             ),
             [.codexExec]
         )
+    }
+
+    func testPersistedDevinCatalogDoesNotAuthorizeAutomaticRouting() async throws {
+        let registry = AgentACPModelRegistry.shared
+        registry.test_reset(providerID: .devin)
+        defer { registry.test_reset(providerID: .devin) }
+        ACPDynamicModelStore.save(
+            ACPDiscoveredSessionModels(
+                options: [AgentModelOption(rawValue: "swe-2-high", displayName: "SWE-2", description: nil, isDefault: true)],
+                currentModelRaw: "swe-2-high"
+            ),
+            for: .devin
+        )
+        await registry.warmStandardStoreIfNeeded()
+        XCTAssertNotNil(registry.resolvedSnapshot(for: .devin))
+        XCTAssertNil(registry.currentSnapshot(for: .devin))
+        let available = AgentTaskRoutingCandidateBuilder.availableProviders(
+            availability: .init(devinAvailable: true)
+        )
+        XCTAssertFalse(available.contains(.devin))
+        XCTAssertThrowsError(try AgentTaskRoutingCandidateBuilder().build(
+            allowedProviders: [.devin], availability: .init(devinAvailable: true)
+        ))
+    }
+
+    func testDevinRouterUsesAdvertisedModelsAndThinkingParametersOnlyWhenPreferred() throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .devin)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .devin) }
+        let model = "swe-2-high"
+        AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [AgentModelOption(rawValue: model, displayName: "SWE-2", description: nil, isDefault: true)],
+                currentModelRaw: model,
+                modelParameterSets: [ACPModelParameterSet(
+                    baseModelRaw: model,
+                    parameters: [ACPModelParameterDefinition(
+                        kind: .thinking, configID: "thought_level", displayName: "Thinking",
+                        choices: ["medium", "high"].map {
+                            ACPModelParameterChoice(rawValue: $0, displayName: $0)
+                        },
+                        currentValueRaw: "medium"
+                    )]
+                )]
+            ),
+            for: .devin
+        )
+        let availability = AgentModelCatalog.AvailabilityContext(devinAvailable: true)
+        let available = AgentTaskRoutingCandidateBuilder.availableProviders(availability: availability)
+        XCTAssertTrue(available.contains(.devin))
+        XCTAssertFalse(AgentTaskRoutingCandidateBuilder.providers(preferring: nil, from: available).contains(.devin))
+        let builder = AgentTaskRoutingCandidateBuilder()
+        let modelCandidate = try XCTUnwrap(builder.build(
+            allowedProviders: [.devin], availability: availability
+        ).first)
+        XCTAssertEqual(modelCandidate.target.modelRaw, model)
+        XCTAssertTrue(modelCandidate.target.modelParameters.isEmpty)
+        let efforts = try builder.buildEfforts(for: modelCandidate, availability: availability)
+        XCTAssertEqual(efforts.map(\.utilityTier), ["medium", "high"])
+        XCTAssertEqual(efforts.map { $0.target.modelParameters.first?.valueRaw }, ["medium", "high"])
+        XCTAssertTrue(efforts.allSatisfy { AgentTaskRoutingCandidateBuilder.isValidDevinTarget($0.target) })
+        XCTAssertEqual(AgentTaskRoutingModelProfileCatalog.selectedEffortRaw(for: efforts[1].target), "high")
+        AgentACPModelRegistry.shared.test_reset(providerID: .devin)
+        XCTAssertFalse(AgentTaskRoutingCandidateBuilder.isValidDevinTarget(efforts[1].target))
     }
 
     func testUnavailableProviderPolicyFailsClosed() {

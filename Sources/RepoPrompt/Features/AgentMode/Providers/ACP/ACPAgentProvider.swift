@@ -127,6 +127,8 @@ struct ACPRunRequest {
     let sessionModeID: String?
     let autoApproveAllToolPermissions: Bool
     let modelParameterSelections: [ACPModelParameterSelection]
+    /// Turn-scoped thinking choice; never copied into saved model selections.
+    let automaticThinkingSelection: ACPModelParameterSelection?
 
     init(
         agentKind: AgentProviderKind,
@@ -137,7 +139,8 @@ struct ACPRunRequest {
         taskLabelKind: AgentModelCatalog.TaskLabelKind?,
         sessionModeID: String? = nil,
         autoApproveAllToolPermissions: Bool = false,
-        modelParameterSelections: [ACPModelParameterSelection] = []
+        modelParameterSelections: [ACPModelParameterSelection] = [],
+        automaticThinkingSelection: ACPModelParameterSelection? = nil
     ) {
         self.agentKind = agentKind
         self.modelString = modelString
@@ -148,6 +151,7 @@ struct ACPRunRequest {
         self.sessionModeID = sessionModeID
         self.autoApproveAllToolPermissions = autoApproveAllToolPermissions
         self.modelParameterSelections = modelParameterSelections
+        self.automaticThinkingSelection = automaticThinkingSelection
     }
 }
 

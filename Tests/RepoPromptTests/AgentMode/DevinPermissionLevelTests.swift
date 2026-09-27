@@ -582,6 +582,52 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertEqual(followUp.resumeSessionID, "devin-session")
     }
 
+    @MainActor
+    func testAutomaticDevinThinkingStaysOutOfSavedRunSelections() throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .devin)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .devin) }
+        let model = "swe-2-high"
+        AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [AgentModelOption(rawValue: model, displayName: "SWE-2", description: nil, isDefault: true)],
+                currentModelRaw: model,
+                modelParameterSets: [ACPModelParameterSet(
+                    baseModelRaw: model,
+                    parameters: [ACPModelParameterDefinition(
+                        kind: .thinking, configID: "thought_level", displayName: "Thinking",
+                        choices: ["low", "high"].map { ACPModelParameterChoice(rawValue: $0, displayName: $0) },
+                        currentValueRaw: "high"
+                    )]
+                )]
+            ),
+            for: .devin
+        )
+        let session = AgentModeViewModel.TabSession(tabID: UUID())
+        session.selectedAgent = .devin
+        session.selectedModelRaw = model
+        let manual = ACPModelParameterSelection(
+            providerID: .devin, baseModelRaw: model, kind: .thinking,
+            configID: "thought_level", valueRaw: "high"
+        )
+        session.acpModelParameterSelections = [manual]
+        let automatic = AutoEffortTurnSelection(
+            provider: .devin, selectedModelRaw: model, manualEffortRaw: "high", effortRaw: "low"
+        )
+        let request = try XCTUnwrap(AgentModeRunService.makeACPRunRequest(
+            session: session, workspacePath: "/tmp/workspace", attachments: [],
+            runtimePermission: .init(acpSessionModeID: nil),
+            autoEffortSelection: automatic, autoEffortEnabled: true
+        ))
+        XCTAssertEqual(request.modelParameterSelections, [manual])
+        XCTAssertEqual(request.automaticThinkingSelection?.valueRaw, "low")
+        XCTAssertEqual(session.acpModelParameterSelections, [manual])
+        XCTAssertNil(AgentModeRunService.makeACPRunRequest(
+            session: session, workspacePath: "/tmp/workspace", attachments: [],
+            runtimePermission: .init(acpSessionModeID: nil),
+            autoEffortSelection: automatic, autoEffortEnabled: false
+        )?.automaticThinkingSelection)
+    }
+
     // MARK: - Provider launch arguments
 
     func testLaunchUsesBareACPSubcommand() throws {
@@ -905,6 +951,97 @@ final class DevinPermissionLevelTests: XCTestCase {
         await controller.shutdown()
     }
 
+    func testAutomaticThinkingRestoresPreTurnSelectionOnReusedController() async throws {
+        let directory = try makeTestDirectory(name: "DevinAutomaticThinkingRestore")
+        let executable = directory.appendingPathComponent("devin")
+        let record = directory.appendingPathComponent("thinking.json")
+        let script = #"""
+        #!/usr/bin/env python3
+        import json
+        import sys
+
+        model = "swe-2-high"
+        defaults = {"swe-2-high": "medium", "swe-2-medium": "low"}
+        thinking = dict(defaults)
+        applied = []
+        def options():
+            return [
+                {"id": "model", "name": "Model", "category": "model", "type": "select",
+                 "currentValue": model, "options": [{"value": value, "name": value} for value in thinking]},
+                {"id": "thought_level", "name": "Thinking", "category": "thought_level", "type": "select",
+                 "currentValue": thinking[model], "options": [{"value": value, "name": value} for value in ["low", "medium", "high"]]}
+            ]
+        def send(message):
+            print(json.dumps({"jsonrpc": "2.0", **message}), flush=True)
+
+        for line in sys.stdin:
+            request = json.loads(line)
+            method = request.get("method")
+            if method == "initialize":
+                send({"id": request["id"], "result": {"agentCapabilities": {}, "authMethods": []}})
+            elif method == "session/new":
+                send({"id": request["id"], "result": {"sessionId": "thinking-session", "configOptions": options()}})
+            elif method == "session/set_config_option":
+                if request["params"]["configId"] == "model":
+                    model = request["params"]["value"]
+                    thinking[model] = defaults[model]
+                else:
+                    thinking[model] = request["params"]["value"]
+                    applied.append(thinking[model])
+                    with open(r"\#(record.path)", "w", encoding="utf-8") as output:
+                        json.dump(applied, output)
+                send({"id": request["id"], "result": {"configOptions": options()}})
+        """#
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let controller = try ACPAgentSessionController(
+            provider: DevinACPAgentProvider(config: DevinAgentConfig(
+                commandName: executable.path, includeRepoPromptMCPServer: false
+            )),
+            runRequest: makeRequest(workspacePath: directory.path)
+        )
+        let automaticA = ACPModelParameterSelection(
+            providerID: .devin, baseModelRaw: "swe-2-high", kind: .thinking,
+            configID: "thought_level", valueRaw: "high"
+        )
+        let automaticB = ACPModelParameterSelection(
+            providerID: .devin, baseModelRaw: "swe-2-medium", kind: .thinking,
+            configID: "thought_level", valueRaw: "high"
+        )
+        do {
+            _ = try await controller.bootstrap()
+            _ = try await controller.applySessionModelParameterSelections([])
+            try await controller.applyAutomaticThinking(automaticA)
+            try await controller.setSessionModel("swe-2-medium")
+            try await controller.restoreAutomaticThinkingIfNeeded()
+            try await controller.applyAutomaticThinking(automaticB)
+            try await controller.restoreAutomaticThinkingIfNeeded()
+            try await controller.setSessionModel("swe-2-high")
+            let manual = ACPModelParameterSelection(
+                providerID: .devin, baseModelRaw: "swe-2-high", kind: .thinking,
+                configID: "thought_level", valueRaw: "low"
+            )
+            _ = try await controller.applySessionModelParameterSelections([manual])
+            try await controller.applyAutomaticThinking(automaticA)
+            try await controller.restoreAutomaticThinkingIfNeeded()
+            do {
+                try await controller.applyAutomaticThinking(ACPModelParameterSelection(
+                    providerID: .devin, baseModelRaw: "swe-2-high", kind: .thinking,
+                    configID: "stale_thought_level", valueRaw: "high"
+                ))
+                XCTFail("expected stale automatic thinking selection to fail")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("no longer matches"))
+            }
+            await controller.shutdown()
+        } catch {
+            await controller.shutdown()
+            throw error
+        }
+        let applied = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: record)) as? [String])
+        XCTAssertEqual(applied, ["high", "high", "low", "low", "high", "low"])
+    }
+
     func testProviderDefaultRestoresOpenedSessionMode() async throws {
         let directory = try makeTestDirectory(name: "DevinRestoreOpenedMode")
         let executable = directory.appendingPathComponent("devin")
@@ -987,6 +1124,15 @@ final class DevinPermissionLevelTests: XCTestCase {
     }
 
     func testFailedDiscoveryDoesNotCacheFailure() async {
+        AgentACPModelRegistry.shared.test_reset(providerID: .devin)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .devin) }
+        AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [AgentModelOption(rawValue: "swe-2-high", displayName: "SWE-2", description: nil, isDefault: true)],
+                currentModelRaw: "swe-2-high"
+            ),
+            for: .devin
+        )
         final class RunCounter: @unchecked Sendable {
             var value = 0
         }
@@ -1006,6 +1152,7 @@ final class DevinPermissionLevelTests: XCTestCase {
             return XCTFail("expected uncached failures, got \(first) then \(second)")
         }
         XCTAssertEqual(runs.value, 2)
+        XCTAssertNil(AgentACPModelRegistry.shared.currentSnapshot(for: .devin))
     }
 
     func testStaleDiscoveryCancelDoesNotCancelALaterAttempt() async {

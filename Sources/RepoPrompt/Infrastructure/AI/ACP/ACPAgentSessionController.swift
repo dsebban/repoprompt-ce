@@ -277,6 +277,7 @@ actor ACPAgentSessionController {
     private var eventStreamFinished = false
     private var loadSessionSupported = false
     private var discoveredSessionModels: ACPDiscoveredSessionModels?
+    private var automaticThinkingToRestore: ACPModelParameterSelection?
     private var sessionModelConfigOptionID: String?
     /// True when the provider conforms to `ACPDirectSessionModelProvider` and the session
     /// advertised no modern `configOptions` model selector, so model application flows
@@ -1140,6 +1141,77 @@ actor ACPAgentSessionController {
         return .init(applied: applied, alreadyCurrent: alreadyCurrent, skipped: [])
     }
 
+    /// Restore an earlier turn's temporary choice before applying the next turn's model and manual pins.
+    func restoreAutomaticThinkingIfNeeded() async throws {
+        try await configurationMutationMutex.withLock { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await restoreAutomaticThinkingSerialized()
+        }
+    }
+
+    private func restoreAutomaticThinkingSerialized() async throws {
+        guard let restore = automaticThinkingToRestore,
+              let current = currentDevinThinkingSelection() else { return }
+        guard current.identity == restore.identity else {
+            automaticThinkingToRestore = nil
+            return
+        }
+        let report = try await applySessionModelParameterSelectionsSerialized([restore])
+        try report.validateNoSkippedSelections()
+        automaticThinkingToRestore = nil
+    }
+
+    /// Fails unless the turn-scoped choice still matches the live Devin thinking selector.
+    func applyAutomaticThinking(_ selection: ACPModelParameterSelection) async throws {
+        try await configurationMutationMutex.withLock { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await applyAutomaticThinkingSerialized(selection)
+        }
+    }
+
+    private func applyAutomaticThinkingSerialized(_ selection: ACPModelParameterSelection) async throws {
+        guard provider.providerID == .devin, selection.providerID == .devin,
+              selection.kind == .thinking, automaticThinkingToRestore == nil,
+              let current = currentDevinThinkingSelection(),
+              selection.identity == current.identity,
+              selection.configID == current.configID,
+              let parameterSet = discoveredSessionModels?.modelParameterSets.first(where: {
+                  ACPModelParameterIdentity.canonicalBaseModelRaw($0.baseModelRaw, providerID: .devin)
+                      == ACPModelParameterIdentity.canonicalBaseModelRaw(current.baseModelRaw, providerID: .devin)
+              }),
+              let definition = parameterSet.definition(kind: .thinking),
+              definition.choice(matching: selection.valueRaw) != nil,
+              definition.choice(matching: current.valueRaw) != nil
+        else {
+            throw ControllerError.requestFailed("Automatic Devin thinking no longer matches the live session configuration.")
+        }
+        guard current.valueRaw != selection.valueRaw else { return }
+        automaticThinkingToRestore = current
+        let report = try await applySessionModelParameterSelectionsSerialized([selection])
+        try report.validateNoSkippedSelections()
+    }
+
+    private func currentDevinThinkingSelection() -> ACPModelParameterSelection? {
+        guard provider.providerID == .devin,
+              let models = discoveredSessionModels,
+              let model = models.currentModelRaw,
+              models.contains(rawModel: model)
+        else { return nil }
+        let identity = ACPModelParameterIdentity.canonicalBaseModelRaw(model, providerID: .devin)
+        let matches = models.modelParameterSets.filter {
+            ACPModelParameterIdentity.canonicalBaseModelRaw($0.baseModelRaw, providerID: .devin) == identity
+        }
+        guard matches.count == 1, let set = matches.first,
+              let definition = set.definition(kind: .thinking),
+              let choice = definition.choice(matching: definition.currentValueRaw),
+              !definition.configID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        return ACPModelParameterSelection(
+            providerID: .devin, baseModelRaw: set.baseModelRaw, kind: .thinking,
+            configID: definition.configID, valueRaw: choice.rawValue
+        )
+    }
+
     private func setSessionModeSerialized(_ modeID: String) async throws {
         guard let sessionID else {
             throw ControllerError.invalidState(expected: "sessionOpen or promptRunning", actual: state)
@@ -1531,6 +1603,7 @@ actor ACPAgentSessionController {
         processWaitTask = nil
         process = nil
         discoveredSessionModels = nil
+        automaticThinkingToRestore = nil
         sessionModelConfigOptionID = nil
         sessionModelDirectSelectionSupported = false
         sessionModelSnapshotHasLiveAuthority = false
@@ -2585,6 +2658,7 @@ actor ACPAgentSessionController {
 
     private func beginOpeningSessionConfiguration() {
         discoveredSessionModels = nil
+        automaticThinkingToRestore = nil
         sessionModelConfigOptionID = nil
         sessionModelDirectSelectionSupported = false
         sessionModelSnapshotHasLiveAuthority = false

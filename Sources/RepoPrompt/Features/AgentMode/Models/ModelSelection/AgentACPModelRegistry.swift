@@ -41,6 +41,14 @@ final class AgentACPModelRegistry {
         return true
     }
 
+    /// Withdraw current-process routing authority without erasing cached picker metadata.
+    func invalidateLiveSnapshot(for providerID: ACPProviderID) {
+        lock.lock()
+        liveSnapshotsByProvider.removeValue(forKey: providerID)
+        liveSignaturesByProvider.removeValue(forKey: providerID)
+        lock.unlock()
+    }
+
     func currentSnapshot(for providerID: ACPProviderID) -> ACPDiscoveredSessionModels? {
         lock.lock()
         defer { lock.unlock() }

@@ -849,12 +849,26 @@ final class ACPIntegratedAgentModeRunner {
             let normalizedText = displayText(for: normalizedError)
             log("controller.prompt failed raw=\(String(describing: error)) normalized=\(normalizedText)", runID: runID)
             let outcome = await consumeTask.value
+            await restoreAutomaticThinkingAfterPrompt(controller, runID: runID)
             return .failed(errorText: promptFailureErrorText(outcome: outcome, fallback: normalizedText))
         }
 
         let outcome = await consumeTask.value
+        await restoreAutomaticThinkingAfterPrompt(controller, runID: runID)
         log("event consumer completed \(outcome.debugDescription)", runID: runID)
         return outcome
+    }
+
+    private func restoreAutomaticThinkingAfterPrompt(
+        _ controller: ACPAgentSessionController,
+        runID: UUID
+    ) async {
+        do {
+            try await controller.restoreAutomaticThinkingIfNeeded()
+        } catch {
+            // Keep the controller's restoration obligation for a reusable follow-up.
+            log("automatic Devin thinking restoration deferred: \(displayText(for: error))", runID: runID)
+        }
     }
 
     private func applyProviderSessionIdentity(
@@ -905,14 +919,31 @@ final class ACPIntegratedAgentModeRunner {
         return try await Self.performConfigurationSequenceIfCurrent(
             isCurrent: isCurrent,
             operations: [
+                {
+                    try await controller.restoreAutomaticThinkingIfNeeded()
+                },
                 { [self] in
                     try await applyExplicitSelectedModelIfNeeded(runRequest, controller: controller, runID: runID)
+                },
+                {
+                    // A provider-side model change may have preceded this run. Restore after
+                    // selecting the requested model as well as before switching away from it.
+                    try await controller.restoreAutomaticThinkingIfNeeded()
                 },
                 {
                     let report = try await controller.applySessionModelParameterSelections(
                         runRequest.modelParameterSelections
                     )
                     try report.validateNoSkippedSelections()
+                },
+                {
+                    if let automatic = runRequest.automaticThinkingSelection,
+                       GlobalSettingsStore.shared.autoEffortEnabled(),
+                       session.selectedAgent == .devin,
+                       session.selectedModelRaw.caseInsensitiveCompare(automatic.baseModelRaw) == .orderedSame
+                    {
+                        try await controller.applyAutomaticThinking(automatic)
+                    }
                 },
                 {
                     await controller.setAutoApproveAllToolPermissions(

@@ -1,4 +1,4 @@
-@testable import RepoPromptApp
+@_spi(TestSupport) @testable import RepoPromptApp
 import XCTest
 
 @MainActor
@@ -14,6 +14,25 @@ final class RouterSettingsViewModelTests: XCTestCase {
         XCTAssertGreaterThan(fixture.viewModel.distinctTargetCount, 1)
         XCTAssertTrue(fixture.viewModel.availableProviders.contains(.codexExec))
         XCTAssertTrue(fixture.viewModel.availableProviders.contains(.claudeCode))
+    }
+
+    func testDevinOnlyNeedsExplicitRouterProviderPreference() async throws {
+        AgentACPModelRegistry.shared.test_reset(providerID: .devin)
+        defer { AgentACPModelRegistry.shared.test_reset(providerID: .devin) }
+        AgentACPModelRegistry.shared.updateDiscoveredModels(
+            ACPDiscoveredSessionModels(
+                options: [AgentModelOption(rawValue: "swe-2-high", displayName: "SWE-2", description: nil, isDefault: true)],
+                currentModelRaw: "swe-2-high"
+            ),
+            for: .devin
+        )
+        let fixture = try makeFixture(availability: .init(claudeCodeAvailable: false, codexAvailable: false, devinAvailable: true))
+        await fixture.viewModel.refresh()
+        XCTAssertTrue(fixture.viewModel.availableProviders.contains(.devin))
+        XCTAssertFalse(fixture.viewModel.policyCanBuildCandidates)
+        fixture.viewModel.setProviderLimit(.devin, scope: .primarySession)
+        await fixture.viewModel.refresh()
+        XCTAssertTrue(fixture.viewModel.policyCanBuildCandidates)
     }
 
     func testSelectingBackendImmediatelyClearsOldReadinessAndPreservesConsent() async throws {

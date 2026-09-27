@@ -369,7 +369,7 @@ struct AgentExploreMCPToolService {
                         "entryPoint": "agent_explore.start",
                         "provider": routed.agentRaw,
                         "model": routed.modelRaw,
-                        "effort": routed.reasoningEffortRaw ?? "provider-default"
+                        "effort": AgentTaskRoutingModelProfileCatalog.selectedEffortRaw(for: routed) ?? "provider-default"
                     ])
                 #endif
             }
