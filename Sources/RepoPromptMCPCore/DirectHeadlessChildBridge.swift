@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import RepoPromptDomainRuntime
 
@@ -103,8 +102,10 @@ package enum DirectHeadlessChildBridge {
     private static func connect(path: String) throws -> Int32 {
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw BridgeError.socket(errno: errno) }
-        var noSigPipe: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #if canImport(Darwin)
+            var noSigPipe: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #endif
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let bytes = path.utf8CString

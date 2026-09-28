@@ -959,8 +959,10 @@ actor BootstrapSocketProxy {
         }
 
         // Disable SIGPIPE
-        var noSigPipe: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #if canImport(Darwin)
+            var noSigPipe: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #endif
 
         // Set up socket address
         var addr = sockaddr_un()
@@ -2053,48 +2055,52 @@ package actor MCPService: Service {
     /// Sets up a DispatchSource watcher on the kill signals directory.
     /// When the app writes a kill signal file for this session, the watcher triggers.
     private func setupKillSignalWatcher() {
-        let signalsDir = CLIKillSignal.signalsDirectory
-        let fm = FileManager.default
+        #if canImport(Darwin)
+            let signalsDir = CLIKillSignal.signalsDirectory
+            let fm = FileManager.default
 
-        // Ensure directory exists
-        try? fm.createDirectory(at: signalsDir, withIntermediateDirectories: true)
+            // Ensure directory exists
+            try? fm.createDirectory(at: signalsDir, withIntermediateDirectories: true)
 
-        let fd = open(signalsDir.path, O_EVTONLY)
-        guard fd >= 0 else {
-            log.warning("Failed to open kill signals directory for watching")
-            return
-        }
-        do {
-            try POSIXDescriptorSupport.setCloseOnExec(fd)
-        } catch {
-            close(fd)
-            log.warning("Failed to configure kill signals directory watcher descriptor: \(error)")
-            return
-        }
-        killSignalFD = fd
+            let fd = open(signalsDir.path, O_EVTONLY)
+            guard fd >= 0 else {
+                log.warning("Failed to open kill signals directory for watching")
+                return
+            }
+            do {
+                try POSIXDescriptorSupport.setCloseOnExec(fd)
+            } catch {
+                close(fd)
+                log.warning("Failed to configure kill signals directory watcher descriptor: \(error)")
+                return
+            }
+            killSignalFD = fd
 
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd,
-            eventMask: [.write, .rename],
-            queue: .global(qos: .utility)
-        )
+            let source = DispatchSource.makeFileSystemObjectSource(
+                fileDescriptor: fd,
+                eventMask: [.write, .rename],
+                queue: .global(qos: .utility)
+            )
 
-        source.setEventHandler { [weak self, sessionToken] in
-            // Check if our kill signal file exists
-            if let signal = CLIKillSignal.readKillSignal(forSessionToken: sessionToken) {
-                Task { [weak self] in
-                    await self?.handleKillSignal(signal)
+            source.setEventHandler { [weak self, sessionToken] in
+                // Check if our kill signal file exists
+                if let signal = CLIKillSignal.readKillSignal(forSessionToken: sessionToken) {
+                    Task { [weak self] in
+                        await self?.handleKillSignal(signal)
+                    }
                 }
             }
-        }
 
-        source.setCancelHandler {
-            close(fd)
-        }
+            source.setCancelHandler {
+                close(fd)
+            }
 
-        killSignalSource = source
-        source.resume()
-        log.debug("Kill signal watcher set up for session \(sessionToken.prefix(8))...")
+            killSignalSource = source
+            source.resume()
+            log.debug("Kill signal watcher set up for session \(sessionToken.prefix(8))...")
+        #else
+            log.debug("Kill signal watcher requires Darwin vnode sources; skipped")
+        #endif
     }
 
     /// Called when a kill signal is detected.

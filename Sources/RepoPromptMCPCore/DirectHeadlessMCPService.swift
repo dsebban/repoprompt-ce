@@ -1,5 +1,4 @@
 import CryptoKit
-import Darwin
 import Foundation
 import Logging
 import MCP
@@ -498,9 +497,16 @@ package actor DirectHeadlessMCPService {
     /// Binds the kernel-observed parent PID to the executable identity currently on disk.
     /// Display names and initialize metadata never participate in mutation authority.
     nonisolated static func verifiedExecutableFingerprint(processID: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        let path = URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
+        #if canImport(Darwin)
+            var buffer = [CChar](repeating: 0, count: 4096)
+            guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+            let path = URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
+        #else
+            // A deleted image reads as "<path> (deleted)", whose lstat below fails closed.
+            let procExe = "/proc/\(processID)/exe"
+            guard let executable = try? FileManager.default.destinationOfSymbolicLink(atPath: procExe) else { return nil }
+            let path = URL(fileURLWithPath: executable).standardizedFileURL.path
+        #endif
         var info = stat()
         guard lstat(path, &info) == 0 else { return nil }
         let material = "\(path)|\(info.st_dev)|\(info.st_ino)"

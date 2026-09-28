@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import Logging
 import MCP
@@ -62,16 +61,18 @@ actor MCPStdioServerTransport: Transport {
     func connect() throws {
         guard readTask == nil else { return }
         signal(SIGPIPE, SIG_IGN)
-        var noSigPipe: Int32 = 1
-        guard setsockopt(
-            stdoutFD,
-            SOL_SOCKET,
-            SO_NOSIGPIPE,
-            &noSigPipe,
-            socklen_t(MemoryLayout<Int32>.size)
-        ) == 0 || errno == ENOTSOCK else {
-            throw TerminalError.stdoutWrite(errno: errno, bytesWritten: 0, totalBytes: 0)
-        }
+        #if canImport(Darwin)
+            var noSigPipe: Int32 = 1
+            guard setsockopt(
+                stdoutFD,
+                SOL_SOCKET,
+                SO_NOSIGPIPE,
+                &noSigPipe,
+                socklen_t(MemoryLayout<Int32>.size)
+            ) == 0 || errno == ENOTSOCK else {
+                throw TerminalError.stdoutWrite(errno: errno, bytesWritten: 0, totalBytes: 0)
+            }
+        #endif
         let flags = fcntl(stdoutFD, F_GETFL)
         guard flags >= 0, fcntl(stdoutFD, F_SETFL, flags | O_NONBLOCK) == 0 else {
             throw TerminalError.stdoutWrite(errno: errno, bytesWritten: 0, totalBytes: 0)
