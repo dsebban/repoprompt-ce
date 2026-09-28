@@ -125,10 +125,21 @@ actor GitService {
         case repositoryLayout = "repository_layout"
     }
 
-    enum GitProcessCaptureError: Error, Equatable {
+    enum GitProcessCaptureError: LocalizedError, Equatable {
         case stdoutByteLimitExceeded
         case stderrByteLimitExceeded
         case timedOut
+
+        var errorDescription: String? {
+            switch self {
+            case .stdoutByteLimitExceeded:
+                "Git output exceeded the capture limit. Narrow the request (for example a path, or detail \"files\") and retry."
+            case .stderrByteLimitExceeded:
+                "Git error output exceeded the capture limit. Narrow the request and retry."
+            case .timedOut:
+                "Git timed out: the git process produced no output within its activity timeout and was stopped. Narrow the request (for example a path, or detail \"files\") and retry."
+            }
+        }
     }
 
     private enum GitProcessRepositoryBinding {
