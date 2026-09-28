@@ -676,6 +676,7 @@ struct WorkspaceCodemapBindingEngineCounters: Equatable {
     var publishedArtifactLocatorCASHits: UInt64 = 0
     var publishedArtifactLookupMisses: UInt64 = 0
     #if DEBUG
+        var queuedRequestSchedulingPasses: UInt64 = 0
         var publishedArtifactPostLookupCurrentnessRejections: UInt64 = 0
         var graphIndexPageManifestLoads: UInt64 = 0
         var graphIndexPageManifestSubmissions: UInt64 = 0
