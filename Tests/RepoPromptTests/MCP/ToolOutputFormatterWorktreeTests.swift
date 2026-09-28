@@ -371,6 +371,65 @@ final class ToolOutputFormatterWorktreeTests: XCTestCase {
         )
     }
 
+    /// Incomplete accounting sums only already-counted inputs, so a non-zero partial sum must be
+    /// labelled as a lower bound and uncounted files must not read as "0 tokens".
+    func testIncompletePartialTokenTotalsRenderAsLowerBoundWithPendingFiles() throws {
+        let accounting = ToolResultDTOs.TokenAccountingDTO(
+            status: "incomplete",
+            source: "bound_tab_cached_state",
+            refreshPending: true,
+            incompleteComponents: ["files", "file_tree"]
+        )
+        func file(_ name: String, tokens: Int) -> ToolResultDTOs.SelectedFileInfo {
+            .init(
+                path: "Project/Sources/\(name)",
+                tokens: tokens,
+                renderMode: "full",
+                ranges: nil,
+                isAuto: false,
+                codemapOrigin: nil,
+                copyPreset: nil,
+                rootPath: "Project",
+                pathWithinRoot: "Sources/\(name)"
+            )
+        }
+        let dto = ToolResultDTOs.SelectionReply(
+            files: [file("Loaded.swift", tokens: 3095), file("Unloaded.swift", tokens: 0)],
+            totalTokens: 3095,
+            status: "ok",
+            tokenStats: .init(total: 3095, files: 3095),
+            tokenAccounting: accounting
+        )
+
+        let text = try Self.onlyText(ToolOutputFormatter.formatManageSelection(args: [:], value: Self.value(dto)))
+        XCTAssertTrue(text.contains("**≥3,095 total tokens** (lower bound; token accounting incomplete)"), text)
+        XCTAssertFalse(text.contains("**3,095 total tokens**"), text)
+        XCTAssertTrue(text.contains("Loaded.swift — 3,095 tokens (full)"), text)
+        XCTAssertTrue(text.contains("Unloaded.swift — tokens pending (full)"), text)
+        XCTAssertFalse(text.contains("Unloaded.swift — 0 tokens"), text)
+
+        let embedded = ToolOutputFormatter.formatSelectionReplyToString(dto)
+        XCTAssertTrue(embedded.contains("- Total tokens: ≥3095 (Auto view; lower bound)"), embedded)
+
+        let context = ToolResultDTOs.PromptContextDTO(
+            prompt: "",
+            selection: nil,
+            fileBlocks: nil,
+            codeStructure: nil,
+            fileTree: nil,
+            tokenStats: .init(total: 4414, files: 3095, prompt: 1319, filesContent: 3095),
+            userTokenStats: nil,
+            tokenStatsNote: nil,
+            tokenAccounting: accounting,
+            copyPreset: nil,
+            copyPresets: nil,
+            worktreeScope: nil
+        )
+        let contextText = try Self.onlyText(ToolOutputFormatter.formatPromptState(value: Self.value(context)))
+        XCTAssertTrue(contextText.contains("**≥4,414 total tokens** (lower bound; token accounting incomplete)"), contextText)
+        XCTAssertTrue(contextText.contains("- **Selection**: ≥3,095"), contextText)
+    }
+
     func testAgentRunApprovalGuidanceUsesCopyableCanonicalResponseCommand() throws {
         let sessionID = "11111111-1111-1111-1111-111111111111"
         let interactionID = "22222222-2222-2222-2222-222222222222"

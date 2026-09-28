@@ -2705,10 +2705,12 @@ extension ToolOutputFormatter {
                     fileCount: selectionCount,
                     accounting: ctx.tokenAccounting
                 )
+                let lowerBound = tokenAccountingIsLowerBound(ctx.tokenAccounting)
+                let boundPrefix = lowerBound ? "≥" : ""
                 if totalPending {
                     out.append("**Token accounting pending**")
                 } else {
-                    out.append("**\(formatTokenCount(ts.total)) total tokens**")
+                    out.append(totalTokensHeadline(ts.total, lowerBound: lowerBound))
                 }
                 out.append("")
 
@@ -2717,7 +2719,7 @@ extension ToolOutputFormatter {
                 if selectionPending {
                     out.append("- **Selection**: pending")
                 } else if hasFilesBreakdown {
-                    out.append("- **Selection**: \(formatTokenCount(ts.files))")
+                    out.append("- **Selection**: \(boundPrefix)\(formatTokenCount(ts.files))")
                     if let filesContent = ts.filesContent, filesContent > 0 {
                         out.append("  - Files: \(formatTokenCount(filesContent))")
                     }
@@ -2725,7 +2727,7 @@ extension ToolOutputFormatter {
                         out.append("  - Codemaps: \(formatTokenCount(codemaps))")
                     }
                 } else if ts.files > 0 {
-                    out.append("- **Selection**: \(formatTokenCount(ts.files))")
+                    out.append("- **Selection**: \(boundPrefix)\(formatTokenCount(ts.files))")
                 }
 
                 // Other workspace components
@@ -2785,7 +2787,8 @@ extension ToolOutputFormatter {
             if let sel = ctx.selection, !sel.files.isEmpty {
                 out.append("")
                 out.append("### Selection")
-                out.append("\(sel.files.count) files \u{2022} \(formatTokenCount(sel.totalTokens)) tokens (Auto view)")
+                let selBound = tokenAccountingIsLowerBound(ctx.tokenAccounting) ? "≥" : ""
+                out.append("\(sel.files.count) files \u{2022} \(selBound)\(formatTokenCount(sel.totalTokens)) tokens (Auto view)")
 
                 // Copy preset effect (only if it differs from auto)
                 if let copyMode = sel.userCopyCodeMapUsage, copyMode != "auto" {
@@ -2809,7 +2812,10 @@ extension ToolOutputFormatter {
                 }
 
                 out.append("")
-                out.append(contentsOf: selectionFolderGroupedLines(files: sel.files))
+                out.append(contentsOf: selectionFolderGroupedLines(
+                    files: sel.files,
+                    fileTokensPending: fileTokensArePending(ctx.tokenAccounting)
+                ))
             } else if let slices = ctx.selection?.fileSlices, !slices.isEmpty {
                 out.append("")
                 out.append("### Selection Slices")
@@ -3504,6 +3510,23 @@ extension ToolOutputFormatter {
         return accounting.refreshPending && pendingSources.contains(accounting.source)
     }
 
+    /// Incomplete accounting sums only the inputs already counted (uncounted files contribute 0),
+    /// so its totals are lower bounds rather than final values.
+    private static func tokenAccountingIsLowerBound(_ accounting: ToolResultDTOs.TokenAccountingDTO?) -> Bool {
+        guard let accounting else { return false }
+        return accounting.status == "incomplete" || accounting.incompleteComponents?.isEmpty == false
+    }
+
+    private static func fileTokensArePending(_ accounting: ToolResultDTOs.TokenAccountingDTO?) -> Bool {
+        accounting?.incompleteComponents?.contains("files") == true
+    }
+
+    private static func totalTokensHeadline(_ tokens: Int, lowerBound: Bool) -> String {
+        lowerBound
+            ? "**≥\(formatTokenCount(tokens)) total tokens** (lower bound; token accounting incomplete)"
+            : "**\(formatTokenCount(tokens)) total tokens**"
+    }
+
     /// Formats a SelectionReply to a string for embedding in other responses
     static func formatSelectionReplyToString(_ dto: ToolResultDTOs.SelectionReply) -> String {
         var out: [String] = []
@@ -3528,6 +3551,8 @@ extension ToolOutputFormatter {
                 accounting: dto.tokenAccounting
             ) {
                 out.append("- Total tokens: pending (Auto view)")
+            } else if tokenAccountingIsLowerBound(dto.tokenAccounting) {
+                out.append("- Total tokens: ≥\(totalTokens) (Auto view; lower bound)")
             } else {
                 out.append("- Total tokens: \(totalTokens) (Auto view)")
             }
@@ -3546,6 +3571,8 @@ extension ToolOutputFormatter {
                     accounting: dto.tokenAccounting
                 ) {
                     out.append("- Total tokens: pending (Auto view)")
+                } else if tokenAccountingIsLowerBound(dto.tokenAccounting) {
+                    out.append("- Total tokens: ≥\(total) (Auto view; lower bound)")
                 } else {
                     out.append("- Total tokens: \(total) (Auto view)")
                 }
@@ -3578,7 +3605,11 @@ extension ToolOutputFormatter {
         if let files = dto.files, !files.isEmpty {
             out.append("")
             out.append("### Files")
-            out.append(contentsOf: selectionFolderGroupedLines(files: files, rangeLookup: rangeLookup))
+            out.append(contentsOf: selectionFolderGroupedLines(
+                files: files,
+                rangeLookup: rangeLookup,
+                fileTokensPending: fileTokensArePending(dto.tokenAccounting)
+            ))
         } else if let slices = dto.fileSlices, !slices.isEmpty {
             out.append("")
             out.append("### Selection Slices")
@@ -3623,7 +3654,7 @@ extension ToolOutputFormatter {
             if totalPending {
                 out.append("**Token accounting pending**")
             } else {
-                out.append("**\(formatTokenCount(actualTotal)) total tokens**")
+                out.append(totalTokensHeadline(actualTotal, lowerBound: tokenAccountingIsLowerBound(dto.tokenAccounting)))
             }
             if let accounting = dto.tokenAccounting {
                 out.append("Token accounting: \(tokenAccountingSummaryText(accounting))")
@@ -3718,7 +3749,11 @@ extension ToolOutputFormatter {
             // Folder-grouped file listing
             if let files = dto.files, !files.isEmpty {
                 out.append("")
-                out.append(contentsOf: selectionFolderGroupedLines(files: files, rangeLookup: rangeLookup))
+                out.append(contentsOf: selectionFolderGroupedLines(
+                    files: files,
+                    rangeLookup: rangeLookup,
+                    fileTokensPending: fileTokensArePending(dto.tokenAccounting)
+                ))
             } else if let slices = dto.fileSlices, !slices.isEmpty {
                 out.append("")
                 out.append("### Selection Slices")
@@ -4144,11 +4179,16 @@ extension ToolOutputFormatter {
     private static func renderSelectionTree(
         nodes: [PathTreeNode<ToolResultDTOs.SelectedFileInfo>],
         prefix: String = "",
-        rangeLookup: [String: [ToolResultDTOs.LineRangeDTO]] = [:]
+        rangeLookup: [String: [ToolResultDTOs.LineRangeDTO]] = [:],
+        fileTokensPending: Bool = false
     ) -> [String] {
         renderPathTree(nodes: nodes, prefix: prefix, fileLine: { info, name in
             let renderDesc = fileRenderDescription(info: info, fallbackRanges: rangeLookup[info.path])
-            var line = "\(name) \u{2014} \(formatTokenCount(info.tokens)) tokens (\(renderDesc))"
+            // With `files` accounting incomplete, a zero-token full/slice entry is uncounted, not empty.
+            let tokensText = fileTokensPending && info.tokens == 0 && info.renderMode != "codemap"
+                ? "tokens pending"
+                : "\(formatTokenCount(info.tokens)) tokens"
+            var line = "\(name) \u{2014} \(tokensText) (\(renderDesc))"
 
             // Add inline copy preset if different
             if let copyPreset = info.copyPreset {
@@ -4165,7 +4205,8 @@ extension ToolOutputFormatter {
 
     private static func selectionMarkdownTreeLines(
         files: [ToolResultDTOs.SelectedFileInfo],
-        rangeLookup: [String: [ToolResultDTOs.LineRangeDTO]]
+        rangeLookup: [String: [ToolResultDTOs.LineRangeDTO]],
+        fileTokensPending: Bool
     ) -> [String] {
         if let rootGroups = selectionRootGroups(from: files) {
             var lines: [String] = []
@@ -4176,7 +4217,7 @@ extension ToolOutputFormatter {
                     path: { normalizedPathWithinRoot($0.pathWithinRoot ?? $0.path) },
                     forcedPrefix: ""
                 )
-                lines.append(contentsOf: renderSelectionTree(nodes: roots, rangeLookup: rangeLookup))
+                lines.append(contentsOf: renderSelectionTree(nodes: roots, rangeLookup: rangeLookup, fileTokensPending: fileTokensPending))
             }
             return lines
         }
@@ -4186,14 +4227,15 @@ extension ToolOutputFormatter {
         if !prefix.isEmpty {
             lines.append(prefix == "/" ? "/" : "\(prefix)/")
         }
-        lines.append(contentsOf: renderSelectionTree(nodes: roots, rangeLookup: rangeLookup))
+        lines.append(contentsOf: renderSelectionTree(nodes: roots, rangeLookup: rangeLookup, fileTokensPending: fileTokensPending))
         return lines
     }
 
     /// Builds folder-grouped file listing lines with tree structure, split into Selected Files and Codemaps sections
     private static func selectionFolderGroupedLines(
         files: [ToolResultDTOs.SelectedFileInfo],
-        rangeLookup: [String: [ToolResultDTOs.LineRangeDTO]] = [:]
+        rangeLookup: [String: [ToolResultDTOs.LineRangeDTO]] = [:],
+        fileTokensPending: Bool = false
     ) -> [String] {
         guard !files.isEmpty else { return [] }
 
@@ -4232,7 +4274,7 @@ extension ToolOutputFormatter {
         // Selected Files section
         if !selectedFiles.isEmpty {
             lines.append("### Selected Files")
-            lines.append(contentsOf: selectionMarkdownTreeLines(files: selectedFiles, rangeLookup: rangeLookup))
+            lines.append(contentsOf: selectionMarkdownTreeLines(files: selectedFiles, rangeLookup: rangeLookup, fileTokensPending: fileTokensPending))
         }
 
         // Codemaps section
@@ -4241,7 +4283,7 @@ extension ToolOutputFormatter {
                 lines.append("") // Blank line between sections
             }
             lines.append("### Codemaps")
-            lines.append(contentsOf: selectionMarkdownTreeLines(files: codemapFiles, rangeLookup: rangeLookup))
+            lines.append(contentsOf: selectionMarkdownTreeLines(files: codemapFiles, rangeLookup: rangeLookup, fileTokensPending: fileTokensPending))
         }
 
         return lines
