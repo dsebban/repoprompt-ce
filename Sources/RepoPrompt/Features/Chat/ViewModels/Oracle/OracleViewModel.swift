@@ -3435,7 +3435,7 @@ class OracleViewModel: ObservableObject {
                     let overrideContext = oraclePromptConfiguration?.promptContext
                         ?? promptViewModel.resolvedPromptContext(from: chatPreset)
 
-                    aiMessage = await promptViewModel.packagePrompt(
+                    aiMessage = try await promptViewModel.packagePrompt(
                         conversation: conversation,
                         overrideModel: model,
                         overridePromptConfig: overrideContext,
@@ -3446,7 +3446,9 @@ class OracleViewModel: ObservableObject {
                         gitBaseOverride: gitBaseOverride,
                         selectionOverride: selectionOverride,
                         lookupContextOverride: lookupContextOverride,
-                        reviewGitContextOverride: reviewGitContextOverride
+                        reviewGitContextOverride: reviewGitContextOverride,
+                        // Oracle prompts must never silently omit explicitly selected files.
+                        selectedFileContentPolicy: oraclePromptConfiguration == nil ? .bestEffort : .required
                     )
                 }
                 if !oracleTransientImages.isEmpty {
@@ -3955,6 +3957,11 @@ class OracleViewModel: ObservableObject {
     }
 
     private func userFriendlyErrorMessage(for error: Error, tokenCount: Int = 0) -> String {
+        if let unavailable = error as? PromptSelectedFileContentUnavailableError,
+           let description = unavailable.errorDescription
+        {
+            return description
+        }
         guard let err = error as NSError?, err.domain == NSURLErrorDomain else {
             // Check if this is an OpenAI request too large error
             if let openAIError = error as? CustomOpenAIProviderError {
