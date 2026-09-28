@@ -249,3 +249,44 @@ let package = Package(
     ],
     swiftLanguageModes: [.v5]
 )
+
+#if os(Linux)
+    // Linux builds only the headless `repoprompt-mcp` product. The GUI app graph (Sparkle, Sentry,
+    // and other macOS-only packages) cannot resolve or build there, and swift-crypto stands in for
+    // CryptoKit through the Linux-only `CryptoKit` re-export target.
+    let linuxAppOnlyTargets: Set = ["RepoPrompt", "RepoPromptApp", "Sparkle", "RepoPromptTests"]
+    let linuxAppOnlyPackages: Set = [
+        "KeyboardShortcuts", "swift-markdown-ui", "swift-markdown", "SwiftAnthropic", "SwiftOpenAI",
+        "UniversalCharsetDetection", "JSONSchema", "ontology", "sentry-cocoa", "RepoPromptAgentProviders"
+    ]
+    package.products.removeAll { $0.name == "RepoPrompt" }
+    package.targets.removeAll { linuxAppOnlyTargets.contains($0.name) }
+    package.dependencies.removeAll { dependency in
+        let location: String
+        switch dependency.kind {
+        case let .sourceControl(_, url, _): location = url
+        case let .fileSystem(_, path): location = path
+        default: return false
+        }
+        let name = location.split(separator: "/").last.map { String($0) } ?? ""
+        return linuxAppOnlyPackages.contains(name.replacingOccurrences(of: ".git", with: ""))
+    }
+
+    package.dependencies.append(.package(url: "https://github.com/apple/swift-crypto.git", exact: "4.5.0"))
+    package.targets.append(.target(
+        name: "CryptoKit",
+        dependencies: [.product(name: "Crypto", package: "swift-crypto")],
+        path: "Sources/LinuxCryptoKit"
+    ))
+    for target in package.targets {
+        switch target.name {
+        case "RepoPromptShared", "RepoPromptDomainRuntime", "RepoPromptCodeMapCore", "RepoPromptMCP", "RepoPromptCodeMapCoreTests":
+            target.dependencies.append("CryptoKit")
+        case "RepoPromptC":
+            // glibc exposes strcasestr, renameat2, and struct ucred only with _GNU_SOURCE.
+            target.cSettings = (target.cSettings ?? []) + [.define("_GNU_SOURCE")]
+        default:
+            break
+        }
+    }
+#endif
