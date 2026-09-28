@@ -2183,7 +2183,7 @@ struct CLIProvidersSettingsView: View {
             VStack(alignment: .leading, spacing: 12) {
                 Text(
                     isInstalled
-                        ? "Devin owns authentication and internal tools; RepoPrompt controls interactive launch permissions."
+                        ? "Devin owns authentication and internal tools; RepoPrompt applies the Devin permission level to Agent Mode, headless runs, and Oracle."
                         : "Install and authenticate Devin, then ensure `devin acp` is available."
                 )
                 .font(.caption)

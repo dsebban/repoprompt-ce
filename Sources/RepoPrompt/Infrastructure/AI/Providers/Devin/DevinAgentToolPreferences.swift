@@ -35,7 +35,8 @@ enum DevinAgentToolPreferences {
             case .smart:
                 "Use Devin's Smart session mode. Runs stop before prompting if this account does not offer it."
             case .fullApproval:
-                "Use Devin's Bypass session mode. Runs stop before prompting if this account does not offer it."
+                "Use Devin's Bypass session mode; Oracle one-shot runs use `--permission-mode dangerous`. "
+                    + "Runs stop before prompting if this account does not offer it."
             }
         }
 
@@ -70,6 +71,17 @@ enum DevinAgentToolPreferences {
                 "smart"
             case .fullApproval:
                 "bypass"
+            }
+        }
+
+        /// `--permission-mode` for the one-shot CLI (Oracle), which cannot surface prompts: only an
+        /// explicit Full Approval escalates past the managed `auto` floor.
+        var unattendedCLIPermissionMode: String {
+            switch self {
+            case .fullApproval:
+                "dangerous"
+            case .providerDefault, .normal, .acceptEdits, .smart:
+                "auto"
             }
         }
 
@@ -126,6 +138,13 @@ enum DevinAgentToolPreferences {
             return document.permissionLevel()
         }
         return PermissionLevel.from(rawValue: defaults.string(forKey: permissionLevelKey))
+    }
+
+    static func unattendedLaunchPermissionMode(
+        defaults: UserDefaults = .standard,
+        secureStore: AgentPermissionSecureStore? = nil
+    ) -> String {
+        permissionLevel(defaults: defaults, secureStore: secureStore).unattendedCLIPermissionMode
     }
 
     static func setPermissionLevel(

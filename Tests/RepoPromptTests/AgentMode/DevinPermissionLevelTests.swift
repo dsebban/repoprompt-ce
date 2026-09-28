@@ -581,6 +581,35 @@ final class DevinPermissionLevelTests: XCTestCase {
                 "-p"
             ]
         )
+        XCTAssertEqual(
+            DevinCLIProvider.test_arguments(
+                modelName: nil,
+                promptFilePath: "/tmp/prompt.md",
+                permissionMode: DevinAgentToolPreferences.PermissionLevel.fullApproval.unattendedCLIPermissionMode
+            ),
+            [
+                "--respect-workspace-trust", "false",
+                "--permission-mode", "dangerous",
+                "--prompt-file", "/tmp/prompt.md",
+                "-p"
+            ]
+        )
+    }
+
+    func testOracleOneShotPermissionModeEscalatesOnlyForFullApproval() throws {
+        for level in DevinAgentToolPreferences.PermissionLevel.allCases {
+            XCTAssertEqual(
+                level.unattendedCLIPermissionMode,
+                level == .fullApproval ? "dangerous" : "auto",
+                "\(level)"
+            )
+        }
+        let suiteName = "DevinOneShotPermissionModeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        XCTAssertEqual(DevinAgentToolPreferences.unattendedLaunchPermissionMode(defaults: defaults), "auto")
+        DevinAgentToolPreferences.setPermissionLevel(.fullApproval, defaults: defaults)
+        XCTAssertEqual(DevinAgentToolPreferences.unattendedLaunchPermissionMode(defaults: defaults), "dangerous")
     }
 
     func testOracleOneShotPromptRequestsOnePlainAnswerWithoutTools() {
