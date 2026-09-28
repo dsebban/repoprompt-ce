@@ -1025,9 +1025,35 @@ actor ACPAgentSessionController {
         }
     }
 
-    func restoreOpenedSessionMode() async throws {
-        guard let openedSessionModeID else { return }
-        try await setSessionMode(openedSessionModeID)
+    /// Devin permission levels are ACP session modes; nil is Provider Default and restores the
+    /// mode this session opened with. Never prompt at a level the session cannot apply.
+    func applyDevinPermissionSessionMode(_ requestedModeID: String?) async throws {
+        try await configurationMutationMutex.withLock { [weak self] in
+            guard let self else { throw CancellationError() }
+            try await applyDevinPermissionSessionModeSerialized(requestedModeID)
+        }
+    }
+
+    private func applyDevinPermissionSessionModeSerialized(_ requestedModeID: String?) async throws {
+        guard let requestedModeID = requestedModeID?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !requestedModeID.isEmpty
+        else {
+            guard let openedSessionModeID else { return }
+            try await setSessionModeSerialized(openedSessionModeID)
+            return
+        }
+        if sessionModeFailureReason == nil {
+            let advertised = sessionModeSnapshot?.availableValues ?? []
+            guard advertised.contains(where: { $0.caseInsensitiveCompare(requestedModeID) == .orderedSame }) else {
+                throw AIProviderError.invalidConfiguration(
+                    detail: DevinAgentToolPreferences.PermissionLevel.unavailableSessionModeDetail(
+                        requestedModeID: requestedModeID,
+                        advertisedModeIDs: advertised
+                    )
+                )
+            }
+        }
+        try await setSessionModeSerialized(requestedModeID)
     }
 
     func applySessionModelParameterSelections(

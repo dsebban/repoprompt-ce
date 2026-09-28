@@ -33,9 +33,9 @@ enum DevinAgentToolPreferences {
             case .acceptEdits:
                 "Use Devin's Code mode; other actions can still ask for approval."
             case .smart:
-                "Use Devin's Smart mode when available for this account."
+                "Use Devin's Smart session mode. Runs stop before prompting if this account does not offer it."
             case .fullApproval:
-                "Use Devin's Bypass mode when permitted by this account."
+                "Use Devin's Bypass session mode. Runs stop before prompting if this account does not offer it."
             }
         }
 
@@ -71,6 +71,33 @@ enum DevinAgentToolPreferences {
             case .fullApproval:
                 "bypass"
             }
+        }
+
+        /// Fail-closed copy when the live Devin session does not advertise the mode a level needs.
+        static func unavailableSessionModeDetail(
+            requestedModeID: String,
+            advertisedModeIDs: [String]
+        ) -> String {
+            func isAdvertised(_ modeID: String) -> Bool {
+                advertisedModeIDs.contains { $0.caseInsensitiveCompare(modeID) == .orderedSame }
+            }
+            let requestedLevels = allCases
+                .filter { $0.sessionModeID?.caseInsensitiveCompare(requestedModeID) == .orderedSame }
+                .map(\.displayName)
+            let subject = requestedLevels.isEmpty
+                ? "Devin session mode '\(requestedModeID)'"
+                : requestedLevels.joined(separator: " / ")
+            let alternatives = allCases
+                .filter { level in level.sessionModeID.map(isAdvertised) ?? true }
+                .map(\.displayName)
+            let advertised = advertisedModeIDs.isEmpty ? "none" : advertisedModeIDs.joined(separator: ", ")
+            return "\(subject) is not available for this Devin account or CLI (advertised modes: \(advertised)). "
+                + "Choose \(orList(alternatives)) in Devin permission settings."
+        }
+
+        private static func orList(_ items: [String]) -> String {
+            guard let last = items.last, items.count > 1 else { return items.first ?? "" }
+            return items.dropLast().joined(separator: ", ") + ", or " + last
         }
 
         /// Missing/blank values mean the explicit provider default. Unknown stored values

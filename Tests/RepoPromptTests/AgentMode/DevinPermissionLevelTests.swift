@@ -782,7 +782,7 @@ final class DevinPermissionLevelTests: XCTestCase {
         do {
             _ = try await controller.bootstrap()
             try await controller.setSessionMode("bypass")
-            try await controller.restoreOpenedSessionMode()
+            try await controller.applyDevinPermissionSessionMode(nil)
             await controller.shutdown()
         } catch {
             await controller.shutdown()

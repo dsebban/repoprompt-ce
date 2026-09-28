@@ -209,7 +209,7 @@ struct AgentPermissionCapabilitySummaryBuilder {
         case .devin:
             let level = devinPermissionLevel(profile: profile)
             let warnings = level.isWarning
-                ? ["Devin launches with `--permission-mode dangerous` — its tools run without approval prompts."]
+                ? ["Devin Full Approval sets the ACP `bypass` session mode — its tools run without approval prompts."]
                 : []
             return AgentPermissionCapabilitySummary(
                 providerID: providerID,
