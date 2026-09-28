@@ -78,18 +78,11 @@ struct MCPContextBuilderGitReviewPolicy {
             )
         }
 
-        let target: ContextBuilderReviewTarget
-        switch resolution {
-        case let .available(availableTarget):
-            if let reason = await ContextBuilderReviewTargetResolver().revalidate(
-                availableTarget,
-                store: store
-            ) {
-                throw MCPContextBuilderGitReviewPolicyError.targetUnavailable(reason)
-            }
-            target = availableTarget
-        case .deferred:
+        if resolution.restrictsGitToExplicitReadOnly {
             guard hasExplicitSelector, !requestsArtifactPublication else {
+                if case let .unavailable(reason) = resolution {
+                    throw MCPContextBuilderGitReviewPolicyError.targetUnavailable(reason)
+                }
                 throw MCPContextBuilderGitReviewPolicyError.targetDeferred
             }
             return MCPContextBuilderGitReviewAdmission(
@@ -98,16 +91,12 @@ struct MCPContextBuilderGitReviewPolicy {
                 preferredDefaultRepository: nil,
                 publicationFence: nil
             )
-        case let .unavailable(reason):
-            guard hasExplicitSelector, !requestsArtifactPublication else {
-                throw MCPContextBuilderGitReviewPolicyError.targetUnavailable(reason)
-            }
-            return MCPContextBuilderGitReviewAdmission(
-                target: nil,
-                implicitRepositories: nil,
-                preferredDefaultRepository: nil,
-                publicationFence: nil
-            )
+        }
+        guard let target = resolution.availableTarget else {
+            throw MCPContextBuilderGitReviewPolicyError.targetUnavailable(.missingFrozenTarget)
+        }
+        if let reason = await ContextBuilderReviewTargetResolver().revalidate(target, store: store) {
+            throw MCPContextBuilderGitReviewPolicyError.targetUnavailable(reason)
         }
 
         let preferredDefaultRepository = allRepositories.first(where: target.primaryCheckout.matches)

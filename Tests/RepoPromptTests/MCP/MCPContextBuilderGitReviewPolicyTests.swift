@@ -22,8 +22,20 @@ final class MCPContextBuilderGitReviewPolicyTests: XCTestCase {
         hasExplicitSelector: Bool,
         requestsArtifactPublication: Bool
     ) async throws -> MCPContextBuilderGitReviewAdmission {
+        try await admit(
+            deferredResolution(),
+            hasExplicitSelector: hasExplicitSelector,
+            requestsArtifactPublication: requestsArtifactPublication
+        )
+    }
+
+    private func admit(
+        _ resolution: ContextBuilderReviewTargetResolution,
+        hasExplicitSelector: Bool,
+        requestsArtifactPublication: Bool
+    ) async throws -> MCPContextBuilderGitReviewAdmission {
         try await MCPContextBuilderGitReviewPolicy().admit(
-            resolution: deferredResolution(),
+            resolution: resolution,
             hasExplicitSelector: hasExplicitSelector,
             requestsArtifactPublication: requestsArtifactPublication,
             operation: .diff,
@@ -53,6 +65,31 @@ final class MCPContextBuilderGitReviewPolicyTests: XCTestCase {
                 XCTAssertTrue(message.contains("repo_root"), message)
                 XCTAssertTrue(message.contains("artifacts"), message)
                 XCTAssertTrue(message.contains("manage_selection"), message)
+            } catch {
+                XCTFail("Unexpected error: \(error)")
+            }
+        }
+    }
+
+    func testUnelectedTargetsShareTheExplicitReadOnlyGitRestriction() async throws {
+        let unavailable = ContextBuilderReviewTargetResolution.unavailable(.nonGitSelection(count: 1))
+        XCTAssertTrue(deferredResolution().restrictsGitToExplicitReadOnly)
+        XCTAssertTrue(unavailable.restrictsGitToExplicitReadOnly)
+
+        let admission = try await admit(unavailable, hasExplicitSelector: true, requestsArtifactPublication: false)
+        XCTAssertNil(admission.target)
+        XCTAssertNil(admission.publicationFence)
+
+        for (hasExplicitSelector, requestsArtifactPublication) in [(false, false), (true, true)] {
+            do {
+                _ = try await admit(
+                    unavailable,
+                    hasExplicitSelector: hasExplicitSelector,
+                    requestsArtifactPublication: requestsArtifactPublication
+                )
+                XCTFail("Unavailable admission must refuse selector=\(hasExplicitSelector) artifacts=\(requestsArtifactPublication)")
+            } catch let error as MCPContextBuilderGitReviewPolicyError {
+                XCTAssertEqual(error, .targetUnavailable(.nonGitSelection(count: 1)))
             } catch {
                 XCTFail("Unexpected error: \(error)")
             }
