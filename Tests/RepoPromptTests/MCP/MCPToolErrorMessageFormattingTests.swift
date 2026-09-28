@@ -27,4 +27,14 @@ final class MCPToolErrorMessageFormattingTests: XCTestCase {
         let error = MCPError.invalidParams("bad input")
         XCTAssertEqual(ServerNetworkManager.toolErrorMessage(for: error), "Error: \(error)")
     }
+
+    /// MCP spec: an unknown resource URI is "Resource not found" (-32002), not malformed params.
+    func testUnknownResourceURIUsesResourceNotFoundCode() {
+        let uri = "file:///tmp/devin-overflows-502/714cef70/content.txt"
+        let error = ServerNetworkManager.unknownResourceError(uri: uri)
+        XCTAssertEqual(error.code, -32002)
+        XCTAssertNotEqual(error.code, MCPError.invalidParams(nil).code)
+        XCTAssertTrue(error.errorDescription?.contains("Resource not found") == true, "\(error)")
+        XCTAssertTrue(error.errorDescription?.contains(uri) == true, "\(error)")
+    }
 }

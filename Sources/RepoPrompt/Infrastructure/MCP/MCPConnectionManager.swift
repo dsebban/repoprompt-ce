@@ -1049,6 +1049,11 @@ actor ServerNetworkManager {
         return "Error: \(error)"
     }
 
+    /// MCP spec: unknown resources are "Resource not found" (-32002); -32602 means malformed params.
+    static func unknownResourceError(uri: String) -> MCPError {
+        .serverError(code: -32002, message: "Resource not found: \(uri)")
+    }
+
     static func toolErrorResult(rawJSON: Bool, message: String) -> CallTool.Result {
         guard rawJSON else { return CallTool.Result.err(message) }
         let value: Value = .object([
@@ -12159,7 +12164,7 @@ actor ServerNetworkManager {
                     ]
                 )
             default:
-                throw MCPError.invalidParams("Unknown resource URI: \(params.uri)")
+                throw Self.unknownResourceError(uri: params.uri)
             }
         }
 
