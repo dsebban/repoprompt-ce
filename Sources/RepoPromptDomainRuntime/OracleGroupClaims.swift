@@ -1,6 +1,7 @@
-import Darwin
 import Foundation
+#if canImport(os)
 import os
+#endif
 
 package enum OracleGroupClaimError: Error, LocalizedError, Equatable {
     case ownerMismatch

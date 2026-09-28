@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(Security)
 import Security
+#endif
 
 package struct DomainWindowDescriptor: Codable, Equatable {
     package let windowID: Int
@@ -548,9 +550,17 @@ package actor DomainRoutingCoordinator {
             throw DomainRunLaunchTokenError.runContextConflict
         }
         var bytes = [UInt8](repeating: 0, count: 32)
+        #if canImport(Security)
         guard SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes) == errSecSuccess else {
             throw DomainRunLaunchTokenError.randomGenerationFailed
         }
+        #else
+        // SystemRandomNumberGenerator is the platform CSPRNG (getrandom) on Linux.
+        var generator = SystemRandomNumberGenerator()
+        for index in bytes.indices {
+            bytes[index] = generator.next()
+        }
+        #endif
         let material = Data(bytes).base64EncodedString()
             .replacingOccurrences(of: "+", with: "-")
             .replacingOccurrences(of: "/", with: "_")

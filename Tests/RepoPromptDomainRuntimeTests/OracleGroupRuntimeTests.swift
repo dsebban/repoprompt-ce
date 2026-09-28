@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(os)
 import os
+#endif
 @testable import RepoPromptDomainRuntime
 import XCTest
 

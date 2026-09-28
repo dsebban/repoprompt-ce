@@ -1,5 +1,7 @@
-import Darwin
 import Foundation
+#if os(Linux)
+import RepoPromptC
+#endif
 
 package enum DomainMutationPhysicalCapabilityError: Error, Equatable, LocalizedError {
     case scopeUnavailable
@@ -101,6 +103,7 @@ package final class DomainMutationPhysicalCapability: @unchecked Sendable {
             throw DomainMutationPhysicalCapabilityError.destinationExists(destination.absolutePath)
         }
 
+        #if canImport(Darwin)
         let result = renameatx_np(
             sourceParent.fd,
             source.leaf,
@@ -108,6 +111,10 @@ package final class DomainMutationPhysicalCapability: @unchecked Sendable {
             destination.leaf,
             UInt32(RENAME_EXCL)
         )
+        #else
+        // renameat2(RENAME_NOREPLACE); filesystems without it fail closed via ioFailure.
+        let result = repo_linux_rename_noreplace(sourceParent.fd, source.leaf, destinationParent.fd, destination.leaf)
+        #endif
         guard result == 0 else {
             let code = errno
             switch code {
