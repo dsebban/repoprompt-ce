@@ -1039,7 +1039,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
             atomically: true,
             encoding: .utf8
         )
-        try "native config".write(
+        try #"{"native": "config"}"#.write(
             to: devinSource.appendingPathComponent("config.json"),
             atomically: true,
             encoding: .utf8
@@ -1190,7 +1190,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
         try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
         let nativeConfig = devinSource.appendingPathComponent("config.json")
-        try "original".write(to: nativeConfig, atomically: true, encoding: .utf8)
+        try #"{"original": true}"#.write(to: nativeConfig, atomically: true, encoding: .utf8)
 
         let prepared = try DevinIntegrationConfiguration.prepare(
             workingDirectory: sourceRoot.path,
@@ -1218,7 +1218,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
         try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
         let nativeConfig = devinSource.appendingPathComponent("config.json")
-        try "original".write(to: nativeConfig, atomically: true, encoding: .utf8)
+        try #"{"original": true}"#.write(to: nativeConfig, atomically: true, encoding: .utf8)
 
         let prepared = try DevinIntegrationConfiguration.prepare(
             workingDirectory: sourceRoot.path,
@@ -1288,7 +1288,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
         try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
         let nativeConfig = devinSource.appendingPathComponent("config.json")
-        try "original".write(to: nativeConfig, atomically: true, encoding: .utf8)
+        try #"{"original": true}"#.write(to: nativeConfig, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: nativeConfig.path)
 
         let prepared = try DevinIntegrationConfiguration.prepare(
@@ -1314,7 +1314,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         )) { error in
             XCTAssertTrue(error.localizedDescription.contains("Recovery data remains at \(overlayRoot.path)"))
         }
-        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), "original")
+        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), #"{"original": true}"#)
         let mode = try XCTUnwrap(
             FileManager.default.attributesOfItem(atPath: nativeConfig.path)[.posixPermissions] as? NSNumber
         )
@@ -1327,11 +1327,9 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         let sourceRoot = try makeTestDirectory(name: "DevinIntegrationNoMCP")
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
         try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
-        try "native config".write(
-            to: devinSource.appendingPathComponent("config.json"),
-            atomically: true,
-            encoding: .utf8
-        )
+        let nativeConfig = devinSource.appendingPathComponent("config.json")
+        let nativeData = try JSONSerialization.data(withJSONObject: ["agent": ["model": "native-model"]])
+        try nativeData.write(to: nativeConfig)
         let sourceMCP: [String: Any] = [
             "mcpServers": ["Existing": ["transport": "stdio", "command": "existing"]]
         ]
@@ -1352,15 +1350,87 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         )
 
         XCTAssertEqual((overlayMCP["mcpServers"] as? [String: Any])?.count, 0)
-        XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(
-            atPath: overlayDevin.appendingPathComponent("config.json").path
-        ))
+        // Emptying mcp_config.json is not enough: Devin would still import Claude and Cursor
+        // MCP servers through the native settings, so the settings are isolated too.
+        let overlayConfig = overlayDevin.appendingPathComponent("config.json")
+        XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: overlayConfig.path))
+        let overlay = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: overlayConfig)) as? [String: Any]
+        )
+        XCTAssertEqual((overlay["agent"] as? [String: String])?["model"], "native-model")
+        XCTAssertEqual(overlay["read_config_from"] as? [String: Bool], ["claude": false, "cursor": false])
 
         try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
         XCTAssertEqual(
             try Data(contentsOf: sourceMCPURL),
             try JSONSerialization.data(withJSONObject: sourceMCP)
         )
+        XCTAssertEqual(try Data(contentsOf: nativeConfig), nativeData)
+    }
+
+    func testMissingNativeSettingsStillIsolatesImportsForBothPolicies() throws {
+        let sourceRoot = try makeTestDirectory(name: "DevinIntegrationMissingSettings")
+        let executable = sourceRoot.appendingPathComponent("repoprompt-mcp")
+        try "#!/bin/sh\nexit 0\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let nativeConfig = sourceRoot.appendingPathComponent("devin/config.json")
+
+        for policy: DevinIntegrationConfiguration.MCPServersPolicy in [
+            .disableAll,
+            .mergeRepoPrompt(RepoPromptMCPServerConfiguration(command: executable.path))
+        ] {
+            let prepared = try DevinIntegrationConfiguration.prepare(
+                workingDirectory: sourceRoot.path,
+                mcpServers: policy,
+                sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path, "HOME": sourceRoot.path]
+            )
+            let overlayConfig = try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]).asFileURL
+                .appendingPathComponent("devin/config.json")
+            let overlay = try XCTUnwrap(
+                JSONSerialization.jsonObject(with: Data(contentsOf: overlayConfig)) as? [String: Any]
+            )
+            XCTAssertEqual(overlay["read_config_from"] as? [String: Bool], ["claude": false, "cursor": false])
+
+            try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
+            XCTAssertFalse(
+                FileManager.default.fileExists(atPath: nativeConfig.path),
+                "the launch-only import switches must not be published as native settings"
+            )
+        }
+    }
+
+    /// A settings file RepoPrompt cannot parse must abort preparation: linking it instead
+    /// would let Devin import Claude or Cursor MCP servers into the launch.
+    func testUnreadableNativeSettingsAbortPreparationForBothPolicies() throws {
+        let sourceRoot = try makeTestDirectory(name: "DevinIntegrationMalformedSettings")
+        let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
+        try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
+        let nativeConfig = devinSource.appendingPathComponent("config.json")
+        let executable = sourceRoot.appendingPathComponent("repoprompt-mcp")
+        try "#!/bin/sh\nexit 0\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let before = try overlayNames()
+
+        for contents in ["native config", "[]"] {
+            try contents.write(to: nativeConfig, atomically: true, encoding: .utf8)
+            for policy: DevinIntegrationConfiguration.MCPServersPolicy in [
+                .disableAll,
+                .mergeRepoPrompt(RepoPromptMCPServerConfiguration(command: executable.path))
+            ] {
+                XCTAssertThrowsError(
+                    try DevinIntegrationConfiguration.prepare(
+                        workingDirectory: sourceRoot.path,
+                        mcpServers: policy,
+                        sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path]
+                    )
+                ) { error in
+                    XCTAssertTrue(error.localizedDescription.contains(nativeConfig.path), "\(error)")
+                    XCTAssertTrue(error.localizedDescription.contains("fix or remove"), "\(error)")
+                }
+                XCTAssertEqual(try overlayNames(), before)
+                XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), contents)
+            }
+        }
     }
 
     func testMalformedSourceMCPDoesNotLeaveAnOverlay() throws {
