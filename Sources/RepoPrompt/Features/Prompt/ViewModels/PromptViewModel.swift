@@ -6365,8 +6365,9 @@ class PromptViewModel: ObservableObject {
         gitBaseOverride: String? = nil,
         selectionOverride: StoredSelection? = nil,
         lookupContextOverride: WorkspaceLookupContext? = nil,
-        reviewGitContextOverride: FrozenPromptGitReviewContext? = nil
-    ) async -> AIMessage {
+        reviewGitContextOverride: FrozenPromptGitReviewContext? = nil,
+        selectedFileContentPolicy: PromptSelectedFileContentPolicy = .bestEffort
+    ) async throws -> AIMessage {
         let preset = oraclePromptConfiguration?.chatPreset ?? overrideChatPreset ?? currentChatPreset()
         var resolvedConfig: PromptContextResolved = {
             if let oraclePromptConfiguration {
@@ -6461,14 +6462,25 @@ class PromptViewModel: ObservableObject {
             }
         }
 
+        let requiresSelectedFileContent = selectedFileContentPolicy == .required
         let packaged: (message: AIMessage, preAssembly: PromptContextPreAssemblyResult)
         do {
+            if requiresSelectedFileContent {
+                try await PromptSelectedFileContentRequirement.awaitAppliedIngress(
+                    selection: logicalSelection,
+                    lookupContext: lookupContext,
+                    store: workspaceFileContextStore
+                )
+            }
             packaged = try await withPreassembledPromptContext(
                 cfg: activeConfig,
                 selection: logicalSelection,
                 lookupContext: lookupContext,
                 reviewGitContext: frozenReviewGitContext
             ) { preAssembly in
+                if requiresSelectedFileContent {
+                    try PromptSelectedFileContentRequirement.validate(preAssembly, config: activeConfig)
+                }
                 let (_, codeEntries) = PromptPackagingService.partitionPromptEntriesForGitDiff(
                     preAssembly.entries
                 )
@@ -6499,6 +6511,7 @@ class PromptViewModel: ObservableObject {
                 return (message, preAssembly)
             }
         } catch {
+            if requiresSelectedFileContent { throw error }
             return AIMessage(systemPrompt: systemPrompt, userMessage: "")
         }
         #if DEBUG
