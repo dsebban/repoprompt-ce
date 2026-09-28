@@ -61,11 +61,23 @@ final class DevinPermissionLevelTests: XCTestCase {
             "switch_auto",
             "plan_smart",
             "allow_tools_global",
-            "net_grant_always"
+            "net_grant_always",
+            // Matching is on the trimmed, lowercased ID, so casing cannot slip past it.
+            "Switch_Bypass",
+            " PLAN_SMART ",
+            "Allow_Tools_Global",
+            "Net_Allow_Always"
         ] {
             XCTAssertFalse(
                 ACPPermissionOptionPolicy.isAutoSelectable(optionID: optionID, for: .devin),
                 "\(optionID) escapes the pending request's scope and must stay user-decided"
+            )
+        }
+        // Positive control: the patterns must not swallow the two exact IDs Devin selects.
+        for optionID in ["allow_once", "allow_session", "Allow_Session"] {
+            XCTAssertTrue(
+                ACPPermissionOptionPolicy.isAutoSelectable(optionID: optionID, for: .devin),
+                "\(optionID) must stay auto-selectable"
             )
         }
     }
