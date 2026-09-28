@@ -115,10 +115,16 @@ final class ACPApprovalOptionLabelTests: XCTestCase {
         )
     }
 
-    func testYieldsAnEmptyLineWhenNothingIsDisplayable() {
-        XCTAssertEqual(
-            ACPAgentSessionController.test_optionLabel(name: "\u{200C}", optionID: "  "),
-            ""
-        )
+    /// Blank lines would make distinct choices indistinguishable on the card, so an option
+    /// with nothing displayable gets a fixed positional label instead.
+    func testOptionsWithNothingDisplayableGetAPositionalFallback() {
+        let lines = ACPAgentSessionController.test_optionLines([
+            (name: "Allow once", optionID: "allow_once"),
+            (name: "\u{200C}", optionID: "  "),
+            (name: "\u{202E}\u{FE0F}", optionID: "\u{2066}\u{2069}"),
+            (name: nil, optionID: "reject_once")
+        ])
+        XCTAssertEqual(lines, ["Allow once", "Option 2", "Option 3", "reject_once"])
+        XCTAssertFalse(lines.contains { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty })
     }
 }

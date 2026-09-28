@@ -3515,6 +3515,16 @@ actor ACPAgentSessionController {
     /// otherwise its identifier. Both are agent-authored, so both go through the same
     /// sanitiser -- routing only the name through it left the identifier able to
     /// reintroduce the newline this is meant to prevent.
+    /// One line per advertised option. An option with nothing displayable gets a positional
+    /// label so distinct choices never render as identical blank lines; submission still uses
+    /// the option's original ID.
+    private static func optionLines(for options: [PermissionOption]) -> [String] {
+        options.enumerated().map { index, option in
+            let label = optionLabel(name: option.name, optionID: option.optionID)
+            return label.isEmpty ? "Option \(index + 1)" : label
+        }
+    }
+
     private static func optionLabel(name: String?, optionID: String) -> String {
         displayableOptionLabel(name ?? "")
             ?? displayableOptionLabel(optionID)
@@ -3569,9 +3579,7 @@ actor ACPAgentSessionController {
         if let rawInputJSON, !rawInputJSON.isEmpty {
             details.append(AgentApprovalDetail(label: "Input", value: rawInputJSON, isCode: true))
         }
-        let optionLabels = options.map {
-            Self.optionLabel(name: $0.name, optionID: $0.optionID)
-        }
+        let optionLabels = Self.optionLines(for: options)
         if !optionLabels.isEmpty {
             details.append(
                 AgentApprovalDetail(
@@ -4494,6 +4502,11 @@ actor ACPAgentSessionController {
         /// fallback rather than the sanitiser alone.
         static func test_optionLabel(name: String?, optionID: String) -> String {
             optionLabel(name: name, optionID: optionID)
+        }
+
+        /// Test seam for the per-option lines on the approval card, in advertised order.
+        static func test_optionLines(_ options: [(name: String?, optionID: String)]) -> [String] {
+            optionLines(for: options.map { PermissionOption(optionID: $0.optionID, kind: "allow_once", name: $0.name) })
         }
 
         /// Test seam for approval-card option labelling: collapses an agent-authored
