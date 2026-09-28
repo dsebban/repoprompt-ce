@@ -1185,6 +1185,46 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         XCTAssertNil(native["read_config_from"])
     }
 
+    /// Cleanup undoes only the import toggles RepoPrompt set: other `read_config_from` keys the
+    /// run changed survive, a toggle the user had set is restored, and one RepoPrompt added is
+    /// removed.
+    func testCleanupRestoresOnlyTheImportTogglesRepoPromptChanged() throws {
+        let sourceRoot = try makeTestDirectory(name: "DevinIntegrationReadConfigFromWrite")
+        let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
+        try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
+        let nativeConfig = devinSource.appendingPathComponent("config.json")
+        try JSONSerialization.data(withJSONObject: [
+            "read_config_from": ["zed": false, "claude": true]
+        ]).write(to: nativeConfig)
+
+        let prepared = try DevinIntegrationConfiguration.prepare(
+            workingDirectory: sourceRoot.path,
+            mcpServers: .disableAll,
+            sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path, "HOME": sourceRoot.path]
+        )
+        let overlayConfig = try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]).asFileURL
+            .appendingPathComponent("devin/config.json")
+        var overlay = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: overlayConfig)) as? [String: Any]
+        )
+        var readConfigFrom = try XCTUnwrap(overlay["read_config_from"] as? [String: Bool])
+        XCTAssertEqual(readConfigFrom, ["zed": false, "claude": false, "cursor": false])
+        readConfigFrom["zed"] = true
+        readConfigFrom["windsurf"] = false
+        overlay["read_config_from"] = readConfigFrom
+        try JSONSerialization.data(withJSONObject: overlay).write(to: overlayConfig, options: .atomic)
+
+        try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
+
+        let native = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: nativeConfig)) as? [String: Any]
+        )
+        XCTAssertEqual(
+            native["read_config_from"] as? [String: Bool],
+            ["zed": true, "windsurf": false, "claude": true]
+        )
+    }
+
     func testCleanupPreservesNewerNativeConfigAndRetainsRecoveryOverlay() throws {
         let sourceRoot = try makeTestDirectory(name: "DevinIntegrationConcurrentNativeWrite")
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
