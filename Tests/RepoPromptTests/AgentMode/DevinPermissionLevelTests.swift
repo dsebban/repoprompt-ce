@@ -687,21 +687,24 @@ final class DevinPermissionLevelTests: XCTestCase {
         ).map(\.rawValue), [base, "swe-1-7-medium"])
     }
 
-    func testHeadlessAndOracleDoNotInheritAgentModePermission() {
+    func testHeadlessRequestCarriesConfiguredLevelOnlyWhenRepoPromptMCPIsInjected() {
         let message = AgentMessage(systemPrompt: "system", userMessage: "prompt")
-        let headless = DevinACPHeadlessAgentProvider.makeRunRequest(
-            config: DevinAgentConfig(includeRepoPromptMCPServer: true),
-            workspacePath: "/tmp/workspace",
-            message: message
-        )
-        let oracle = DevinACPHeadlessAgentProvider.makeRunRequest(
-            config: DevinAgentConfig(includeRepoPromptMCPServer: false),
-            workspacePath: nil,
-            message: message
-        )
-
-        XCTAssertNil(headless.sessionModeID)
-        XCTAssertNil(oracle.sessionModeID)
+        for level in DevinAgentToolPreferences.PermissionLevel.allCases {
+            let headless = DevinACPHeadlessAgentProvider.makeRunRequest(
+                config: DevinAgentConfig(includeRepoPromptMCPServer: true),
+                workspacePath: "/tmp/workspace",
+                message: message,
+                configuredPermissionLevel: level
+            )
+            let discovery = DevinACPHeadlessAgentProvider.makeRunRequest(
+                config: DevinAgentConfig(includeRepoPromptMCPServer: false),
+                workspacePath: nil,
+                message: message,
+                configuredPermissionLevel: level
+            )
+            XCTAssertEqual(headless.sessionModeID, level.sessionModeID, "\(level)")
+            XCTAssertNil(discovery.sessionModeID, "\(level)")
+        }
         XCTAssertTrue(AgentModelCatalog.AgentSelectionSurface.headless.allows(.devin))
         XCTAssertTrue(
             AgentRuntimeProviderService.shared.makeProvider(

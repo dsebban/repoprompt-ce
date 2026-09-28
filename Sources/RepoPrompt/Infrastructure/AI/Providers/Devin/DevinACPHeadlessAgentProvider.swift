@@ -10,6 +10,9 @@ final class DevinACPHeadlessAgentProvider: HeadlessAgentProvider {
     init(
         config: DevinAgentConfig,
         workspacePath: String? = nil,
+        // Test-only override. `nil` resolves the stored level inside `makeRequest` -- once per
+        // run, not once per provider -- so a level change takes effect on the next run.
+        configuredPermissionLevel: DevinAgentToolPreferences.PermissionLevel? = nil,
         providerFactory: ProviderFactory? = nil,
         controllerFactory: @escaping ControllerFactory = { provider, request, diagnosticSink in
             try ACPAgentSessionController(
@@ -27,7 +30,13 @@ final class DevinACPHeadlessAgentProvider: HeadlessAgentProvider {
             providerName: "Devin",
             makeProvider: { resolvedProviderFactory(config) },
             makeRequest: { message, _ in
-                Self.makeRunRequest(config: config, workspacePath: workspacePath, message: message)
+                Self.makeRunRequest(
+                    config: config,
+                    workspacePath: workspacePath,
+                    message: message,
+                    configuredPermissionLevel: configuredPermissionLevel
+                        ?? DevinAgentToolPreferences.permissionLevel()
+                )
             },
             makeController: controllerFactory,
             beforePrompt: { controller, request in
@@ -39,15 +48,23 @@ final class DevinACPHeadlessAgentProvider: HeadlessAgentProvider {
                 }
                 let report = try await controller.applySessionModelParameterSelections(request.modelParameterSelections)
                 try report.validateNoSkippedSelections()
+                // Mode last, as in the interactive runner, so no later configuration response
+                // can carry a different mode. Model discovery keeps the provider default.
+                guard config.includeRepoPromptMCPServer else { return }
+                try await controller.applyDevinPermissionSessionMode(request.sessionModeID)
             },
             approvalPolicy: .declineUnsupported
         )
     }
 
+    /// Headless runs are unattended: the bridge declines any permission request the controller
+    /// does not auto-approve. The configured level travels as the ACP session mode and is
+    /// applied before the prompt only when the RepoPrompt MCP server is injected.
     static func makeRunRequest(
         config: DevinAgentConfig,
         workspacePath: String?,
-        message: AgentMessage
+        message: AgentMessage,
+        configuredPermissionLevel: DevinAgentToolPreferences.PermissionLevel
     ) -> ACPRunRequest {
         ACPRunRequest(
             agentKind: .devin,
@@ -56,6 +73,7 @@ final class DevinACPHeadlessAgentProvider: HeadlessAgentProvider {
             resumeSessionID: message.resumeSessionID,
             attachments: [],
             taskLabelKind: nil,
+            sessionModeID: config.includeRepoPromptMCPServer ? configuredPermissionLevel.sessionModeID : nil,
             modelParameterSelections: config.modelParameterSelections
         )
     }
