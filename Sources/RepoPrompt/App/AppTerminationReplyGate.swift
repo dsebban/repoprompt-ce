@@ -6,7 +6,8 @@ import Foundation
 /// that shutdown did not reap still see EOF on their stdio pipes once the app exits.
 @MainActor
 final class AppTerminationReplyGate {
-    static let defaultDeadline: Duration = .seconds(10)
+    /// Nonisolated so it can be a default argument without a MainActor hop.
+    nonisolated static let defaultDeadline: Duration = .seconds(10)
 
     private var reply: (@MainActor () -> Void)?
 
