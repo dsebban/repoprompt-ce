@@ -390,6 +390,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             var pathMutated = false
             var currentSelection = context.selection
             var codemapUnavailableMsgs: [String] = []
+            var resolvedAnyInput = false
 
             if mode == "codemap_only", !physicalSliceInputs.isEmpty {
                 throw MCPError.invalidParams("mode 'codemap_only' cannot be used with slices")
@@ -423,6 +424,7 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                 }
                 let resolvedAnything = pathMutated || !resolvedMap.isEmpty || sliceResolved || sliceMutated
                     || artifactResolution.resolvedCount > 0
+                resolvedAnyInput = resolvedAnything
                 if strict, !resolvedAnything {
                     if !artifactResolution.invalidDiagnostics.isEmpty {
                         throw MCPError.invalidParams(
@@ -436,16 +438,17 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
                         throw MCPError.invalidParams("Provided slices did not match any files")
                     }
                 }
-            } else if strict, !pathMutated, resolvedMap.isEmpty,
-                      artifactResolution.resolvedCount == 0
-            {
-                if !artifactResolution.invalidDiagnostics.isEmpty {
-                    throw MCPError.invalidParams(
-                        artifactResolution.invalidDiagnostics.joined(separator: "; ")
-                    )
+            } else {
+                resolvedAnyInput = pathMutated || !resolvedMap.isEmpty || artifactResolution.resolvedCount > 0
+                if strict, !resolvedAnyInput {
+                    if !artifactResolution.invalidDiagnostics.isEmpty {
+                        throw MCPError.invalidParams(
+                            artifactResolution.invalidDiagnostics.joined(separator: "; ")
+                        )
+                    }
+                    let hint = await dependencies.selection.makeSelectionHintError(rawPaths, "add", lookupContext)
+                    throw MCPError.invalidParams(hint)
                 }
-                let hint = await dependencies.selection.makeSelectionHintError(rawPaths, "add", lookupContext)
-                throw MCPError.invalidParams(hint)
             }
             currentSelection = dependencies.selection.mutatePreResolvedFullFilePaths(
                 currentSelection,
@@ -458,6 +461,9 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             }
             for error in sliceParseErrors where !combinedInvalid.contains(error) {
                 combinedInvalid.append(error)
+            }
+            if let error = Self.allInputsRejectedError(op: op, resolvedAnything: resolvedAnyInput, invalid: combinedInvalid) {
+                throw error
             }
             for msg in codemapUnavailableMsgs where !combinedInvalid.contains(msg) {
                 combinedInvalid.append(msg)
@@ -536,6 +542,14 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
             for error in sliceParseErrors where !combinedInvalid.contains(error) {
                 combinedInvalid.append(error)
             }
+            if let error = Self.allInputsRejectedError(
+                op: op,
+                resolvedAnything: pathMutated || !resolvedMap.isEmpty || sliceResolved || sliceMutated
+                    || artifactResolution.resolvedCount > 0,
+                invalid: combinedInvalid
+            ) {
+                throw error
+            }
             return try await persistAndReply(
                 resolvedContext: &resolvedContext,
                 metadata: metadata,
@@ -602,6 +616,14 @@ final class MCPSelectionToolProvider: MCPAppToolProviding {
         default:
             throw MCPError.invalidParams("Unsupported op '\(op)' for manage_selection when tab context is active")
         }
+    }
+
+    /// Non-strict add/remove tolerate partially invalid inputs, but a mutation that rejected every
+    /// requested input is a no-op and must not be reported as a success.
+    nonisolated static func allInputsRejectedError(op: String, resolvedAnything: Bool, invalid: [String]) -> MCPError? {
+        guard !resolvedAnything, !invalid.isEmpty else { return nil }
+        let verb = op == "remove" ? "removed" : "added"
+        return MCPError.invalidParams("No requested paths were \(verb): \(invalid.joined(separator: "; "))")
     }
 
     private func persistAndReply(

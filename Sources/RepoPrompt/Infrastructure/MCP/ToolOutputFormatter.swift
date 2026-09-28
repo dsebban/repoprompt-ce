@@ -5324,8 +5324,11 @@ extension ToolOutputFormatter {
             }
             if let primary = dto.primaryArtifacts {
                 artifactOut.append("")
-                artifactOut.append("**Primary review artifacts (auto-selected when possible):**")
                 let autoSelected = Set(primary.autoSelected ?? [])
+                let primaryHeader = autoSelected.isEmpty
+                    ? "**Primary review artifacts (not auto-selected):**"
+                    : "**Primary review artifacts:**"
+                artifactOut.append(primaryHeader)
                 let mapSuffix = autoSelected.contains(primary.map) ? " (auto-selected)" : ""
                 artifactOut.append("- MAP.txt: `\(primary.map)`\(mapSuffix)")
                 if let allPatch = primary.allPatch {
@@ -5449,8 +5452,11 @@ extension ToolOutputFormatter {
                     }
                 }
                 if let primary = repo.primaryArtifacts {
-                    out.append("**Primary review artifacts**:")
                     let autoSelected = Set(primary.autoSelected ?? [])
+                    let primaryHeader = autoSelected.isEmpty
+                        ? "**Primary review artifacts** (not auto-selected):"
+                        : "**Primary review artifacts**:"
+                    out.append(primaryHeader)
                     let mapSuffix = autoSelected.contains(primary.map) ? " (auto-selected)" : ""
                     out.append("- MAP.txt: `\(primary.map)`\(mapSuffix)")
                     if let allPatch = primary.allPatch {
