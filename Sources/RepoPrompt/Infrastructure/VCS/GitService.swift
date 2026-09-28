@@ -3045,11 +3045,18 @@ actor GitService {
 
         let standardizedRepo = repoURL.standardizedFileURL.path
         let repoPrefix = standardizedRepo.hasSuffix("/") ? standardizedRepo : standardizedRepo + "/"
+        var mirroredCount = 0
         for file in files {
             let source = repoURL.appendingPathComponent(file).standardizedFileURL
             guard source.path.hasPrefix(repoPrefix) else {
                 throw GitError(message: "untracked diff path escapes repository: \(file)")
             }
+            // Status runs with --untracked-files=all, so a directory entry is an embedded
+            // repository or worktree. Git never expands those into content; copying one
+            // recursively mirrored whole nested checkouts (tens of GB) and timed out.
+            let type = try? fileManager.attributesOfItem(atPath: source.path)[.type] as? FileAttributeType
+            if type == .typeDirectory { continue }
+            mirroredCount += 1
             let destination = mirrorRoot.appendingPathComponent(file)
             try fileManager.createDirectory(
                 at: destination.deletingLastPathComponent(),
@@ -3057,6 +3064,7 @@ actor GitService {
             )
             try fileManager.copyItem(at: source, to: destination)
         }
+        guard mirroredCount > 0 else { return "" }
 
         let args = [
             "diff", "--no-index", "--unified=\(contextLines)",
