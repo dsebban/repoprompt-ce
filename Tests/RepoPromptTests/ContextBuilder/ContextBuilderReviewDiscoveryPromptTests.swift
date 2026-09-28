@@ -109,4 +109,23 @@ final class ContextBuilderReviewDiscoveryPromptTests: XCTestCase {
         ))
         XCTAssertFalse(ContextBuilderAgentViewModel.restrictsReviewGitToExplicitReadOnly(workspaceContext: nil, mcpConfiguration: nil))
     }
+
+    func testRestrictedReviewPromptDescribesFrozenReviewBase() {
+        let committed = SystemPromptService.discoverPrompt(
+            responseType: "review",
+            restrictsReviewGitToExplicitReadOnly: true,
+            reviewRootNames: ["repoprompt-ce"],
+            reviewCompareBase: "origin/main"
+        )
+        XCTAssertTrue(committed.contains("merge-base with `origin/main`"), committed)
+        XCTAssertTrue(committed.contains(#"`"compare":"mergebase:origin/main"`"#), committed)
+        XCTAssertFalse(committed.contains("not already-committed changes"), committed)
+
+        let uncommitted = SystemPromptService.discoverPrompt(
+            responseType: "review",
+            restrictsReviewGitToExplicitReadOnly: true,
+            reviewRootNames: ["repoprompt-ce"]
+        )
+        XCTAssertTrue(uncommitted.contains("not already-committed changes"), uncommitted)
+    }
 }

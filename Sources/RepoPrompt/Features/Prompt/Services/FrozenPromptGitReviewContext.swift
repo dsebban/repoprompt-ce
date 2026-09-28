@@ -35,6 +35,11 @@ enum ReviewGitCompareIntent: Equatable {
             self = .uncommittedMergeBase(symbolicBase: normalized)
         }
     }
+
+    var symbolicBase: String? {
+        guard case let .uncommittedMergeBase(symbolicBase) = self else { return nil }
+        return symbolicBase
+    }
 }
 
 /// Exact, ephemeral authority to inspect already-selected files in one loaded workspace Git-data root.

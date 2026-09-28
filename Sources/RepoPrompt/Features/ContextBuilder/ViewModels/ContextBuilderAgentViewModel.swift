@@ -3977,7 +3977,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 workspaceContext: workspaceContext,
                 mcpConfiguration: mcpConfiguration
             ),
-            reviewRootNames: workspaceContext?.reviewGitContext.displayContext.roots.map(\.logicalRootName) ?? []
+            reviewRootNames: workspaceContext?.reviewGitContext.displayContext.roots.map(\.logicalRootName) ?? [],
+            reviewCompareBase: workspaceContext?.reviewGitContext.compareIntent.symbolicBase
         )
         debugLog("System prompt includes ask_user: \(systemPrompt.contains("ask_user"))")
         let userMessage = await buildAgentUserMessage(

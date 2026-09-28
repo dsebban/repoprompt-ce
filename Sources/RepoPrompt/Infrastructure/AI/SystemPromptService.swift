@@ -9,8 +9,8 @@ class SystemPromptService {
     /// - Parameter allowClarifyingQuestions: Whether the agent can use the ask_user tool to ask clarifying questions.
     /// - Parameter responseType: Optional response type for context_builder (e.g., "review" for code review context).
     /// - Parameter instructions: Optional discovery instructions, used for hidden review hotword detection in clarify mode.
-    static func discoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: Bool = false, reviewRootNames: [String] = []) -> String {
-        mcpDiscoverPrompt(tokenBudget: tokenBudget, agentKind: agentKind, enhancementMode: enhancementMode, allowClarifyingQuestions: allowClarifyingQuestions, responseType: responseType, instructions: instructions, questionTimeoutSeconds: questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: restrictsReviewGitToExplicitReadOnly, reviewRootNames: reviewRootNames)
+    static func discoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: Bool = false, reviewRootNames: [String] = [], reviewCompareBase: String? = nil) -> String {
+        mcpDiscoverPrompt(tokenBudget: tokenBudget, agentKind: agentKind, enhancementMode: enhancementMode, allowClarifyingQuestions: allowClarifyingQuestions, responseType: responseType, instructions: instructions, questionTimeoutSeconds: questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: restrictsReviewGitToExplicitReadOnly, reviewRootNames: reviewRootNames, reviewCompareBase: reviewCompareBase)
     }
 
     /// MCP Discover prompt – context-first, codemap-driven discovery, selected-scope, and prompt handoff.
@@ -24,7 +24,8 @@ class SystemPromptService {
     ///   (`ContextBuilderReviewTargetResolution.restrictsGitToExplicitReadOnly`), so Git artifact publication
     ///   and implicit-repository Git calls are refused.
     /// - Parameter reviewRootNames: Workspace root names usable as `repo_root` in the restricted guidance.
-    private static func mcpDiscoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: Bool = false, reviewRootNames: [String] = []) -> String {
+    /// - Parameter reviewCompareBase: The run's frozen symbolic review base, or nil when the package reviews uncommitted changes vs `HEAD`.
+    private static func mcpDiscoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: Bool = false, reviewRootNames: [String] = [], reviewCompareBase: String? = nil) -> String {
         // coverageLine from SyntaxManager is kept
         let coverageLine = {
             let langs = Array(Set(SyntaxManager.shared.extensionToLanguage.values)).sorted()
@@ -121,6 +122,11 @@ class SystemPromptService {
             } else {
                 "Set `repo_root` to the name of the workspace root that owns the changes, as listed by `get_file_tree` with `type` `roots`; request `detail` `files` first, then `full`."
             }
+            let finalDiffGuidance = if let reviewCompareBase {
+                "When the review is finalized, its package adds the Git diff for selected files from their merge-base with `\(reviewCompareBase)` to the working tree, including committed branch changes; pass `\"compare\":\"mergebase:\(reviewCompareBase)\"` to inspect the same diff."
+            } else {
+                "When the review is finalized, its package adds only the uncommitted (working tree vs `HEAD`) Git diff for selected files, not already-committed changes, so summarize the key committed changes you inspected in the handoff prompt."
+            }
             reviewModeGuidance = """
 
             ## Review Mode
@@ -129,7 +135,7 @@ class SystemPromptService {
 
             \(repoRootGuidance)
 
-            Then select the changed source files with `manage_selection`, along with files that provide context for the changes—including files that weren't changed but are affected. When the review is finalized, its package adds only the uncommitted (working tree vs `HEAD`) Git diff for selected files, not already-committed changes, so summarize the key committed changes you inspected in the handoff prompt.
+            Then select the changed source files with `manage_selection`, along with files that provide context for the changes—including files that weren't changed but are affected. \(finalDiffGuidance)
 
             **Review mode anti-patterns:**
             - 🚫 Calling `git` without `repo_root`/`repo_key`, or with `artifacts`—both are refused for this run

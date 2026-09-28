@@ -202,6 +202,11 @@ actor DirectHeadlessOracleAdapter {
         if toolName == "context_builder", arguments["oracle_preset"] != nil {
             throw AdapterError.appOnlyOraclePreset
         }
+        if toolName == "context_builder", arguments["review_base"] != nil {
+            throw MCPError.invalidParams(
+                "review_base is app-backed only; standalone headless context_builder does not package Git review diffs."
+            )
+        }
         if arguments["provider"] != nil { throw AdapterError.unsupportedProviderOverride }
         let route: OracleConversationRoute
         let input: OracleInput

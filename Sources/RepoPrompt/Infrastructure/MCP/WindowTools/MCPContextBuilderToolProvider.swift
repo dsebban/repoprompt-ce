@@ -350,6 +350,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         maxLength: OracleRosterContract.maximumModelIdentifierLength
                     ),
                     "context_pack_ref": .string(description: "Direct-headless only: canonical oracle-pack:sha256 reference to an already persisted frozen Context Builder package. Mutually exclusive with instructions."),
+                    "review_base": .string(description: "Optional, app-backed, response_type 'review' only: Git branch or ref to review against (e.g. 'origin/main'). The review package diffs the selected files from their merge-base with this ref to the working tree, so committed branch changes are included. Default: uncommitted changes vs HEAD."),
                     "export_response": .boolean(description: "When true, export the generated response to a file and return `oracle_export_path` plus `oracle_export_instruction`. Requires a response_type that generates a response. Include `oracle_export_path` inside the `message` you send on your next delegation call; the specific delegation tool is named by your system prompt.")
                 ],
                 required: []
