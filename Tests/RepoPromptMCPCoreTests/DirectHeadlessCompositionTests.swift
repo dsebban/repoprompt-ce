@@ -159,6 +159,137 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         )
     }
 
+    func testCodexTurnOutputKeepsAssistantTextAndCapturesThreadID() {
+        let output = DirectHeadlessProviderCoordinator.codexTurnOutput(from: """
+        {"type":"thread.started","thread_id":"thread-1"}
+        {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"  answer  "}}
+        {"type":"turn.completed"}
+        """)
+
+        XCTAssertEqual(output, .init(assistantText: "  answer  ", providerSessionID: "thread-1"))
+        XCTAssertEqual(
+            DirectHeadlessProviderCoordinator.codexTurnOutput(from: "  plain text\n"),
+            .init(assistantText: "plain text", providerSessionID: nil)
+        )
+    }
+
+    func testClaudeArgumentsUseUserSettingsOnlyAndDenyBashInEveryLane() {
+        let purposes: [DirectHeadlessProviderCoordinator.ExecutionPurpose] = [.agent, .directOracle, .oracleGroup]
+        for purpose in purposes {
+            let arguments = DirectHeadlessClaudeCodeCLI.arguments(model: "default", purpose: purpose)
+            let expectedTools = purpose == .oracleGroup ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write"
+            XCTAssertEqual(arguments, [
+                "-p",
+                "--output-format", "json",
+                "--setting-sources", "user",
+                "--strict-mcp-config",
+                "--permission-mode", "dontAsk",
+                "--tools", expectedTools,
+                "--allowedTools", expectedTools,
+                "--disallowedTools", "Bash"
+            ])
+        }
+        XCTAssertEqual(
+            Array(DirectHeadlessClaudeCodeCLI.arguments(model: "opus", purpose: .agent, resumeSessionID: "s-1").suffix(4)),
+            ["--model", "opus", "--resume", "s-1"]
+        )
+    }
+
+    func testClaudeParserReadsTerminalResultAndRejectsErrorsOrMissingResult() throws {
+        let output = try DirectHeadlessClaudeCodeCLI.parseTurnOutput("""
+        stderr warning
+        {"type":"result","subtype":"success","is_error":false,"result":"  answer  ","session_id":"s-1"}
+        """)
+        XCTAssertEqual(output, .init(assistantText: "  answer  ", providerSessionID: "s-1"))
+
+        XCTAssertThrowsError(try DirectHeadlessClaudeCodeCLI.parseTurnOutput(
+            #"{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s-1"}"#
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("error_max_turns"), "\(error)")
+        }
+        XCTAssertThrowsError(try DirectHeadlessClaudeCodeCLI.parseTurnOutput("not json\n")) { error in
+            XCTAssertTrue(String(describing: error).contains("no result"), "\(error)")
+        }
+    }
+
+    func testProviderCatalogKeepsCodexDefaultAndRequiresOperatorOptInForClaude() throws {
+        let executable = "/bin/sh"
+        let disabled = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
+            "REPOPROMPT_CODEX_COMMAND": executable,
+            "REPOPROMPT_CLAUDE_COMMAND": executable
+        ])
+        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode"])
+        XCTAssertEqual(disabled[0].backend, .codexCLI(executable: executable))
+        XCTAssertNil(disabled[1].backend)
+        XCTAssertTrue(try XCTUnwrap(disabled[1].unavailableReason).contains("disabled"))
+
+        let missing = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
+            "REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED": "1",
+            "REPOPROMPT_CLAUDE_COMMAND": "missing-claude-\(UUID().uuidString)",
+            "PATH": "/nonexistent"
+        ])
+        XCTAssertNil(missing[1].backend)
+        XCTAssertTrue(try XCTUnwrap(missing[1].unavailableReason).contains("not found"))
+
+        let enabled = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
+            "REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED": "TRUE",
+            "REPOPROMPT_CLAUDE_COMMAND": executable
+        ])
+        XCTAssertEqual(enabled[1].backend, .claudeCLI(executable: executable))
+    }
+
+    func testOracleRosterEntriesSelectProviderOnlyByKnownPrefix() throws {
+        let cases: [(String, String, String)] = [
+            ("o3", "codexExec", "o3"),
+            ("claudeCode:opus", "claudeCode", "opus"),
+            ("CLAUDECODE:opus", "claudeCode", "opus"),
+            ("llama3:8b", "codexExec", "llama3:8b")
+        ]
+        for (raw, providerID, modelID) in cases {
+            XCTAssertEqual(
+                try DirectHeadlessOracleRosterResolver.modelReference(raw),
+                try OracleModelReference(providerID: providerID, modelID: modelID)
+            )
+        }
+        XCTAssertThrowsError(try DirectHeadlessOracleRosterResolver.modelReference("claudeCode:"))
+    }
+
+    func testChildProcessWithoutInputSeesEndOfFileInsteadOfParentStdin() async throws {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        XCTAssertEqual(Darwin.pipe(&descriptors), 0)
+        let savedStdin = dup(STDIN_FILENO)
+        XCTAssertGreaterThanOrEqual(savedStdin, 0)
+        XCTAssertEqual(dup2(descriptors[0], STDIN_FILENO), STDIN_FILENO)
+        defer {
+            dup2(savedStdin, STDIN_FILENO)
+            close(savedStdin)
+            close(descriptors[0])
+            close(descriptors[1])
+        }
+
+        let run = Task {
+            try await DirectProcess.run("/bin/sh", arguments: ["-c", "/bin/cat >/dev/null; echo done"])
+        }
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(5))
+            run.cancel()
+        }
+        defer { timeout.cancel() }
+        let output = try await run.value
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "done")
+    }
+
+    func testChildEnvironmentKeepsClaudeConfigurationButDropsCredentials() {
+        let environment = DirectProcess.childEnvironment(
+            inherited: ["ANTHROPIC_API_KEY": "inherited", "CLAUDE_CONFIG_DIR": "/config", "HOME": "/home"],
+            overrides: ["ANTHROPIC_API_KEY": "override", "CLAUDE_CODE_OAUTH_TOKEN": "token"]
+        )
+
+        XCTAssertEqual(environment["CLAUDE_CONFIG_DIR"], "/config")
+        XCTAssertNil(environment["ANTHROPIC_API_KEY"])
+        XCTAssertNil(environment["CLAUDE_CODE_OAUTH_TOKEN"])
+    }
+
     func testGroupedOracleChildPolicyIsStrictlyReadOnly() {
         let groupID = OracleGroupID()
         let restricted = DirectHeadlessMCPService.childRestrictedToolNames(

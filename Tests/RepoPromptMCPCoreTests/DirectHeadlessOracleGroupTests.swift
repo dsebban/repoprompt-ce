@@ -7,7 +7,7 @@ import XCTest
 
 final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testTwoAndFiveOracleStartsUsePhysicalLaneCarriersAndReturnLaneOrder() async throws {
-        let fixture = try Fixture(name: "ordering")
+        let fixture = try DirectHeadlessProviderFixture(name: "ordering")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -48,7 +48,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testGroupedResponseWhitespaceSurvivesMCPEncoding() async throws {
-        let fixture = try Fixture(name: "exact-whitespace")
+        let fixture = try DirectHeadlessProviderFixture(name: "exact-whitespace")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -70,8 +70,87 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         XCTAssertEqual(lanes[0]["response"] as? String, "  exact response  ")
     }
 
+    func testEnabledClaudeRosterRunsDirectAndGroupedOracleWithLanePolicies() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "claude-roster")
+        defer { fixture.cleanup() }
+        let service = fixture.service(claudeEnabled: true)
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        try await Self.setRoster(prepared, primary: "claudeCode:sonnet", additional: [])
+        let direct = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("direct claude")]
+        )
+        XCTAssertEqual(direct["response"] as? String, "claude-0-sonnet")
+        let chatID = try XCTUnwrap(direct["chat_id"] as? String)
+        let continued = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "oracle_send",
+            arguments: ["chat_id": .string(chatID), "message": .string("again")]
+        )
+        XCTAssertEqual(continued["response"] as? String, "claude-0-sonnet")
+
+        try await Self.setRoster(prepared, primary: "claudeCode:sonnet", additional: ["lane-1"])
+        let grouped = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("grouped claude")]
+        )
+        let lanes = try XCTUnwrap(grouped["oracle_results"] as? [[String: Any]])
+        XCTAssertEqual(lanes.compactMap { $0["response"] as? String }, ["claude-0-sonnet", "response-1-lane-1"])
+
+        let claudeCalls = try fixture.claudeCalls()
+        XCTAssertEqual(claudeCalls.count, 3)
+        for call in claudeCalls {
+            XCTAssertEqual(Self.value(after: "--setting-sources", in: call.arguments), "user")
+            XCTAssertEqual(Self.value(after: "--permission-mode", in: call.arguments), "dontAsk")
+            XCTAssertEqual(Self.value(after: "--disallowedTools", in: call.arguments), "Bash")
+            XCTAssertTrue(call.arguments.contains("--strict-mcp-config"))
+        }
+        XCTAssertEqual(Self.value(after: "--tools", in: claudeCalls[0].arguments), "Read,Glob,Grep,Edit,Write")
+        XCTAssertEqual(Self.value(after: "--tools", in: claudeCalls[2].arguments), "Read,Glob,Grep")
+        XCTAssertEqual(Self.value(after: "--allowedTools", in: claudeCalls[2].arguments), "Read,Glob,Grep")
+        XCTAssertEqual(try fixture.calls().map(\.model), ["lane-1"])
+    }
+
+    func testRosterNamingDisabledClaudeFailsBeforeAnyProviderLaunch() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "claude-disabled")
+        defer { fixture.cleanup() }
+        let service = fixture.service()
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        for (configured, arguments): (String, [String: Value]) in [
+            ("claudeCode:sonnet", ["message": .string("configured claude")]),
+            ("default", ["message": .string("requested claude"), "model": .string("claudeCode:sonnet")])
+        ] {
+            try await Self.setRoster(prepared, primary: configured, additional: [])
+            do {
+                _ = try await invoke(prepared: prepared, backend: backend, toolName: "ask_oracle", arguments: arguments)
+                XCTFail("Expected disabled Claude Code to be refused")
+            } catch {
+                XCTAssertTrue(String(describing: error).contains("Claude Code is disabled"), "\(error)")
+            }
+        }
+        XCTAssertTrue(try fixture.claudeCalls().isEmpty)
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
     func testSingleOracleUsesDirectConversationWithoutDurableGroup() async throws {
-        let fixture = try Fixture(name: "single-direct")
+        let fixture = try DirectHeadlessProviderFixture(name: "single-direct")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -130,7 +209,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testContextBuilderRejectsOraclePresetBeforeProviderWork() async throws {
-        let fixture = try Fixture(name: "app-only-oracle-preset")
+        let fixture = try DirectHeadlessProviderFixture(name: "app-only-oracle-preset")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -159,7 +238,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testNamedDirectContinuationStaysSingleLaneAfterEnablingGroupedSettings() async throws {
-        let fixture = try Fixture(name: "named-direct-grouped-settings")
+        let fixture = try DirectHeadlessProviderFixture(name: "named-direct-grouped-settings")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -200,7 +279,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testShutdownClearsPreparedDirectPlanWithoutChangingMissingPlanError() async throws {
-        let fixture = try Fixture(name: "shutdown-direct-sentinel")
+        let fixture = try DirectHeadlessProviderFixture(name: "shutdown-direct-sentinel")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -210,7 +289,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
             oracleAdapter: prepared.oracleAdapter
         )
         let arguments: [String: Value] = ["message": .string("direct turn")]
-        let security = try await securityContext(prepared)
+        let security = try await DirectHeadlessProviderFixture.securityContext(prepared)
         let plan = try await prepared.oracleAdapter.resolveChildLaunchPlan(
             toolName: "ask_oracle",
             arguments: arguments,
@@ -233,7 +312,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testDeletedContinuationAfterPlanningRetainsRosterConflictError() async throws {
-        let fixture = try Fixture(name: "deleted-after-planning")
+        let fixture = try DirectHeadlessProviderFixture(name: "deleted-after-planning")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -260,7 +339,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
             "chat_id": .string(chatID),
             "message": .string("second turn")
         ]
-        let security = try await securityContext(prepared)
+        let security = try await DirectHeadlessProviderFixture.securityContext(prepared)
         let plan = try await prepared.oracleAdapter.resolveChildLaunchPlan(
             toolName: "oracle_send",
             arguments: arguments,
@@ -287,7 +366,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testMessageOnlyOracleSendUsesPrimaryDirectFallbackAndContinuesMostRecent() async throws {
-        let fixture = try Fixture(name: "implicit-direct")
+        let fixture = try DirectHeadlessProviderFixture(name: "implicit-direct")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -325,7 +404,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testMessageOnlyOracleSendContinuesMostRecentCanonicalGroup() async throws {
-        let fixture = try Fixture(name: "implicit-group")
+        let fixture = try DirectHeadlessProviderFixture(name: "implicit-group")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -365,7 +444,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testLogAndMessageOnlySendChooseNewestDirectOrGroupConversation() async throws {
-        let fixture = try Fixture(name: "latest-log")
+        let fixture = try DirectHeadlessProviderFixture(name: "latest-log")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -418,7 +497,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testImplicitDirectContinuationFreezesConversationAcrossPlanningBarrier() async throws {
-        let fixture = try Fixture(name: "implicit-direct-frozen")
+        let fixture = try DirectHeadlessProviderFixture(name: "implicit-direct-frozen")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -452,7 +531,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
             oracleAdapter: barrierAdapter
         )
         let arguments: [String: Value] = ["message": .string("continue frozen direct conversation")]
-        let security = try await securityContext(prepared)
+        let security = try await DirectHeadlessProviderFixture.securityContext(prepared)
         let planningTask = Task {
             try await barrierAdapter.resolveChildLaunchPlan(
                 toolName: "oracle_send",
@@ -492,7 +571,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testGroupContinuationThroughAdditionalMemberColdLoadsSiblingsAndLogsIdentity() async throws {
-        let fixture = try Fixture(name: "continuation")
+        let fixture = try DirectHeadlessProviderFixture(name: "continuation")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -549,7 +628,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testGroupContinuationReloadsAfterClaimWhenPriorPublisherAdvancesRevision() async throws {
-        let fixture = try Fixture(name: "continuation-post-claim-reload")
+        let fixture = try DirectHeadlessProviderFixture(name: "continuation-post-claim-reload")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -611,7 +690,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testGroupContinuationRejectsMismatchedCarrierBeforeHistoryMutation() async throws {
-        let fixture = try Fixture(name: "continuation-carrier")
+        let fixture = try DirectHeadlessProviderFixture(name: "continuation-carrier")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -656,7 +735,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testPartialAndPrimaryFailuresRemainOrderedStructuredResults() async throws {
-        let fixture = try Fixture(name: "failures")
+        let fixture = try DirectHeadlessProviderFixture(name: "failures")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -703,7 +782,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testTerminalReconciliationFailureRetriesCanonicalOutcomeWithoutSyntheticSettlement() async throws {
-        let fixture = try Fixture(name: "terminal-save")
+        let fixture = try DirectHeadlessProviderFixture(name: "terminal-save")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -756,7 +835,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testTwoTerminalReconciliationFailuresRecoverExactOutcomeOnContinuation() async throws {
-        let fixture = try Fixture(name: "terminal-two-failures")
+        let fixture = try DirectHeadlessProviderFixture(name: "terminal-two-failures")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -836,7 +915,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testTerminalReconciliationCommitThenThrowReturnsAndPreservesExactOutcome() async throws {
-        let fixture = try Fixture(name: "terminal-commit-throw")
+        let fixture = try DirectHeadlessProviderFixture(name: "terminal-commit-throw")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -910,7 +989,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testTerminalStageCommitThenPersistenceThrowReturnsExactOutcome() async throws {
-        let fixture = try Fixture(name: "terminal-stage-commit-throw")
+        let fixture = try DirectHeadlessProviderFixture(name: "terminal-stage-commit-throw")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -946,7 +1025,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testFailedStageAndTransientReconcileRetrySameIntent() async throws {
-        let fixture = try Fixture(name: "terminal-restage")
+        let fixture = try DirectHeadlessProviderFixture(name: "terminal-restage")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -983,7 +1062,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testFailedRestagingPreservesUnderlyingErrorWhenNothingWasStaged() async throws {
-        let fixture = try Fixture(name: "terminal-restage-fails")
+        let fixture = try DirectHeadlessProviderFixture(name: "terminal-restage-fails")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -1020,7 +1099,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testRosterConflictAndRawContextBuilderGateFailBeforeProviderDispatch() async throws {
-        let fixture = try Fixture(name: "gates")
+        let fixture = try DirectHeadlessProviderFixture(name: "gates")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -1070,7 +1149,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testThreeOracleContextBuilderUsesOnePersistedCanonicalFrozenPack() async throws {
-        let fixture = try Fixture(name: "frozen-context")
+        let fixture = try DirectHeadlessProviderFixture(name: "frozen-context")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -1107,7 +1186,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     func testParentCancellationDrainsAllPhysicalLaneProcesses() async throws {
-        let fixture = try Fixture(name: "cancellation")
+        let fixture = try DirectHeadlessProviderFixture(name: "cancellation")
         defer { fixture.cleanup() }
         let service = fixture.service()
         let prepared = try await service.prepareRuntime()
@@ -1176,7 +1255,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     }
 
     private func makeFaultHarness(
-        fixture: Fixture,
+        fixture: DirectHeadlessProviderFixture,
         prepared: DirectHeadlessMCPService.PreparedRuntime,
         store: TerminalPublicationFaultOracleStore
     ) async throws -> (
@@ -1229,7 +1308,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         arguments: [String: Value],
         mismatchedBundle: Bool = false
     ) async throws -> [String: Any] {
-        let security = try await securityContext(prepared)
+        let security = try await DirectHeadlessProviderFixture.securityContext(prepared)
         let plan = try await (oracleAdapter ?? prepared.oracleAdapter).resolveChildLaunchPlan(
             toolName: toolName,
             arguments: arguments,
@@ -1317,24 +1396,8 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         return try XCTUnwrap(JSONSerialization.jsonObject(with: result.json) as? [String: Any])
     }
 
-    private func securityContext(
-        _ prepared: DirectHeadlessMCPService.PreparedRuntime
-    ) async throws -> DomainToolInvocationSecurityContext {
-        let snapshot = try await prepared.context.snapshot(connectionID: prepared.connectionID)
-        return DomainToolInvocationSecurityContext(
-            principal: prepared.principal,
-            connectionID: prepared.connectionID,
-            connectionGeneration: prepared.connectionGeneration,
-            invocationID: UUID(),
-            runtimeID: prepared.runtime.identity.runtimeID,
-            runtimeGeneration: prepared.runtime.identity.lifecycleGeneration,
-            workspaceID: snapshot.identity.workspaceID,
-            workspaceRevision: snapshot.workspace.revisions.workingRevision,
-            authorizedCanonicalRoots: Set(snapshot.roots.map(\.path)),
-            hasAuthoritativeRoutingContext: true,
-            ephemeralGrantedToolNames: [],
-            ephemeralGrantedOperations: []
-        )
+    private static func value(after flag: String, in arguments: [String]) -> String? {
+        arguments.firstIndex(of: flag).flatMap { arguments.indices.contains($0 + 1) ? arguments[$0 + 1] : nil }
     }
 
     private static func object(_ value: Value) throws -> [String: Any] {
@@ -1640,98 +1703,4 @@ private struct ForcedTerminalPublicationError: Error {}
 
 private struct ForcedTerminalStagingError: Error, Equatable {
     let attempt: Int
-}
-
-private struct Fixture {
-    struct Call {
-        let lane: Int
-        let model: String
-        let processID: Int32
-        let launchID: String?
-        let groupID: String?
-        let claimID: String?
-    }
-
-    let root: URL
-    let profile: URL
-    let executable: URL
-    let callLog: URL
-    let profileName: String
-
-    init(name: String) throws {
-        root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rp-headless-oracle-root-\(name)-\(UUID().uuidString)", isDirectory: true)
-        profile = FileManager.default.temporaryDirectory
-            .appendingPathComponent("rp-headless-oracle-profile-\(name)-\(UUID().uuidString)", isDirectory: true)
-        executable = profile.appendingPathComponent("codex-stub")
-        callLog = profile.appendingPathComponent("calls.log")
-        profileName = "oracle-\(name)"
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
-        let script = """
-        #!/bin/sh
-        model=default
-        while [ "$#" -gt 0 ]; do
-          if [ "$1" = "--model" ]; then
-            shift
-            model="$1"
-          fi
-          shift
-        done
-        lane="${REPOPROMPT_MCP_ORACLE_LANE_ID:-0}"
-        /usr/bin/printf '%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
-          "${REPOPROMPT_MCP_LAUNCH_ID:-}" "${REPOPROMPT_MCP_ORACLE_GROUP_ID:-}" \
-          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" >> '\(callLog.path)'
-        /bin/cat >/dev/null
-        case "$model" in
-          cancel-*) trap 'exit 0' TERM INT; /bin/sleep 30 ;;
-          fail) /usr/bin/printf '%s\\n' 'fake provider failure' >&2; exit 7 ;;
-          exact) /usr/bin/printf '%s\\n' '{"type":"message","text":"  exact response  "}'; exit 0 ;;
-        esac
-        case "$lane" in
-          0) /bin/sleep 0.15 ;;
-          1) /bin/sleep 0.10 ;;
-          2) /bin/sleep 0.06 ;;
-          3) /bin/sleep 0.03 ;;
-        esac
-        /usr/bin/printf '{"type":"message","text":"response-%s-%s"}\\n' "$lane" "$model"
-        """
-        try Data(script.utf8).write(to: executable)
-        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
-    }
-
-    func service() -> DirectHeadlessMCPService {
-        DirectHeadlessMCPService(
-            environment: [
-                "REPOPROMPT_CODEX_COMMAND": executable.path,
-                "REPOPROMPT_MCP_HEADLESS_PROFILE": profileName,
-                "REPOPROMPT_MCP_HEADLESS_PROFILE_DIR": profile.path,
-                "REPOPROMPT_MCP_WORKING_DIRS": root.path,
-                "PATH": ProcessInfo.processInfo.environment["PATH"] ?? ""
-            ],
-            currentDirectory: root
-        )
-    }
-
-    func calls() throws -> [Call] {
-        guard FileManager.default.fileExists(atPath: callLog.path) else { return [] }
-        return try String(contentsOf: callLog, encoding: .utf8)
-            .split(separator: "\n")
-            .map { line in
-                let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
-                return Call(
-                    lane: Int(fields[0]) ?? -1,
-                    model: fields[1],
-                    processID: Int32(fields[2]) ?? -1,
-                    launchID: fields[3].isEmpty ? nil : fields[3],
-                    groupID: fields[4].isEmpty ? nil : fields[4],
-                    claimID: fields[5].isEmpty ? nil : fields[5]
-                )
-            }
-    }
-
-    func cleanup() {
-        try? FileManager.default.removeItem(at: root)
-        try? FileManager.default.removeItem(at: profile)
-    }
 }

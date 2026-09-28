@@ -3,6 +3,16 @@ import MCP
 import RepoPromptDomainRuntime
 import RepoPromptShared
 
+enum DirectHeadlessProviderID {
+    static let codexExec = "codexExec"
+    static let claudeCode = "claudeCode"
+    static let all = [codexExec, claudeCode]
+
+    static func canonical(matching raw: String) -> String? {
+        all.first { $0.caseInsensitiveCompare(raw) == .orderedSame }
+    }
+}
+
 actor DirectHeadlessProviderCoordinator {
     typealias BeginEpoch = @Sendable (
         _ registration: DomainAgentSessionRegistration,
@@ -23,19 +33,39 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     struct ProviderDescriptor {
+        enum Backend: Equatable {
+            case codexCLI(executable: String)
+            case claudeCLI(executable: String)
+        }
+
         let id: String
         let displayName: String
-        let executable: String?
+        /// `nil` when the provider is unavailable; `unavailableReason` says why.
+        let backend: Backend?
         let unavailableReason: String?
 
         var value: Value {
             .object([
                 "id": .string(id),
                 "name": .string(displayName),
-                "available": .bool(executable != nil),
+                "available": .bool(backend != nil),
                 "reason": unavailableReason.map(Value.string) ?? .null
             ])
         }
+
+        func requireBackend() throws -> Backend {
+            guard let backend else {
+                throw MCPError.invalidRequest("Provider '\(id)' is unavailable: \(unavailableReason ?? "not configured")")
+            }
+            return backend
+        }
+    }
+
+    /// One provider turn. `providerSessionID` is the provider's own conversation handle
+    /// (Codex `thread_id`, Claude `session_id`) for resuming it later.
+    struct TurnOutput: Equatable {
+        let assistantText: String
+        let providerSessionID: String?
     }
 
     private struct AgentRecord {
@@ -43,6 +73,7 @@ actor DirectHeadlessProviderCoordinator {
         let epoch: DomainAgentRunTurnEpoch
         let runID: UUID
         let agentID: String
+        let displayName: String
         let model: String?
         var name: String?
         let parentSessionID: UUID?
@@ -70,7 +101,7 @@ actor DirectHeadlessProviderCoordinator {
     private let environment: [String: String]
     private let beginEpoch: BeginEpoch
     private var agents: [UUID: AgentRecord] = [:]
-    private var providerTasks: [UUID: Task<String, Error>] = [:]
+    private var providerTasks: [UUID: Task<TurnOutput, Error>] = [:]
     private var conversations: [UUID: Conversation] = [:]
     private var isShuttingDown = false
 
@@ -97,37 +128,68 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     func providerCatalog() -> [ProviderDescriptor] {
-        let codex = Self.findExecutable(
-            named: environment["REPOPROMPT_CODEX_COMMAND"] ?? "codex",
-            path: environment["PATH"]
+        Self.providerCatalog(environment: environment)
+    }
+
+    /// Operator contract, read only from the `repoprompt-mcp` process environment so no request
+    /// or setting can enable a provider:
+    /// - `REPOPROMPT_CODEX_COMMAND`: Codex executable; default `codex` on `PATH`. Codex is the
+    ///   default provider because its sandbox is OS-enforced.
+    /// - `REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1` (or `true`): enables `claudeCode`, which has
+    ///   no OS sandbox. It uses the CLI's stored login; API keys are never forwarded.
+    /// - `REPOPROMPT_CLAUDE_COMMAND`: Claude Code executable; default `claude`. Does not enable it.
+    nonisolated static func providerCatalog(environment: [String: String]) -> [ProviderDescriptor] {
+        let codex = findExecutable(named: environment["REPOPROMPT_CODEX_COMMAND"] ?? "codex", path: environment["PATH"])
+        let claudeEnabled = ["1", "true"].contains(
+            environment["REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED"]?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
         )
+        let claude = claudeEnabled
+            ? findExecutable(named: environment["REPOPROMPT_CLAUDE_COMMAND"] ?? "claude", path: environment["PATH"])
+            : nil
+        let claudeUnavailableReason: String? = if !claudeEnabled {
+            "Claude Code is disabled; set REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1 in the repoprompt-mcp process environment."
+        } else if claude == nil {
+            "Claude Code CLI was not found on PATH (REPOPROMPT_CLAUDE_COMMAND)."
+        } else {
+            nil
+        }
         return [
             ProviderDescriptor(
-                id: "codexExec",
+                id: DirectHeadlessProviderID.codexExec,
                 displayName: "Codex CLI",
-                executable: codex,
+                backend: codex.map { .codexCLI(executable: $0) },
                 unavailableReason: codex == nil ? "Codex CLI was not found on PATH." : nil
+            ),
+            ProviderDescriptor(
+                id: DirectHeadlessProviderID.claudeCode,
+                displayName: "Claude Code CLI",
+                backend: claude.map { .claudeCLI(executable: $0) },
+                unavailableReason: claudeUnavailableReason
             )
         ]
     }
 
     static func codexExecArguments(model: String?, purpose: ExecutionPurpose) -> [String] {
         var arguments: [String] = []
-        if let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, model != "default" {
+        if let model = explicitModel(model) {
             arguments += ["--model", model]
         }
         arguments += ["exec", "--skip-git-repo-check", "--sandbox", purpose.sandbox, "--json", "-"]
         return arguments
     }
 
+    /// The model to pass to a CLI, or `nil` to let it use its own default.
+    nonisolated static func explicitModel(_ model: String?) -> String? {
+        guard let model, !model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, model != "default" else {
+            return nil
+        }
+        return model
+    }
+
     func validateOracleRoster(_ roster: OracleRoster) throws {
         for model in roster.orderedModels {
-            let descriptor = try resolveProvider(model.providerID)
-            guard descriptor.executable != nil else {
-                throw MCPError.invalidRequest(
-                    "Provider '\(descriptor.id)' is unavailable: \(descriptor.unavailableReason ?? "not configured")"
-                )
-            }
+            _ = try resolveProvider(model.providerID).requireBackend()
         }
     }
 
@@ -139,12 +201,9 @@ actor DirectHeadlessProviderCoordinator {
         sessionID: UUID? = nil,
         purpose: ExecutionPurpose,
         carrierEnvironment: [String: String]? = nil
-    ) async throws -> String {
+    ) async throws -> TurnOutput {
         guard !isShuttingDown else { throw CancellationError() }
-        let descriptor = try resolveProvider(providerID)
-        guard let executable = descriptor.executable else {
-            throw MCPError.invalidRequest("Provider '\(descriptor.id)' is unavailable: \(descriptor.unavailableReason ?? "not configured")")
-        }
+        let backend = try resolveProvider(providerID).requireBackend()
         guard let connectionID = request.securityContext?.connectionID else {
             throw DirectHeadlessDomainContext.Error.routingUnavailable
         }
@@ -155,7 +214,17 @@ actor DirectHeadlessProviderCoordinator {
         )
         guard !isShuttingDown else { throw CancellationError() }
         try Task.checkCancellation()
-        let arguments = Self.codexExecArguments(model: model, purpose: purpose)
+        let (executable, arguments, parse): (String, [String], @Sendable (String) throws -> TurnOutput) =
+            switch backend {
+            case let .codexCLI(executable):
+                (executable, Self.codexExecArguments(model: model, purpose: purpose), Self.codexTurnOutput)
+            case let .claudeCLI(executable):
+                (
+                    executable,
+                    DirectHeadlessClaudeCodeCLI.arguments(model: model, purpose: purpose),
+                    DirectHeadlessClaudeCodeCLI.parseTurnOutput
+                )
+            }
         let carrier = carrierEnvironment ?? DomainChildLaunchContext.current?.environment ?? [:]
         var childEnvironment = DirectProcess.withoutPrivateCarrier(from: environment)
         childEnvironment.merge(carrier) { _, supplied in supplied }
@@ -168,7 +237,7 @@ actor DirectHeadlessProviderCoordinator {
                 environment: childEnvironment,
                 currentDirectory: snapshot.activeRoot
             )
-            return Self.finalAssistantText(from: output)
+            return try parse(output)
         }
         providerTasks[taskID] = task
         defer { providerTasks.removeValue(forKey: taskID) }
@@ -192,11 +261,9 @@ actor DirectHeadlessProviderCoordinator {
             args: args,
             includeSessionCleanupGuidance: includeSessionCleanupGuidance
         )
-        let providerID = args["model_id"]?.stringValue ?? args["agent"]?.stringValue ?? "codexExec"
+        let providerID = args["model_id"]?.stringValue ?? args["agent"]?.stringValue
         let descriptor = try resolveProvider(providerID)
-        guard descriptor.executable != nil else {
-            throw MCPError.invalidRequest("Provider '\(descriptor.id)' is unavailable: \(descriptor.unavailableReason ?? "not configured")")
-        }
+        _ = try descriptor.requireBackend()
         let sessionID = DomainChildLaunchContext.current?.runID ?? UUID()
         let runID = sessionID
         guard let connectionID = request.securityContext?.connectionID else {
@@ -232,6 +299,7 @@ actor DirectHeadlessProviderCoordinator {
             epoch: epoch,
             runID: runID,
             agentID: descriptor.id,
+            displayName: descriptor.displayName,
             model: args["model"]?.stringValue,
             name: name,
             parentSessionID: parentSessionID,
@@ -259,7 +327,7 @@ actor DirectHeadlessProviderCoordinator {
             guard let self else { return }
             let report = await DomainAgentRunExecutionCore.execute {
                 do {
-                    let text = try await runProviderOnce(
+                    let output = try await runProviderOnce(
                         message: message,
                         providerID: descriptor.id,
                         model: args["model"]?.stringValue,
@@ -268,7 +336,7 @@ actor DirectHeadlessProviderCoordinator {
                         purpose: .agent,
                         carrierEnvironment: capturedCarrierEnvironment
                     )
-                    return .completed(assistantText: text)
+                    return .completed(assistantText: output.assistantText)
                 } catch {
                     if Task.isCancelled { throw CancellationError() }
                     throw error
@@ -397,7 +465,7 @@ actor DirectHeadlessProviderCoordinator {
             model: model,
             request: request,
             purpose: .directOracle
-        )
+        ).assistantText
         let id = UUID()
         conversations[id] = Conversation(
             id: id,
@@ -425,7 +493,7 @@ actor DirectHeadlessProviderCoordinator {
             model: conversation.model,
             request: request,
             purpose: .directOracle
-        )
+        ).assistantText
         conversation.messages.append(("user", message))
         conversation.messages.append(("assistant", text))
         conversation.updatedAt = Date()
@@ -536,7 +604,7 @@ actor DirectHeadlessProviderCoordinator {
             tabID: nil,
             sessionName: record.name,
             agentRaw: record.agentID,
-            agentDisplayName: record.agentID == "codexExec" ? "Codex CLI" : record.agentID,
+            agentDisplayName: record.displayName,
             modelRaw: record.model,
             reasoningEffortRaw: nil,
             status: status,
@@ -564,10 +632,11 @@ actor DirectHeadlessProviderCoordinator {
 
     private func resolveProvider(_ requested: String?) throws -> ProviderDescriptor {
         let normalized = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? "codexExec"
+        let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? DirectHeadlessProviderID.codexExec
         let roleAliases: Set = ["pair", "explore", "engineer", "design", "default"]
         guard let descriptor = providerCatalog().first(where: {
-            $0.id.caseInsensitiveCompare(id) == .orderedSame || (roleAliases.contains(id.lowercased()) && $0.id == "codexExec")
+            $0.id.caseInsensitiveCompare(id) == .orderedSame
+                || (roleAliases.contains(id.lowercased()) && $0.id == DirectHeadlessProviderID.codexExec)
         }) else {
             throw MCPError.invalidParams("unknown standalone provider '\(id)'")
         }
@@ -609,12 +678,16 @@ actor DirectHeadlessProviderCoordinator {
             .first(where: FileManager.default.isExecutableFile)
     }
 
-    private nonisolated static func finalAssistantText(from output: String) -> String {
+    nonisolated static func codexTurnOutput(from output: String) -> TurnOutput {
         var latest: String?
+        var threadID: String?
         for line in output.split(separator: "\n") {
             guard let data = line.data(using: .utf8),
                   let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { continue }
+            if object["type"] as? String == "thread.started", let id = object["thread_id"] as? String {
+                threadID = id
+            }
             if let item = object["item"] as? [String: Any],
                item["type"] as? String == "agent_message",
                let text = item["text"] as? String
@@ -625,6 +698,9 @@ actor DirectHeadlessProviderCoordinator {
                 latest = text
             }
         }
-        return latest ?? output.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TurnOutput(
+            assistantText: latest ?? output.trimmingCharacters(in: .whitespacesAndNewlines),
+            providerSessionID: threadID
+        )
     }
 }
