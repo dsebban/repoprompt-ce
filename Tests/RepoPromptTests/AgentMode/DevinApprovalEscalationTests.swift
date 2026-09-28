@@ -36,6 +36,44 @@ final class DevinApprovalEscalationTests: XCTestCase {
         XCTAssertEqual(updatedBindings, 0)
     }
 
+    // MARK: - Wire option IDs
+
+    func testEscalationSettlesANativeToolPromptWithAllowSession() async throws {
+        let h = try await park(options: Self.nativeOptions, toolName: "shell")
+        h.store.setPermissionLevel(.devin(.fullApproval))
+        await h.service.settlePendingDevinApprovalOnEscalation(
+            session: h.session, currentTabID: nil, updateActiveBindings: { _ in }
+        )?.value
+        try await h.finish()
+
+        let outcome = try XCTUnwrap(h.recordedResponse()?["outcome"] as? [String: Any])
+        XCTAssertEqual(outcome["outcome"] as? String, "selected")
+        XCTAssertEqual(outcome["optionId"] as? String, "allow_session")
+    }
+
+    /// A third-party MCP prompt offering no `allow_session` never widens to a server-wide grant:
+    /// the session-scoped decision falls back to the one-time `allow_once`, the narrowest allow.
+    func testEscalationOnAnMCPToolPromptNeverSelectsAServerWideGrant() async throws {
+        let h = try await park(
+            options: [
+                ("allow_server_session", "allow_always"),
+                ("allow_server_always", "allow_always"),
+                ("allow_once", "allow_once"),
+                ("reject_once", "reject_once")
+            ],
+            toolName: "mcp__github__search_code"
+        )
+        h.store.setPermissionLevel(.devin(.fullApproval))
+        await h.service.settlePendingDevinApprovalOnEscalation(
+            session: h.session, currentTabID: nil, updateActiveBindings: { _ in }
+        )?.value
+        try await h.finish()
+
+        let outcome = try XCTUnwrap(h.recordedResponse()?["outcome"] as? [String: Any])
+        XCTAssertEqual(outcome["outcome"] as? String, "selected")
+        XCTAssertEqual(outcome["optionId"] as? String, "allow_once")
+    }
+
     // MARK: - Harness
 
     private static let nativeOptions: [(String, String)] = [
