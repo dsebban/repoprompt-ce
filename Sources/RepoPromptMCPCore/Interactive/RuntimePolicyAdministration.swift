@@ -27,7 +27,7 @@ package enum RuntimePolicyAdministration {
             guard let command = arguments.first else {
                 throw CommandError.invalidArguments(usage)
             }
-            let store = makeRuntime().mutationPolicyStore
+            let store = try makeRuntime().mutationPolicyStore
             let administrator = DomainClientPrincipal(
                 principalID: UUID(),
                 stableKey: "tty:\(getuid())",
@@ -158,19 +158,21 @@ package enum RuntimePolicyAdministration {
         }
     }
 
-    private static func makeRuntime() -> MCPDomainRuntime {
-        let applicationSupport = FileManager.default.urls(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask
-        ).first ?? FileManager.default.temporaryDirectory
-        let root = applicationSupport.appendingPathComponent("RepoPrompt CE", isDirectory: true)
+    private static func makeRuntime() throws -> MCPDomainRuntime {
+        // Resolve the same profile and storage root as `--backend headless`, so grants land in the
+        // policy file that runtime reads (Linux's applicationSupportDirectory is XDG, not ~/Library).
+        var environment = ProcessInfo.processInfo.environment
+        environment.removeValue(forKey: "REPOPROMPT_MCP_WORKING_DIRS")
+        let locations = try DirectHeadlessRuntimeLocationResolver.resolve(
+            environment: environment,
+            currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        )
         return MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
             mode: .standalone,
-            profileIdentifier: "default",
-            storageDirectory: root,
-            eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
-            temporaryDirectory: FileManager.default.temporaryDirectory
-                .appendingPathComponent("RepoPrompt CE", isDirectory: true),
+            profileIdentifier: locations.profileIdentifier,
+            storageDirectory: locations.storageDirectory,
+            eventDirectory: locations.eventDirectory,
+            temporaryDirectory: locations.temporaryDirectory,
             externalReloadInterval: nil
         ))
     }
