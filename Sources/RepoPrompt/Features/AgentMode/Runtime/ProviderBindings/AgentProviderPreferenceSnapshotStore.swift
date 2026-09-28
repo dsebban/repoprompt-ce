@@ -156,8 +156,11 @@ final class AgentProviderPreferenceSnapshotStore {
             )
         case .devin:
             let level = effectiveDevinPermissionLevel(profile: profile)
+            // Full Approval also settles a stranded pending prompt with Devin's session-scoped
+            // allow; the mode itself is applied at the next run's configuration step.
             return AgentProviderRuntimePermissionBinding(
-                acpSessionModeID: level.sessionModeID
+                acpSessionModeID: level.sessionModeID,
+                acceptsPendingACPApprovalWhenActivated: level == .fullApproval
             )
         }
     }

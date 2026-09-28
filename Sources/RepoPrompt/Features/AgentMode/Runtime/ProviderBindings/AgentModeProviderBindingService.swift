@@ -207,7 +207,23 @@ final class AgentModeProviderBindingService {
                 // Avoid an eager untracked shutdown that could race a newly started run.
                 break
             case .devin:
-                break
+                // Escalating to Full Approval settles a pending prompt with the exact
+                // session-scoped allow (`allow_session`), never a mode-switch option, and
+                // never touches the running process's launch.
+                let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
+                guard runtime.acceptsPendingACPApprovalWhenActivated,
+                      session.runState.isActive,
+                      let controller = session.acpController,
+                      let pendingApproval = session.pendingApproval else { continue }
+                Task { @MainActor in
+                    await controller.respondToPermissionRequest(
+                        id: pendingApproval.requestID.displayValue,
+                        decision: .acceptForSession
+                    )
+                    if session.tabID == currentTabID {
+                        updateActiveBindings(session)
+                    }
+                }
             case .openCode, .antigravity:
                 let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
                 guard let sessionModeID = runtime.acpSessionModeID,

@@ -324,11 +324,13 @@ final class DevinPermissionLevelTests: XCTestCase {
         let override = store.runtimePermission(for: .devin, profile: .providerOverride(.devin(.fullApproval)))
         XCTAssertEqual(override.acpSessionModeID, "bypass")
 
-        // RepoPrompt never broadly auto-approves Devin's native tools.
+        // RepoPrompt never broadly auto-approves Devin's native tools; only Full Approval
+        // settles a pending prompt (with the session-scoped allow) when activated.
         for binding in [configured, override] {
             XCTAssertFalse(binding.autoApproveAllACPToolPermissions)
-            XCTAssertFalse(binding.acceptsPendingACPApprovalWhenActivated)
         }
+        XCTAssertFalse(configured.acceptsPendingACPApprovalWhenActivated)
+        XCTAssertTrue(override.acceptsPendingACPApprovalWhenActivated)
     }
 
     @MainActor
