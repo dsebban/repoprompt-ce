@@ -60,7 +60,7 @@ final class AgentTabSession: ObservableObject {
                 // Pins which path revives a finished run: a completed Devin session was observed
                 // reporting `running` for 40+ minutes with no provider traffic after completion.
                 if runState.isActive, !oldValue.isActive, oldValue != .idle, AgentModePerfDiagnostics.isEnabled {
-                    AgentModePerfDiagnostics.event("session.runState.reactivated", tabID: tabID, fields: [
+                    AgentModePerfDiagnostics.recordRunStateReactivation(tabID: tabID, fields: [
                         "from": oldValue.rawValue,
                         "to": runState.rawValue,
                         "runID": AgentModePerfDiagnostics.shortID(runID),
