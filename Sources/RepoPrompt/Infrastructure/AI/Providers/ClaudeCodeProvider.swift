@@ -64,6 +64,7 @@ final class ClaudeCodeProvider: AIProvider {
         "Edit",
         "Glob",
         "Grep",
+        "Agent",
         "Task",
         "TaskOutput",
         "TaskStop",
