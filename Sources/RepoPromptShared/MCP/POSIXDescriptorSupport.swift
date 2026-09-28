@@ -1,5 +1,4 @@
-import Darwin
-import Darwin.POSIX.fcntl
+import Foundation
 
 public enum POSIXDescriptorConfigurationError: Error, Equatable, Sendable {
     case invalidFileDescriptor(fd: Int32)

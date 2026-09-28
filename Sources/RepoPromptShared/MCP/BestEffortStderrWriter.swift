@@ -1,5 +1,3 @@
-import Darwin
-import Darwin.POSIX.fcntl
 import Foundation
 
 /// Best-effort raw file-descriptor writer for diagnostic output on MCP stdio
@@ -72,14 +70,20 @@ public enum BestEffortStderrWriter {
 
         let originalFlags = fcntl(descriptor, F_GETFL)
         guard originalFlags >= 0 else { return false }
-        let rawNoSIGPIPE = fcntl(descriptor, F_GETNOSIGPIPE)
-        let originalNoSIGPIPE = rawNoSIGPIPE >= 0 ? rawNoSIGPIPE : nil
-        let needsNoSIGPIPE = originalNoSIGPIPE == 0
-        if needsNoSIGPIPE,
-           fcntl(descriptor, F_SETNOSIGPIPE, 1) < 0
-        {
-            return false
-        }
+        #if canImport(Darwin)
+            let rawNoSIGPIPE = fcntl(descriptor, F_GETNOSIGPIPE)
+            let originalNoSIGPIPE = rawNoSIGPIPE >= 0 ? rawNoSIGPIPE : nil
+            let needsNoSIGPIPE = originalNoSIGPIPE == 0
+            if needsNoSIGPIPE,
+               fcntl(descriptor, F_SETNOSIGPIPE, 1) < 0
+            {
+                return false
+            }
+        #else
+            // Linux has no per-descriptor SIGPIPE flag; callers ignore SIGPIPE process-wide.
+            let originalNoSIGPIPE: Int32? = nil
+            let needsNoSIGPIPE = false
+        #endif
 
         let needsNonBlocking = originalFlags & O_NONBLOCK == 0
         if needsNonBlocking,
@@ -134,14 +138,20 @@ public enum BestEffortStderrWriter {
             restoredFlags = true
         }
 
-        guard let noSIGPIPE else { return restoredFlags }
-        let restoredSIGPIPE = fcntl(descriptor, F_SETNOSIGPIPE, noSIGPIPE) >= 0
-        return restoredFlags && restoredSIGPIPE
+        #if canImport(Darwin)
+            guard let noSIGPIPE else { return restoredFlags }
+            let restoredSIGPIPE = fcntl(descriptor, F_SETNOSIGPIPE, noSIGPIPE) >= 0
+            return restoredFlags && restoredSIGPIPE
+        #else
+            return restoredFlags
+        #endif
     }
 
     private static func suppressSIGPIPE(on descriptor: Int32) {
         // Failure is acceptable: callers also ignore SIGPIPE process-wide, and
         // the write still fails softly when descriptor configuration is unavailable.
-        _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
+        #if canImport(Darwin)
+            _ = fcntl(descriptor, F_SETNOSIGPIPE, 1)
+        #endif
     }
 }
