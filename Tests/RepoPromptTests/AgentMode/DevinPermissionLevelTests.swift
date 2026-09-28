@@ -1115,6 +1115,76 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: overlayRoot.path))
     }
 
+    func testOverlayDisablesForeignMCPImportsWithoutChangingNativeConfig() throws {
+        let sourceRoot = try makeTestDirectory(name: "DevinIntegrationForeignImports")
+        let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
+        try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
+        let nativeConfig = devinSource.appendingPathComponent("config.json")
+        let nativeData = try JSONSerialization.data(withJSONObject: [
+            "agent": ["model": "native-model"],
+            "read_config_from": ["zed": false]
+        ])
+        try nativeData.write(to: nativeConfig)
+        let executable = sourceRoot.appendingPathComponent("repoprompt-mcp")
+        try "#!/bin/sh\nexit 0\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let prepared = try DevinIntegrationConfiguration.prepare(
+            workingDirectory: sourceRoot.path,
+            repoPromptMCPConfiguration: RepoPromptMCPServerConfiguration(command: executable.path),
+            sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path, "HOME": sourceRoot.path]
+        )
+        let overlayConfig = try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]).asFileURL
+            .appendingPathComponent("devin", isDirectory: true)
+            .appendingPathComponent("config.json")
+        XCTAssertNil(try? FileManager.default.destinationOfSymbolicLink(atPath: overlayConfig.path))
+        let overlay = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: overlayConfig)) as? [String: Any]
+        )
+        XCTAssertEqual((overlay["agent"] as? [String: String])?["model"], "native-model")
+        XCTAssertEqual(
+            overlay["read_config_from"] as? [String: Bool],
+            ["zed": false, "claude": false, "cursor": false]
+        )
+
+        try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
+
+        XCTAssertEqual(try Data(contentsOf: nativeConfig), nativeData)
+    }
+
+    func testCleanupPublishesDevinSettingsWritesWithoutImportOverride() throws {
+        let sourceRoot = try makeTestDirectory(name: "DevinIntegrationSettingsWrite")
+        let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
+        try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
+        let nativeConfig = devinSource.appendingPathComponent("config.json")
+        try JSONSerialization.data(withJSONObject: ["agent": ["model": "before"]]).write(to: nativeConfig)
+        let executable = sourceRoot.appendingPathComponent("repoprompt-mcp")
+        try "#!/bin/sh\nexit 0\n".write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let prepared = try DevinIntegrationConfiguration.prepare(
+            workingDirectory: sourceRoot.path,
+            repoPromptMCPConfiguration: RepoPromptMCPServerConfiguration(command: executable.path),
+            sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path, "HOME": sourceRoot.path]
+        )
+        let overlayConfig = try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]).asFileURL
+            .appendingPathComponent("devin", isDirectory: true)
+            .appendingPathComponent("config.json")
+        var overlay = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: overlayConfig)) as? [String: Any]
+        )
+        overlay["agent"] = ["model": "after"]
+        try JSONSerialization.data(withJSONObject: overlay).write(to: overlayConfig, options: .atomic)
+
+        try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
+
+        let native = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: nativeConfig)) as? [String: Any]
+        )
+        XCTAssertEqual((native["agent"] as? [String: String])?["model"], "after")
+        XCTAssertNil(native["read_config_from"])
+    }
+
     func testCleanupPreservesNewerNativeConfigAndRetainsRecoveryOverlay() throws {
         let sourceRoot = try makeTestDirectory(name: "DevinIntegrationConcurrentNativeWrite")
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
