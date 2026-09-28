@@ -27,7 +27,11 @@ package enum RuntimePolicyAdministration {
             guard let command = arguments.first else {
                 throw CommandError.invalidArguments(usage)
             }
-            let store = try makeRuntime().mutationPolicyStore
+            #if canImport(Darwin)
+                let store = makeRuntime().mutationPolicyStore
+            #else
+                let store = try makeLinuxRuntime().mutationPolicyStore
+            #endif
             let administrator = DomainClientPrincipal(
                 principalID: UUID(),
                 stableKey: "tty:\(getuid())",
@@ -158,24 +162,44 @@ package enum RuntimePolicyAdministration {
         }
     }
 
-    private static func makeRuntime() throws -> MCPDomainRuntime {
-        // Resolve the same profile and storage root as `--backend headless`, so grants land in the
-        // policy file that runtime reads (Linux's applicationSupportDirectory is XDG, not ~/Library).
-        var environment = ProcessInfo.processInfo.environment
-        environment.removeValue(forKey: "REPOPROMPT_MCP_WORKING_DIRS")
-        let locations = try DirectHeadlessRuntimeLocationResolver.resolve(
-            environment: environment,
-            currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-        )
+    private static func makeRuntime() -> MCPDomainRuntime {
+        let applicationSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask
+        ).first ?? FileManager.default.temporaryDirectory
+        let root = applicationSupport.appendingPathComponent("RepoPrompt CE", isDirectory: true)
         return MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
             mode: .standalone,
-            profileIdentifier: locations.profileIdentifier,
-            storageDirectory: locations.storageDirectory,
-            eventDirectory: locations.eventDirectory,
-            temporaryDirectory: locations.temporaryDirectory,
+            profileIdentifier: "default",
+            storageDirectory: root,
+            eventDirectory: root.appendingPathComponent("Events", isDirectory: true),
+            temporaryDirectory: FileManager.default.temporaryDirectory
+                .appendingPathComponent("RepoPrompt CE", isDirectory: true),
             externalReloadInterval: nil
         ))
     }
+
+    #if os(Linux)
+        /// Resolves the same profile and storage root as `--backend headless`, so grants land in the policy
+        /// file that runtime reads (Linux's applicationSupportDirectory is XDG, not ~/Library).
+        private static func makeLinuxRuntime() throws -> MCPDomainRuntime {
+            var environment = ProcessInfo.processInfo.environment
+            // The resolver validates working dirs, but the profile and storage roots never depend on them.
+            environment.removeValue(forKey: "REPOPROMPT_MCP_WORKING_DIRS")
+            let locations = try DirectHeadlessRuntimeLocationResolver.resolve(
+                environment: environment,
+                currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            )
+            return MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
+                mode: .standalone,
+                profileIdentifier: locations.profileIdentifier,
+                storageDirectory: locations.storageDirectory,
+                eventDirectory: locations.eventDirectory,
+                temporaryDirectory: locations.temporaryDirectory,
+                externalReloadInterval: nil
+            ))
+        }
+    #endif
 
     private static let usage = """
     Usage:
