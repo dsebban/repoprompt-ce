@@ -223,6 +223,27 @@ final class MCPGitToolProvider {
 
     private nonisolated static let maxConcurrentRepositories = 3
 
+    /// Agents commonly send `base` for the compare spec. Treat it as an alias of `compare` instead
+    /// of silently diffing the default `uncommitted` spec; conflicting values are rejected.
+    nonisolated static func normalizedArguments(_ args: [String: Value]) throws -> [String: Value] {
+        guard let baseValue = args["base"] else { return args }
+        guard let base = baseValue.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !base.isEmpty else {
+            throw MCPError.invalidParams("base is an alias of compare and must be a non-empty compare spec, e.g. compare=\"origin/main\".")
+        }
+        if let compareValue = args["compare"] {
+            let compare = compareValue.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard compare == base else {
+                throw MCPError.invalidParams(
+                    "base is an alias of compare; got base=\"\(base)\" and compare=\"\(compare ?? "")\". Pass only compare."
+                )
+            }
+        }
+        var normalized = args
+        normalized.removeValue(forKey: "base")
+        normalized["compare"] = .string(base)
+        return normalized
+    }
+
     nonisolated static func worktreeWarning(from worktree: ToolResultDTOs.GitToolReplyDTO.WorktreeDTO?) -> String? {
         guard let worktree, worktree.isWorktree else { return nil }
         var parts: [String] = []
@@ -361,7 +382,7 @@ final class MCPGitToolProvider {
         let invocationID = UUID()
         do {
             let reply = try await executeGitTool(
-                args: args,
+                args: Self.normalizedArguments(args),
                 connectionID: connectionID,
                 appContext: appContext,
                 advertisementInvocationID: invocationID,
