@@ -44,6 +44,32 @@ final class DevinPermissionLevelTests: XCTestCase {
         }
     }
 
+    func testDevinModeSwitchingAndGlobalOptionsAreNeverAutoSelectable() {
+        for optionID in [
+            "switch_bypass",
+            "switch_accept_edits",
+            "plan_normal",
+            "plan_accept_edits",
+            "plan_bypass",
+            "allow_always_global",
+            "allow_all_fetches",
+            "allow_server_always",
+            "net_allow_always",
+            // Unlisted variants the pattern rules must catch so a new Devin mode or
+            // global grant cannot silently become selectable.
+            "switch_smart",
+            "switch_auto",
+            "plan_smart",
+            "allow_tools_global",
+            "net_grant_always"
+        ] {
+            XCTAssertFalse(
+                ACPPermissionOptionPolicy.isAutoSelectable(optionID: optionID, for: .devin),
+                "\(optionID) escapes the pending request's scope and must stay user-decided"
+            )
+        }
+    }
+
     func testSparseDevinRepoPromptPermissionUsesExactAllowOnce() async throws {
         let directory = try makeTestDirectory(name: "DevinSparsePermission")
         let executable = directory.appendingPathComponent("devin")

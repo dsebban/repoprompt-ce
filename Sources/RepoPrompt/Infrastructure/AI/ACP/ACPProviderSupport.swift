@@ -627,12 +627,28 @@ enum ACPPermissionOptionPolicy {
     /// Option IDs that must never be selected by an automatic or fallback path.
     /// Grok's `enable-always-approve` is typed AllowOnce for backward compatibility, so a
     /// bare kind match would otherwise select it and broaden approval beyond the request.
+    /// Devin's `switch_*`/`plan_*` options change the session's permission mode, and the
+    /// `*_always`/`*_global`/server-wide/`allow_all_fetches` options grant beyond the pending
+    /// call. The explicit IDs document today's vocabulary; `isAutoSelectable` also rejects
+    /// unlisted variants by pattern, on top of Devin's exact-ID selection.
     static func denylistedAutoSelectOptionIDs(for providerID: ACPProviderID) -> Set<String> {
         switch providerID {
         case .openCode, .cursor, .antigravity:
             []
         case .devin:
-            ["allow_always", "allow_always_global", "allow_server_session", "allow_server_always"]
+            [
+                "allow_always",
+                "allow_always_global",
+                "allow_server_session",
+                "allow_server_always",
+                "allow_all_fetches",
+                "net_allow_always",
+                "switch_bypass",
+                "switch_accept_edits",
+                "plan_normal",
+                "plan_accept_edits",
+                "plan_bypass"
+            ]
         case .grokBuild:
             ["enable-always-approve"]
         }
@@ -640,7 +656,12 @@ enum ACPPermissionOptionPolicy {
 
     static func isAutoSelectable(optionID: String?, for providerID: ACPProviderID) -> Bool {
         guard let normalized = normalizedOptionValue(optionID) else { return false }
-        return !denylistedAutoSelectOptionIDs(for: providerID).contains(normalized)
+        if denylistedAutoSelectOptionIDs(for: providerID).contains(normalized) { return false }
+        if providerID == .devin {
+            if normalized.hasPrefix("switch_") || normalized.hasPrefix("plan_") { return false }
+            if normalized.hasSuffix("_global") || normalized.hasSuffix("_always") { return false }
+        }
+        return true
     }
 
     /// Overseer approval is strictly per request. ACP's `allow_once` kind is authoritative
