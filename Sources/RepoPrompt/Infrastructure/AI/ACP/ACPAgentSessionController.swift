@@ -1034,11 +1034,28 @@ actor ACPAgentSessionController {
         }
     }
 
+    /// A `session/load` keeps the mode the session already had, which can be a `bypass` set by an
+    /// earlier Full Approval run. Restoring it under Provider Default would silently keep full
+    /// approval, so refuse. A load that fell back to `session/new` is fresh and unaffected.
+    private func refuseProviderDefaultOnLoadedBypassSession(openedSessionModeID: String) throws {
+        guard case .load = sessionConfiguration.mode,
+              fallbackResumeSessionIDForPromptClearing == nil,
+              let bypass = DevinAgentToolPreferences.PermissionLevel.fullApproval.sessionModeID,
+              openedSessionModeID.caseInsensitiveCompare(bypass) == .orderedSame
+        else { return }
+        throw AIProviderError.invalidConfiguration(
+            detail: "This resumed Devin conversation is in Bypass mode, and Provider Default would keep it there. "
+                + "Choose Full Approval to continue at that level, another Devin permission level to lower it, "
+                + "or start a new conversation."
+        )
+    }
+
     private func applyDevinPermissionSessionModeSerialized(_ requestedModeID: String?) async throws {
         guard let requestedModeID = requestedModeID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !requestedModeID.isEmpty
         else {
             guard let openedSessionModeID else { return }
+            try refuseProviderDefaultOnLoadedBypassSession(openedSessionModeID: openedSessionModeID)
             try await setSessionModeSerialized(openedSessionModeID)
             return
         }

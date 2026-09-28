@@ -52,6 +52,59 @@ final class DevinAgentModeSessionModeBoundaryTests: XCTestCase {
         )
     }
 
+    // MARK: - Resume guard
+
+    func testProviderDefaultResumeOfABypassSessionRefusesBeforePrompt() async throws {
+        let h = try makeHarness(startingMode: "bypass")
+        do {
+            try await h.run(level: .providerDefault, resumeSessionID: "devin-session")
+            XCTFail("Provider Default must not keep a resumed session in bypass")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("resumed Devin conversation is in Bypass mode"))
+            XCTAssertTrue(error.localizedDescription.contains("Choose Full Approval"))
+        }
+        XCTAssertTrue(h.methods().contains("session/load"), "order was \(h.methods())")
+        XCTAssertFalse(h.methods().contains("session/prompt"), "order was \(h.methods())")
+        XCTAssertTrue(h.modeValues().isEmpty)
+    }
+
+    func testNormalResumeOfABypassSessionSendsAcceptEditsBeforePrompt() async throws {
+        let h = try makeHarness(startingMode: "bypass")
+        try await h.run(level: .normal, resumeSessionID: "devin-session")
+
+        XCTAssertEqual(h.modeValues(), ["accept-edits"])
+        let methods = h.methods()
+        XCTAssertLessThan(
+            try XCTUnwrap(methods.firstIndex(of: "session/set_config_option")),
+            try XCTUnwrap(methods.firstIndex(of: "session/prompt"))
+        )
+    }
+
+    func testFullApprovalResumeOfABypassSessionPrompts() async throws {
+        let h = try makeHarness(startingMode: "bypass")
+        try await h.run(level: .fullApproval, resumeSessionID: "devin-session")
+        XCTAssertTrue(h.methods().contains("session/prompt"))
+    }
+
+    func testProviderDefaultResumeOfANonBypassSessionPrompts() async throws {
+        let h = try makeHarness(startingMode: "smart")
+        try await h.run(level: .providerDefault, resumeSessionID: "devin-session")
+        XCTAssertTrue(h.modeValues().isEmpty, "the opened mode is already current; sent \(h.modeValues())")
+        XCTAssertTrue(h.methods().contains("session/prompt"))
+    }
+
+    /// A missing session falls back to `session/new`; that session is fresh, so its opened mode
+    /// is the provider default rather than an inherited escalation.
+    func testProviderDefaultResumeThatFellBackToAFreshSessionPrompts() async throws {
+        let h = try makeHarness(startingMode: "bypass", loadNotFound: true)
+        try await h.run(level: .providerDefault, resumeSessionID: "devin-session")
+
+        let methods = h.methods()
+        XCTAssertTrue(methods.contains("session/load"), "order was \(methods)")
+        XCTAssertTrue(methods.contains("session/new"), "order was \(methods)")
+        XCTAssertTrue(methods.contains("session/prompt"), "order was \(methods)")
+    }
+
     // MARK: - Harness
 
     struct Harness {
