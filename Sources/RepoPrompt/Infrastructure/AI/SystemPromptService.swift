@@ -9,8 +9,8 @@ class SystemPromptService {
     /// - Parameter allowClarifyingQuestions: Whether the agent can use the ask_user tool to ask clarifying questions.
     /// - Parameter responseType: Optional response type for context_builder (e.g., "review" for code review context).
     /// - Parameter instructions: Optional discovery instructions, used for hidden review hotword detection in clarify mode.
-    static func discoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, hasDeferredReviewTarget: Bool = false) -> String {
-        mcpDiscoverPrompt(tokenBudget: tokenBudget, agentKind: agentKind, enhancementMode: enhancementMode, allowClarifyingQuestions: allowClarifyingQuestions, responseType: responseType, instructions: instructions, questionTimeoutSeconds: questionTimeoutSeconds, hasDeferredReviewTarget: hasDeferredReviewTarget)
+    static func discoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: Bool = false, reviewRootNames: [String] = []) -> String {
+        mcpDiscoverPrompt(tokenBudget: tokenBudget, agentKind: agentKind, enhancementMode: enhancementMode, allowClarifyingQuestions: allowClarifyingQuestions, responseType: responseType, instructions: instructions, questionTimeoutSeconds: questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: restrictsReviewGitToExplicitReadOnly, reviewRootNames: reviewRootNames)
     }
 
     /// MCP Discover prompt – context-first, codemap-driven discovery, selected-scope, and prompt handoff.
@@ -20,9 +20,11 @@ class SystemPromptService {
     /// - Parameter allowClarifyingQuestions: Whether the agent can use the ask_user tool to ask clarifying questions.
     /// - Parameter responseType: Optional response type for context_builder (e.g., "review" for code review context).
     /// - Parameter instructions: Optional discovery instructions, used for hidden review hotword detection in clarify mode.
-    /// - Parameter hasDeferredReviewTarget: Whether the run started without a reviewable selection. Such runs
-    ///   refuse Git artifact publication and implicit-repository Git calls until discovery freezes the target.
-    private static func mcpDiscoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, hasDeferredReviewTarget: Bool = false) -> String {
+    /// - Parameter restrictsReviewGitToExplicitReadOnly: Whether the run has no elected review target
+    ///   (`ContextBuilderReviewTargetResolution.restrictsGitToExplicitReadOnly`), so Git artifact publication
+    ///   and implicit-repository Git calls are refused.
+    /// - Parameter reviewRootNames: Workspace root names usable as `repo_root` in the restricted guidance.
+    private static func mcpDiscoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, restrictsReviewGitToExplicitReadOnly: Bool = false, reviewRootNames: [String] = []) -> String {
         // coverageLine from SyntaxManager is kept
         let coverageLine = {
             let langs = Array(Set(SyntaxManager.shared.extensionToLanguage.values)).sorted()
@@ -101,23 +103,33 @@ class SystemPromptService {
         if useReviewMode {
             print("[SystemPromptService] Review mode activated — responseType: \(normalizedResponseType ?? "nil"), instructions preview: \(instructions?.prefix(120) ?? "nil")")
         }
-        let reviewModeGuidance = if !useReviewMode {
-            ""
-        } else if hasDeferredReviewTarget {
-            // Must match MCPContextBuilderGitReviewPolicy: a deferred target admits only explicit-repository,
-            // artifact-free Git reads, and final review authorization rejects selected Git artifacts.
-            """
+        let reviewModeGuidance: String
+        if !useReviewMode {
+            reviewModeGuidance = ""
+        } else if restrictsReviewGitToExplicitReadOnly {
+            // Must match MCPContextBuilderGitReviewPolicy: without an elected target, only explicit-repository,
+            // artifact-free Git reads are admitted, and final review authorization rejects selected Git artifacts.
+            let repoRootGuidance = if let exampleRoot = reviewRootNames.first {
+                """
+                Set `repo_root` to the workspace root that owns the changes (\(reviewRootNames.map { "`\($0)`" }.joined(separator: ", "))):
+
+                ```json
+                {"tool":"git","args":{"op":"diff","repo_root":"\(exampleRoot)","detail":"files"}}
+                {"tool":"git","args":{"op":"diff","repo_root":"\(exampleRoot)","detail":"full"}}
+                ```
+                """
+            } else {
+                "Set `repo_root` to the name of the workspace root that owns the changes, as listed by `get_file_tree` with `type` `roots`; request `detail` `files` first, then `full`."
+            }
+            reviewModeGuidance = """
 
             ## Review Mode
 
-            You are building context for a **code review**. This run started without a reviewable selection, so Git diff artifacts cannot be published or selected. Use the `git` tool read-only to understand what changed: always pass `repo_root` (or `repo_key`) and omit `artifacts`:
+            You are building context for a **code review**. This run has no elected review repository target, so Git diff artifacts cannot be published or selected. Use the `git` tool read-only to understand what changed: always pass `repo_root` (or `repo_key`) and omit `artifacts`.
 
-            ```json
-            {"tool":"git","args":{"op":"diff","repo_root":"<root>","detail":"files"}}
-            {"tool":"git","args":{"op":"diff","repo_root":"<root>","detail":"full"}}
-            ```
+            \(repoRootGuidance)
 
-            Then select the changed source files with `manage_selection`, along with files that provide context for the changes—including files that weren't changed but are affected. The final review package automatically adds the uncommitted (working tree vs `HEAD`) Git diff for selected files; it does not include already-committed changes, so summarize the key committed changes you inspected in the handoff prompt.
+            Then select the changed source files with `manage_selection`, along with files that provide context for the changes—including files that weren't changed but are affected. When the review is finalized, its package adds only the uncommitted (working tree vs `HEAD`) Git diff for selected files, not already-committed changes, so summarize the key committed changes you inspected in the handoff prompt.
 
             **Review mode anti-patterns:**
             - 🚫 Calling `git` without `repo_root`/`repo_key`, or with `artifacts`—both are refused for this run
@@ -126,7 +138,7 @@ class SystemPromptService {
 
             """
         } else {
-            """
+            reviewModeGuidance = """
 
             ## Review Mode
 

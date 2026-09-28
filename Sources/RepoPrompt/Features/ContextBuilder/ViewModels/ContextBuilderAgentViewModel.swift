@@ -3973,10 +3973,11 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             responseType: responseType,
             instructions: session.contextBuilderInstructions,
             questionTimeoutSeconds: runBehavior.questionTimeoutSeconds,
-            hasDeferredReviewTarget: Self.hasDeferredReviewTarget(
+            restrictsReviewGitToExplicitReadOnly: Self.restrictsReviewGitToExplicitReadOnly(
                 workspaceContext: workspaceContext,
                 mcpConfiguration: mcpConfiguration
-            )
+            ),
+            reviewRootNames: workspaceContext?.reviewGitContext.displayContext.roots.map(\.logicalRootName) ?? []
         )
         debugLog("System prompt includes ask_user: \(systemPrompt.contains("ask_user"))")
         let userMessage = await buildAgentUserMessage(
@@ -3990,14 +3991,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     /// Mirrors the precedence used when installing the nested discovery tab context, so the prompt
     /// describes the same review-target state that `MCPContextBuilderGitReviewPolicy` enforces.
-    static func hasDeferredReviewTarget(
+    static func restrictsReviewGitToExplicitReadOnly(
         workspaceContext: ContextBuilderWorkspaceContext?,
         mcpConfiguration: ContextBuilderMCPRunConfiguration?
     ) -> Bool {
         let resolution = workspaceContext?.reviewTargetResolution
             ?? mcpConfiguration?.nestedTabContext.contextBuilderReviewTargetResolution
-        guard case .deferred? = resolution else { return false }
-        return true
+        return resolution?.restrictsGitToExplicitReadOnly ?? false
     }
 
     private func buildAgentUserMessage(

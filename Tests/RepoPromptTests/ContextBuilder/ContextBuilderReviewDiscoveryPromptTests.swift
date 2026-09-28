@@ -14,29 +14,46 @@ final class ContextBuilderReviewDiscoveryPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains(artifactPublicationCall))
         XCTAssertTrue(prompt.contains(mustSelectArtifacts))
         XCTAssertTrue(prompt.contains(haltingWithoutArtifacts))
-        XCTAssertEqual(prompt, SystemPromptService.discoverPrompt(responseType: "review", hasDeferredReviewTarget: false))
+        XCTAssertEqual(prompt, SystemPromptService.discoverPrompt(responseType: "review", restrictsReviewGitToExplicitReadOnly: false))
     }
 
-    func testReviewPromptWithDeferredTargetOnlyInstructsAdmittedReadOnlyGitInspection() {
-        let prompt = SystemPromptService.discoverPrompt(responseType: "review", hasDeferredReviewTarget: true)
+    func testReviewPromptWithUnelectedTargetOnlyInstructsAdmittedReadOnlyGitInspection() {
+        let prompt = SystemPromptService.discoverPrompt(
+            responseType: "review",
+            restrictsReviewGitToExplicitReadOnly: true,
+            reviewRootNames: ["repoprompt-ce"]
+        )
 
         XCTAssertTrue(prompt.contains("## Review Mode"))
         XCTAssertFalse(prompt.contains(#""artifacts":true"#), prompt)
         XCTAssertFalse(prompt.contains(mustSelectArtifacts), prompt)
         XCTAssertFalse(prompt.contains(haltingWithoutArtifacts), prompt)
-        XCTAssertTrue(prompt.contains(#"{"tool":"git","args":{"op":"diff","repo_root":"#), prompt)
+        XCTAssertTrue(prompt.contains(#"{"tool":"git","args":{"op":"diff","repo_root":"repoprompt-ce","detail":"files"}}"#), prompt)
+        XCTAssertFalse(prompt.contains("<root>"), prompt)
         XCTAssertTrue(prompt.contains("omit `artifacts`"), prompt)
         XCTAssertTrue(prompt.contains("manage_selection"), prompt)
     }
 
-    func testDeferredFlagDoesNotAddReviewGuidanceOutsideReviewMode() {
+    func testReviewPromptWithUnelectedTargetAndUnknownRootsDescribesRepoRootWithoutPlaceholder() {
+        let prompt = SystemPromptService.discoverPrompt(
+            responseType: "review",
+            restrictsReviewGitToExplicitReadOnly: true
+        )
+
+        XCTAssertFalse(prompt.contains(#""artifacts":true"#), prompt)
+        XCTAssertFalse(prompt.contains("<root>"), prompt)
+        XCTAssertFalse(prompt.contains(#""repo_root":""#), prompt)
+        XCTAssertTrue(prompt.contains("as listed by `get_file_tree` with `type` `roots`"), prompt)
+    }
+
+    func testRestrictionFlagDoesNotAddReviewGuidanceOutsideReviewMode() {
         XCTAssertEqual(
-            SystemPromptService.discoverPrompt(responseType: "plan", hasDeferredReviewTarget: true),
+            SystemPromptService.discoverPrompt(responseType: "plan", restrictsReviewGitToExplicitReadOnly: true),
             SystemPromptService.discoverPrompt(responseType: "plan")
         )
     }
 
-    func testDeferredFlagFollowsNestedDiscoveryReviewTargetResolution() {
+    func testRestrictionFollowsNestedDiscoveryReviewTargetResolution() {
         func configuration(_ resolution: ContextBuilderReviewTargetResolution?) -> ContextBuilderMCPRunConfiguration {
             ContextBuilderMCPRunConfiguration(
                 identity: WorkspaceSelectionIdentity(workspaceID: UUID(), tabID: UUID()),
@@ -77,18 +94,19 @@ final class ContextBuilderReviewDiscoveryPromptTests: XCTestCase {
             )
         ))
 
-        XCTAssertTrue(ContextBuilderAgentViewModel.hasDeferredReviewTarget(
+        XCTAssertTrue(ContextBuilderAgentViewModel.restrictsReviewGitToExplicitReadOnly(
             workspaceContext: nil,
             mcpConfiguration: configuration(deferred)
         ))
-        XCTAssertFalse(ContextBuilderAgentViewModel.hasDeferredReviewTarget(
+        // The Git policy refuses artifacts for unavailable targets too, so the prompt must not ask for them.
+        XCTAssertTrue(ContextBuilderAgentViewModel.restrictsReviewGitToExplicitReadOnly(
             workspaceContext: nil,
-            mcpConfiguration: configuration(.unavailable(.emptySelection))
+            mcpConfiguration: configuration(.unavailable(.nonGitSelection(count: 1)))
         ))
-        XCTAssertFalse(ContextBuilderAgentViewModel.hasDeferredReviewTarget(
+        XCTAssertFalse(ContextBuilderAgentViewModel.restrictsReviewGitToExplicitReadOnly(
             workspaceContext: nil,
             mcpConfiguration: configuration(nil)
         ))
-        XCTAssertFalse(ContextBuilderAgentViewModel.hasDeferredReviewTarget(workspaceContext: nil, mcpConfiguration: nil))
+        XCTAssertFalse(ContextBuilderAgentViewModel.restrictsReviewGitToExplicitReadOnly(workspaceContext: nil, mcpConfiguration: nil))
     }
 }
