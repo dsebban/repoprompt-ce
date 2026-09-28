@@ -502,13 +502,21 @@ package actor DirectHeadlessMCPService {
             guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return nil }
             let path = URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
         #else
-            // A deleted image reads as "<path> (deleted)", whose lstat below fails closed.
+            // stat() follows the /proc magic link to the running image itself, even when it is unlinked
+            // (its readlink text then ends in " (deleted)" and may name an unrelated file).
             let procExe = "/proc/\(processID)/exe"
-            guard let executable = try? FileManager.default.destinationOfSymbolicLink(atPath: procExe) else { return nil }
+            var image = stat()
+            guard stat(procExe, &image) == 0, image.st_mode & S_IFMT == S_IFREG,
+                  let executable = try? FileManager.default.destinationOfSymbolicLink(atPath: procExe)
+            else { return nil }
             let path = URL(fileURLWithPath: executable).standardizedFileURL.path
         #endif
         var info = stat()
         guard lstat(path, &info) == 0 else { return nil }
+        #if !canImport(Darwin)
+            // Hash only a path that still names the running image.
+            guard info.st_dev == image.st_dev, info.st_ino == image.st_ino else { return nil }
+        #endif
         let material = "\(path)|\(info.st_dev)|\(info.st_ino)"
         return SHA256.hash(data: Data(material.utf8))
             .map { String(format: "%02x", $0) }
