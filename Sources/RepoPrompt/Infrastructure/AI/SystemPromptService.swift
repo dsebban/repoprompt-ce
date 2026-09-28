@@ -9,8 +9,8 @@ class SystemPromptService {
     /// - Parameter allowClarifyingQuestions: Whether the agent can use the ask_user tool to ask clarifying questions.
     /// - Parameter responseType: Optional response type for context_builder (e.g., "review" for code review context).
     /// - Parameter instructions: Optional discovery instructions, used for hidden review hotword detection in clarify mode.
-    static func discoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds) -> String {
-        mcpDiscoverPrompt(tokenBudget: tokenBudget, agentKind: agentKind, enhancementMode: enhancementMode, allowClarifyingQuestions: allowClarifyingQuestions, responseType: responseType, instructions: instructions, questionTimeoutSeconds: questionTimeoutSeconds)
+    static func discoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, hasDeferredReviewTarget: Bool = false) -> String {
+        mcpDiscoverPrompt(tokenBudget: tokenBudget, agentKind: agentKind, enhancementMode: enhancementMode, allowClarifyingQuestions: allowClarifyingQuestions, responseType: responseType, instructions: instructions, questionTimeoutSeconds: questionTimeoutSeconds, hasDeferredReviewTarget: hasDeferredReviewTarget)
     }
 
     /// MCP Discover prompt – context-first, codemap-driven discovery, selected-scope, and prompt handoff.
@@ -20,7 +20,9 @@ class SystemPromptService {
     /// - Parameter allowClarifyingQuestions: Whether the agent can use the ask_user tool to ask clarifying questions.
     /// - Parameter responseType: Optional response type for context_builder (e.g., "review" for code review context).
     /// - Parameter instructions: Optional discovery instructions, used for hidden review hotword detection in clarify mode.
-    private static func mcpDiscoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds) -> String {
+    /// - Parameter hasDeferredReviewTarget: Whether the run started without a reviewable selection. Such runs
+    ///   refuse Git artifact publication and implicit-repository Git calls until discovery freezes the target.
+    private static func mcpDiscoverPrompt(tokenBudget: Int? = nil, agentKind: AgentProviderKind? = nil, enhancementMode: PromptEnhancementMode = .fullRewrite, allowClarifyingQuestions: Bool = false, responseType: String? = nil, instructions: String? = nil, questionTimeoutSeconds: TimeInterval = ContextBuilderDefaults.questionTimeoutSeconds, hasDeferredReviewTarget: Bool = false) -> String {
         // coverageLine from SyntaxManager is kept
         let coverageLine = {
             let langs = Array(Set(SyntaxManager.shared.extensionToLanguage.values)).sorted()
@@ -99,27 +101,53 @@ class SystemPromptService {
         if useReviewMode {
             print("[SystemPromptService] Review mode activated — responseType: \(normalizedResponseType ?? "nil"), instructions preview: \(instructions?.prefix(120) ?? "nil")")
         }
-        let reviewModeGuidance = useReviewMode ? """
+        let reviewModeGuidance = if !useReviewMode {
+            ""
+        } else if hasDeferredReviewTarget {
+            // Must match MCPContextBuilderGitReviewPolicy: a deferred target admits only explicit-repository,
+            // artifact-free Git reads, and final review authorization rejects selected Git artifacts.
+            """
 
-        ## Review Mode
+            ## Review Mode
 
-        You are building context for a **code review**. Use the `git` tool to understand what changed and generate diff artifacts:
+            You are building context for a **code review**. This run started without a reviewable selection, so Git diff artifacts cannot be published or selected. Use the `git` tool read-only to understand what changed: always pass `repo_root` (or `repo_key`) and omit `artifacts`:
 
-        ```json
-        {"tool":"git","args":{"op":"diff","artifacts":true}}
-        ```
+            ```json
+            {"tool":"git","args":{"op":"diff","repo_root":"<root>","detail":"files"}}
+            {"tool":"git","args":{"op":"diff","repo_root":"<root>","detail":"full"}}
+            ```
 
-        The response shows selectable paths. You **must** select the diff patches (`all.patch` or per-file patches from `diff/per-file/`) using `manage_selection`, along with source files that provide context for the changes—including files that weren't changed but are affected.
+            Then select the changed source files with `manage_selection`, along with files that provide context for the changes—including files that weren't changed but are affected. The final review package automatically adds the uncommitted (working tree vs `HEAD`) Git diff for selected files; it does not include already-committed changes, so summarize the key committed changes you inspected in the handoff prompt.
 
-        **Balancing context:** Aim for full source files + relevant diff artifacts. If token-constrained, you can slice both—trim source files to relevant sections and slice diff artifacts to focus on key changes. Use your judgment to maximize useful context within budget.
+            **Review mode anti-patterns:**
+            - 🚫 Calling `git` without `repo_root`/`repo_key`, or with `artifacts`—both are refused for this run
+            - 🚫 Omitting files affected by the changes just because they weren't modified
+            - 🚫 Halting without selecting the changed source files—the reviewer needs to see what changed
 
-        **Review mode anti-patterns:**
-        - 🚫 Selecting only git artifacts without source files—the reviewer needs implementation context, not just diffs
-        - 🚫 Including all diff data but minimal source files—prioritize full file context with focused diffs
-        - 🚫 Omitting files affected by the changes just because they weren't modified
-        - 🚫 Halting without selecting any diff artifacts—the reviewer needs to see what actually changed
+            """
+        } else {
+            """
 
-        """ : ""
+            ## Review Mode
+
+            You are building context for a **code review**. Use the `git` tool to understand what changed and generate diff artifacts:
+
+            ```json
+            {"tool":"git","args":{"op":"diff","artifacts":true}}
+            ```
+
+            The response shows selectable paths. You **must** select the diff patches (`all.patch` or per-file patches from `diff/per-file/`) using `manage_selection`, along with source files that provide context for the changes—including files that weren't changed but are affected.
+
+            **Balancing context:** Aim for full source files + relevant diff artifacts. If token-constrained, you can slice both—trim source files to relevant sections and slice diff artifacts to focus on key changes. Use your judgment to maximize useful context within budget.
+
+            **Review mode anti-patterns:**
+            - 🚫 Selecting only git artifacts without source files—the reviewer needs implementation context, not just diffs
+            - 🚫 Including all diff data but minimal source files—prioritize full file context with focused diffs
+            - 🚫 Omitting files affected by the changes just because they weren't modified
+            - 🚫 Halting without selecting any diff artifacts—the reviewer needs to see what actually changed
+
+            """
+        }
 
         // Additional tool for available tools list
         let askUserTool = allowClarifyingQuestions ? ", `ask_user`" : ""
