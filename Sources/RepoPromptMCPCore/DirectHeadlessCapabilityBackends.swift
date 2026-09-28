@@ -944,6 +944,8 @@ actor DirectHeadlessAgentBackend: DomainAgentCapabilityBackend {
                 sessionID: sessionID,
                 timeout: args["timeout"]?.doubleValue ?? 120
             ).toValue())
+        case "steer":
+            return try await .mcp(coordinator.steerAgent(sessionID: Self.sessionID(args), args: args, request: request))
         case "cancel":
             let sessionID = try Self.sessionID(args)
             await coordinator.cancelAgent(sessionID: sessionID)

@@ -12,6 +12,7 @@ struct DirectHeadlessProviderFixture {
         let launchID: String?
         let groupID: String?
         let claimID: String?
+        let resumeThreadID: String?
     }
 
     struct ClaudeCall {
@@ -43,23 +44,34 @@ struct DirectHeadlessProviderFixture {
         let script = """
         #!/bin/sh
         model=default
+        resume=
         while [ "$#" -gt 0 ]; do
           if [ "$1" = "--model" ]; then
             shift
             model="$1"
+          elif [ "$1" = "resume" ]; then
+            shift
+            resume="$1"
           fi
           shift
         done
         lane="${REPOPROMPT_MCP_ORACLE_LANE_ID:-0}"
-        /usr/bin/printf '%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
+        /usr/bin/printf '%s|%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
           "${REPOPROMPT_MCP_LAUNCH_ID:-}" "${REPOPROMPT_MCP_ORACLE_GROUP_ID:-}" \
-          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" >> '\(callLog.path)'
+          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" "$resume" >> '\(callLog.path)'
         /bin/cat >/dev/null
+        if [ -n "$resume" ]; then
+          /usr/bin/printf '{"type":"thread.started","thread_id":"%s"}\\n' "$resume"
+          /usr/bin/printf '{"type":"message","text":"resumed-%s"}\\n' "$resume"
+          exit 0
+        fi
         case "$model" in
           cancel-*) trap 'exit 0' TERM INT; /bin/sleep 30 ;;
           fail) /usr/bin/printf '%s\\n' 'fake provider failure' >&2; exit 7 ;;
           exact) /usr/bin/printf '%s\\n' '{"type":"message","text":"  exact response  "}'; exit 0 ;;
+          no-thread) /usr/bin/printf '%s\\n' '{"type":"message","text":"threadless"}'; exit 0 ;;
         esac
+        /usr/bin/printf '{"type":"thread.started","thread_id":"codex-thread-%s"}\\n' "$$"
         case "$lane" in
           0) /bin/sleep 0.15 ;;
           1) /bin/sleep 0.10 ;;
@@ -74,15 +86,24 @@ struct DirectHeadlessProviderFixture {
         lane="${REPOPROMPT_MCP_ORACLE_LANE_ID:-0}"
         /usr/bin/printf '%s|%s|%s\\n' "$lane" "$*" "${ANTHROPIC_API_KEY:-}" >> '\(claudeCallLog.path)'
         model=default
+        resume=
         while [ "$#" -gt 0 ]; do
           if [ "$1" = "--model" ]; then
             shift
             model="$1"
+          elif [ "$1" = "--resume" ]; then
+            shift
+            resume="$1"
           fi
           shift
         done
         /bin/cat >/dev/null
         /usr/bin/printf '%s\\n' 'claude stderr notice' >&2
+        if [ -n "$resume" ]; then
+          /usr/bin/printf '{"type":"result","subtype":"success","is_error":false,"result":"claude-resumed-%s","session_id":"%s"}\\n' \
+            "$resume" "$resume"
+          exit 0
+        fi
         if [ "$model" = "error-result" ]; then
           /usr/bin/printf '%s\\n' '{"type":"result","subtype":"error_during_execution","is_error":true,"result":"stub failure"}'
           exit 0
@@ -147,7 +168,8 @@ struct DirectHeadlessProviderFixture {
                     processID: Int32(fields[2]) ?? -1,
                     launchID: fields[3].isEmpty ? nil : fields[3],
                     groupID: fields[4].isEmpty ? nil : fields[4],
-                    claimID: fields[5].isEmpty ? nil : fields[5]
+                    claimID: fields[5].isEmpty ? nil : fields[5],
+                    resumeThreadID: fields[6].isEmpty ? nil : fields[6]
                 )
             }
     }

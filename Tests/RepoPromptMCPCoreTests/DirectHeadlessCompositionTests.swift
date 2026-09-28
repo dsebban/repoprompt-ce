@@ -159,6 +159,34 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         )
     }
 
+    func testCodexResumeKeepsExecSandboxFlagsBeforeTheResumeSubcommand() {
+        let arguments = DirectHeadlessProviderCoordinator.codexExecArguments(
+            model: "gpt-test",
+            purpose: .agent,
+            resumeThreadID: "thread-1"
+        )
+
+        XCTAssertEqual(arguments, [
+            "--model", "gpt-test",
+            "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--json",
+            "resume", "thread-1", "-"
+        ])
+    }
+
+    func testHeadlessAcceptsSteerOnlyForAgentRun() throws {
+        let steer: [String: Value] = ["op": .string("steer"), "message": .string("again")]
+
+        XCTAssertEqual(try DirectHeadlessMCPService.validatedCallArguments(toolName: "agent_run", arguments: steer), steer)
+        for (tool, op) in [("agent_explore", "steer"), ("agent_run", "respond")] {
+            XCTAssertThrowsError(try DirectHeadlessMCPService.validatedCallArguments(
+                toolName: tool,
+                arguments: ["op": .string(op)]
+            )) { error in
+                XCTAssertTrue(String(describing: error).contains("op must be one of"), "\(error)")
+            }
+        }
+    }
+
     func testCodexTurnOutputKeepsAssistantTextAndCapturesThreadID() {
         let output = DirectHeadlessProviderCoordinator.codexTurnOutput(from: """
         {"type":"thread.started","thread_id":"thread-1"}

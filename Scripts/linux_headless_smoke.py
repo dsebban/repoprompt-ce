@@ -9,7 +9,8 @@ Creates a throwaway repo and isolated headless profile, then checks:
   3. read_file             7. apply_edits is allowed after the grant
   4. create denied with    8. ask_oracle answers through the openaiCompatible HTTP provider
      grantMissing             (a local stub server; exercises FoundationNetworking)
-                           9. stdin EOF exits cleanly
+                           9. agent_run start, then steer resumes the stub Codex thread
+                          10. stdin EOF exits cleanly
 plus: a parent whose image was unlinked is never fingerprinted through a decoy file
 named "<path> (deleted)". Exits non-zero at the first failure. Python stdlib only.
 """
@@ -29,6 +30,12 @@ import threading
 
 TIMEOUT_SECONDS = 60
 DELETED_IMAGE_FLAG = "--as-deleted-image"
+# Answers FIRST_TURN, or RESUMED when invoked as `exec ... resume smoke-thread -`.
+CODEX_STUB = """#!/bin/sh
+cat >/dev/null
+case " $* " in *" resume smoke-thread "*) text=RESUMED ;; *) text=FIRST_TURN ;; esac
+printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s"}\\n' "$text"
+"""
 
 
 class SmokeFailure(Exception):
@@ -146,6 +153,7 @@ def policy_grant(binary, env, fingerprint, root):
     proc = subprocess.Popen(
         [binary, "policy", "grant", "--principal-fingerprint", fingerprint,
          "--operation", "file_actions.create", "--operation", "apply_edits.*", "--operation", "ask_oracle.*",
+         "--operation", "agent_run.*",
          "--root", root, "--expires-in", "600"],
         stdin=slave, stderr=slave, stdout=subprocess.PIPE, env=env,
     )
@@ -171,6 +179,10 @@ def run_smoke(binary, base):
     threading.Thread(target=stub.serve_forever, daemon=True).start()
     env["REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"] = f"http://127.0.0.1:{stub.server_address[1]}/v1"
     env["REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"] = "smoke-key"
+    env["REPOPROMPT_CODEX_COMMAND"] = os.path.join(base, "codex-stub")
+    with open(env["REPOPROMPT_CODEX_COMMAND"], "w") as handle:
+        handle.write(CODEX_STUB)
+    os.chmod(env["REPOPROMPT_CODEX_COMMAND"], 0o700)
     repo = env["REPOPROMPT_MCP_WORKING_DIRS"]
     hello, created = os.path.join(repo, "hello.txt"), os.path.join(repo, "new.txt")
     with open(hello, "w") as handle:
@@ -178,37 +190,45 @@ def run_smoke(binary, base):
     server = HeadlessServer(binary, env, os.path.join(base, "server.stderr"))
 
     info = server.initialize().get("result", {}).get("serverInfo", {})
-    require("1/9 initialize", info.get("name") == "RepoPrompt CE", f"serverInfo={info}")
+    require("1/10 initialize", info.get("name") == "RepoPrompt CE", f"serverInfo={info}")
 
     tools = {tool["name"] for tool in server.request("tools/list", {}).get("result", {}).get("tools", [])}
     expected = {"read_file", "get_file_tree", "file_search", "file_actions", "apply_edits"}
-    require("2/9 tools/list", expected <= tools, f"missing {sorted(expected - tools)} from {sorted(tools)}")
+    require("2/10 tools/list", expected <= tools, f"missing {sorted(expected - tools)} from {sorted(tools)}")
 
     is_error, text = server.call_tool("read_file", {"path": hello})
-    require("3/9 read_file", not is_error and "hello linux" in text, text[:200])
+    require("3/10 read_file", not is_error and "hello linux" in text, text[:200])
 
     create = {"action": "create", "path": created, "content": "created\n"}
     is_error, text = server.call_tool("file_actions", create)
-    require("4/9 create denied with grantMissing",
+    require("4/10 create denied with grantMissing",
             is_error and "grantMissing" in text and not os.path.exists(created), text[:200])
 
     rc, out, prompt = policy_grant(binary, env, driver_fingerprint(), repo)
-    require("5/9 policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
+    require("5/10 policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
 
     is_error, text = server.call_tool("file_actions", create)
-    require("6/9 create allowed after grant", not is_error and os.path.isfile(created), text[:200])
+    require("6/10 create allowed after grant", not is_error and os.path.isfile(created), text[:200])
 
     is_error, text = server.call_tool("apply_edits", {"path": hello, "search": "hello linux", "replace": "hello granted"})
     with open(hello) as handle:
         edited = handle.read()
-    require("7/9 apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
+    require("7/10 apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
 
     is_error, text = server.call_tool("ask_oracle", {"message": "ping", "model": "openaiCompatible:smoke-model"})
-    require("8/9 ask_oracle over openaiCompatible HTTP", not is_error and "HTTP_ORACLE_OK smoke-model" in text, text[:300])
+    require("8/10 ask_oracle over openaiCompatible HTTP", not is_error and "HTTP_ORACLE_OK smoke-model" in text, text[:300])
+
+    start_error, start = server.call_tool("agent_run", {"op": "start", "model_id": "codexExec", "message": "hi", "timeout": 30})
+    session_id = "" if start_error else json.loads(start).get("session_id", "")
+    is_error, text = server.call_tool("agent_run", {"op": "steer", "session_id": session_id, "message": "again",
+                                                    "timeout_seconds": 30})
+    require("9/10 agent_run start then steer resumes the Codex thread",
+            "FIRST_TURN" in start and not is_error and '"completed"' in text and "RESUMED" in text,
+            f"start={start[:300]} steer={text[:300]}")
 
     rc = server.close()
     stub.shutdown()
-    require("9/9 stdin EOF exits cleanly", rc == 0, f"exit={rc}")
+    require("10/10 stdin EOF exits cleanly", rc == 0, f"exit={rc}")
 
 
 def run_deleted_image_check(binary, base):

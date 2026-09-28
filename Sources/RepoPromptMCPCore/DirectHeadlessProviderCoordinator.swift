@@ -17,7 +17,9 @@ enum DirectHeadlessProviderID {
 actor DirectHeadlessProviderCoordinator {
     typealias BeginEpoch = @Sendable (
         _ registration: DomainAgentSessionRegistration,
-        _ activationID: UUID
+        _ activationID: UUID,
+        _ expectedCurrentEpoch: DomainAgentRunTurnEpoch?,
+        _ transitionKind: DomainAgentRunEpochTransitionKind
     ) async -> DomainAgentRunSessionStore.EpochBeginResult
 
     enum ExecutionPurpose {
@@ -76,8 +78,8 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     private struct AgentRecord {
-        let registration: DomainAgentSessionRegistration
-        let epoch: DomainAgentRunTurnEpoch
+        var registration: DomainAgentSessionRegistration
+        var epoch: DomainAgentRunTurnEpoch
         let runID: UUID
         let agentID: String
         let displayName: String
@@ -87,6 +89,8 @@ actor DirectHeadlessProviderCoordinator {
         let worktreeBindings: [DomainAgentRunSnapshot.WorktreeBinding]
         var latestSnapshot: DomainAgentRunSnapshot?
         var task: Task<Void, Never>?
+        /// The provider's conversation handle from the latest turn; `steer` resumes it.
+        var providerSessionID: String?
     }
 
     struct ConversationReference: Equatable {
@@ -127,12 +131,12 @@ actor DirectHeadlessProviderCoordinator {
         self.environment = environment
         self.openAICompatibleClient = openAICompatibleClient
         let sessionStore = runtime.agentSessionStore
-        self.beginEpoch = beginEpoch ?? { registration, activationID in
+        self.beginEpoch = beginEpoch ?? { registration, activationID, expectedCurrentEpoch, transitionKind in
             await sessionStore.beginEpoch(
                 registration: registration,
                 activationID: activationID,
-                expectedCurrentEpoch: nil,
-                transitionKind: .initial
+                expectedCurrentEpoch: expectedCurrentEpoch,
+                transitionKind: transitionKind
             )
         }
     }
@@ -190,12 +194,21 @@ actor DirectHeadlessProviderCoordinator {
         ]
     }
 
-    static func codexExecArguments(model: String?, purpose: ExecutionPurpose) -> [String] {
+    /// `exec resume` accepts no `--sandbox`, so the `exec` flags precede the `resume` subcommand.
+    static func codexExecArguments(
+        model: String?,
+        purpose: ExecutionPurpose,
+        resumeThreadID: String? = nil
+    ) -> [String] {
         var arguments: [String] = []
         if let model = explicitModel(model) {
             arguments += ["--model", model]
         }
-        arguments += ["exec", "--skip-git-repo-check", "--sandbox", purpose.sandbox, "--json", "-"]
+        arguments += ["exec", "--skip-git-repo-check", "--sandbox", purpose.sandbox, "--json"]
+        if let resumeThreadID {
+            arguments += ["resume", resumeThreadID]
+        }
+        arguments.append("-")
         return arguments
     }
 
@@ -232,7 +245,8 @@ actor DirectHeadlessProviderCoordinator {
         request: DomainPhysicalToolRequest,
         sessionID: UUID? = nil,
         purpose: ExecutionPurpose,
-        carrierEnvironment: [String: String]? = nil
+        carrierEnvironment: [String: String]? = nil,
+        resumeProviderSessionID: String? = nil
     ) async throws -> TurnOutput {
         guard !isShuttingDown else { throw CancellationError() }
         let backend = try resolveProvider(providerID).requireBackend()
@@ -251,13 +265,17 @@ actor DirectHeadlessProviderCoordinator {
         case let .codexCLI(path):
             (executable, arguments, parse) = (
                 path,
-                Self.codexExecArguments(model: model, purpose: purpose),
+                Self.codexExecArguments(model: model, purpose: purpose, resumeThreadID: resumeProviderSessionID),
                 { Self.codexTurnOutput(from: $0) }
             )
         case let .claudeCLI(path):
             (executable, arguments, parse) = (
                 path,
-                DirectHeadlessClaudeCodeCLI.arguments(model: model, purpose: purpose),
+                DirectHeadlessClaudeCodeCLI.arguments(
+                    model: model,
+                    purpose: purpose,
+                    resumeSessionID: resumeProviderSessionID
+                ),
                 { try DirectHeadlessClaudeCodeCLI.parseTurnOutput($0) }
             )
         case let .openAICompatibleHTTP(configuration):
@@ -310,14 +328,7 @@ actor DirectHeadlessProviderCoordinator {
             args: args,
             includeSessionCleanupGuidance: includeSessionCleanupGuidance
         )
-        let providerID = args["model_id"]?.stringValue ?? args["agent"]?.stringValue
-        let descriptor = try resolveProvider(providerID)
-        guard descriptor.supportsAgentRuns else {
-            throw MCPError.invalidRequest(
-                "Provider '\(descriptor.id)' supports Oracle conversations only; agent_run requires a CLI provider (codexExec or claudeCode)."
-            )
-        }
-        _ = try descriptor.requireBackend()
+        let descriptor = try agentRunProvider(args["model_id"]?.stringValue ?? args["agent"]?.stringValue)
         let sessionID = DomainChildLaunchContext.current?.runID ?? UUID()
         let runID = sessionID
         guard let connectionID = request.securityContext?.connectionID else {
@@ -334,7 +345,7 @@ actor DirectHeadlessProviderCoordinator {
         let registration = await runtime.agentSessionStore.register(sessionID: sessionID)
         let activationID = UUID()
         let epoch: DomainAgentRunTurnEpoch
-        switch await beginEpoch(registration, activationID) {
+        switch await beginEpoch(registration, activationID, nil, .initial) {
         case let .accepted(value): epoch = value
         case let .rejected(reason):
             await context.rollbackSessionRootOverlay(rootOverlayPreparation)
@@ -361,11 +372,113 @@ actor DirectHeadlessProviderCoordinator {
             latestSnapshot: nil,
             task: nil
         )
+        let running = await launchTurn(
+            record: record,
+            statusText: "Running",
+            message: message,
+            request: request,
+            resumeProviderSessionID: nil
+        )
+        if args["detach"]?.boolValue == true {
+            return running.toValue()
+        }
+        let timeout = args["timeout"]?.doubleValue ?? 120
+        return await waitAgent(sessionID: sessionID, timeout: timeout).toValue()
+    }
+
+    /// Continues a completed run inside the provider's own conversation (Codex `exec resume`,
+    /// Claude `--resume`) as a `.steering` epoch of the same session. Running, failed, and
+    /// cancelled runs are refused rather than queued, and sessions from an earlier runtime are
+    /// unknown because provider session IDs are not durable.
+    func steerAgent(sessionID: UUID, args: [String: Value], request: DomainPhysicalToolRequest) async throws -> Value {
+        guard !isShuttingDown else { throw CancellationError() }
+        if let parameters = args["model_parameters"], parameters != .null, parameters != .array([]) {
+            throw MCPError.invalidParams("model_parameters are supported only for app-backed Cursor sessions.")
+        }
+        guard let message = args["message"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty else {
+            throw MCPError.invalidParams("agent_run steer requires message")
+        }
+        guard let record = agents[sessionID] else {
+            throw MCPError.invalidParams("unknown session_id; steer continues only sessions started by this headless runtime")
+        }
+        let status = record.latestSnapshot?.status
+        guard record.task == nil, status != .running else {
+            throw MCPError.invalidRequest("session is running; wait for it to finish or cancel it before steering")
+        }
+        guard status == .completed else {
+            throw MCPError.invalidRequest(
+                "session ended with status \(status?.rawValue ?? "unknown"); steer continues only completed sessions"
+            )
+        }
+        guard let providerSessionID = record.providerSessionID else {
+            throw MCPError.invalidRequest("provider '\(record.agentID)' reported no resumable session id for this session")
+        }
+        _ = try agentRunProvider(record.agentID)
+        let changed = MCPError.invalidRequest("session changed during steer; poll it and retry")
+        let registration: DomainAgentSessionRegistration
+        let epoch: DomainAgentRunTurnEpoch
+        switch await beginEpoch(record.registration, UUID(), record.epoch, .steering) {
+        case let .accepted(value):
+            (registration, epoch) = (record.registration, value)
+        case .stale:
+            throw changed
+        case .rejected:
+            // The store drops a finished session's wait handle after its TTL, but the provider
+            // conversation outlives it, so reactivate the session under a fresh registration.
+            guard let fresh = await runtime.agentSessionStore.registerIfMissing(sessionID: sessionID) else {
+                throw changed
+            }
+            guard case let .accepted(value) = await beginEpoch(fresh, UUID(), nil, .steering) else {
+                await runtime.agentSessionStore.cleanup(registration: fresh)
+                throw changed
+            }
+            (registration, epoch) = (fresh, value)
+        }
+        var steered = agents[sessionID] ?? record
+        steered.registration = registration
+        steered.epoch = epoch
+        let running = await launchTurn(
+            record: steered,
+            statusText: "Steering",
+            message: message,
+            request: request,
+            resumeProviderSessionID: providerSessionID
+        )
+        let timeout = args["timeout_seconds"].flatMap { $0.doubleValue ?? $0.intValue.map(Double.init) }
+        guard args["wait"]?.boolValue == true || timeout != nil else {
+            return running.toValue()
+        }
+        return await waitAgent(sessionID: sessionID, timeout: timeout ?? 120).toValue()
+    }
+
+    /// Resolves a provider that can run agents, before any session state exists.
+    private func agentRunProvider(_ requested: String?) throws -> ProviderDescriptor {
+        let descriptor = try resolveProvider(requested)
+        guard descriptor.supportsAgentRuns else {
+            throw MCPError.invalidRequest(
+                "Provider '\(descriptor.id)' supports Oracle conversations only; agent_run requires a CLI provider (codexExec or claudeCode)."
+            )
+        }
+        _ = try descriptor.requireBackend()
+        return descriptor
+    }
+
+    /// Publishes `record`'s epoch as running, then runs one provider turn that settles it.
+    /// The running snapshot is noted before the task exists, so concurrent lifecycle calls
+    /// already see the session as running.
+    private func launchTurn(
+        record: AgentRecord,
+        statusText: String,
+        message: String,
+        request: DomainPhysicalToolRequest,
+        resumeProviderSessionID: String?
+    ) async -> DomainAgentRunSnapshot {
+        let sessionID = record.registration.sessionID
         var runningRecord = record
         let running = snapshot(
             record: runningRecord,
             status: .running,
-            statusText: "Running",
+            statusText: statusText,
             assistantText: nil,
             failure: nil
         )
@@ -373,23 +486,25 @@ actor DirectHeadlessProviderCoordinator {
         agents[sessionID] = runningRecord
         await runtime.agentSessionStore.noteSnapshot(
             running,
-            cursor: DomainAgentSessionWaitCursor(registration: registration, epoch: epoch)
+            cursor: DomainAgentSessionWaitCursor(registration: record.registration, epoch: record.epoch)
         )
-        let capturedRequest = request
         let capturedCarrierEnvironment = DomainChildLaunchContext.current?.environment ?? [:]
+        let (providerID, model) = (record.agentID, record.model)
         let task = Task { [weak self] in
             guard let self else { return }
             let report = await DomainAgentRunExecutionCore.execute {
                 do {
-                    let output = try await runProviderOnce(
+                    let output = try await self.runProviderOnce(
                         message: message,
-                        providerID: descriptor.id,
-                        model: args["model"]?.stringValue,
-                        request: capturedRequest,
+                        providerID: providerID,
+                        model: model,
+                        request: request,
                         sessionID: sessionID,
                         purpose: .agent,
-                        carrierEnvironment: capturedCarrierEnvironment
+                        carrierEnvironment: capturedCarrierEnvironment,
+                        resumeProviderSessionID: resumeProviderSessionID
                     )
+                    await self.noteProviderSession(sessionID: sessionID, providerSessionID: output.providerSessionID)
                     return .completed(assistantText: output.assistantText)
                 } catch {
                     if Task.isCancelled { throw CancellationError() }
@@ -400,15 +515,15 @@ actor DirectHeadlessProviderCoordinator {
             await finishAgent(sessionID: sessionID, outcome: outcome)
         }
         agents[sessionID]?.task = task
-        await runtime.agentSessionStore.installCancellationHandler(registration: registration) { [weak self] in
+        await runtime.agentSessionStore.installCancellationHandler(registration: record.registration) { [weak self] in
             await self?.cancelAgent(sessionID: sessionID)
         }
+        return running
+    }
 
-        if args["detach"]?.boolValue == true {
-            return running.toValue()
-        }
-        let timeout = args["timeout"]?.doubleValue ?? 120
-        return await waitAgent(sessionID: sessionID, timeout: timeout).toValue()
+    private func noteProviderSession(sessionID: UUID, providerSessionID: String?) {
+        guard let providerSessionID else { return }
+        agents[sessionID]?.providerSessionID = providerSessionID
     }
 
     func pollAgent(sessionID: UUID, timeout: TimeInterval) async -> DomainAgentRunSnapshot {

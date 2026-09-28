@@ -636,7 +636,7 @@ package actor DirectHeadlessMCPService {
         let supportedOperations: Set<String>
         switch toolName {
         case "agent_run":
-            supportedOperations = ["start", "poll", "wait", "cancel"]
+            supportedOperations = ["start", "poll", "wait", "cancel", "steer"]
         case "agent_explore":
             supportedOperations = ["start", "poll", "wait", "cancel"]
         default:
@@ -645,7 +645,9 @@ package actor DirectHeadlessMCPService {
         guard let operation = arguments["op"]?.stringValue,
               supportedOperations.contains(operation)
         else {
-            throw MCPError.invalidParams("\(toolName) requires a supported string op")
+            throw MCPError.invalidParams(
+                "\(toolName) op must be one of \(supportedOperations.sorted().joined(separator: ", ")) on the headless backend"
+            )
         }
         return arguments
     }
