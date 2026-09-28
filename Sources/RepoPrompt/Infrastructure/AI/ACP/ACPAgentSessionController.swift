@@ -3505,6 +3505,12 @@ actor ACPAgentSessionController {
     private static let invisibleOptionLabelScalars = CharacterSet.whitespacesAndNewlines
         .union(.controlCharacters)
 
+    /// Visible means it renders as something: default-ignorable scalars such as a lone
+    /// U+FE0F or U+034F do not, even though they are neither whitespace nor Cc/Cf.
+    private static func isVisibleOptionLabelScalar(_ scalar: Unicode.Scalar) -> Bool {
+        !invisibleOptionLabelScalars.contains(scalar) && !scalar.properties.isDefaultIgnorableCodePoint
+    }
+
     /// The line shown for one advertised option: the agent's wording when it gives any,
     /// otherwise its identifier. Both are agent-authored, so both go through the same
     /// sanitiser -- routing only the name through it left the identifier able to
@@ -3523,14 +3529,27 @@ actor ACPAgentSessionController {
     /// Emptiness is tested by looking for a visible scalar rather than by trimming the
     /// invisible ones away: a trailing format character can be load-bearing, and trimming
     /// them truncates emoji tag sequences such as the subdivision flags.
+    ///
+    /// Bidi controls are dropped (they could visually reorder one option to read like another)
+    /// and other Cc controls such as tabs or backspace become spaces. Joiners, variation
+    /// selectors, and tag characters are kept so emoji sequences stay intact.
     private static func displayableOptionLabel(_ raw: String) -> String? {
-        let collapsed = raw
+        var neutralised = String.UnicodeScalarView()
+        for scalar in raw.unicodeScalars where !scalar.properties.isBidiControl {
+            if scalar.properties.generalCategory == .control, !CharacterSet.newlines.contains(scalar) {
+                neutralised.append(" ")
+            } else {
+                neutralised.append(scalar)
+            }
+        }
+        let collapsed = String(neutralised)
             .components(separatedBy: .newlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard collapsed.unicodeScalars.contains(where: { !invisibleOptionLabelScalars.contains($0) })
-        else { return nil }
+        guard collapsed.unicodeScalars.contains(where: isVisibleOptionLabelScalar) else { return nil }
         return collapsed
     }
 

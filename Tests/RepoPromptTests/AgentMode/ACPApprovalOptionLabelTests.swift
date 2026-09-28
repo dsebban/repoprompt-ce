@@ -34,6 +34,40 @@ final class ACPApprovalOptionLabelTests: XCTestCase {
         XCTAssertNil(label("\u{200C}\u{200D}\u{2060}\u{202E}"))
     }
 
+    /// Default-ignorable scalars render as nothing, so a label made only of them must fall
+    /// back to the identifier rather than show a blank line.
+    func testTreatsDefaultIgnorableScalarsAsNotVisible() {
+        XCTAssertNil(label("\u{FE0F}"))
+        XCTAssertNil(label("\u{034F}"))
+        XCTAssertNil(label(" \u{FE0F}\u{034F}\u{200B} "))
+        XCTAssertEqual(
+            ACPAgentSessionController.test_optionLabel(name: "\u{FE0F}", optionID: "allow_once"),
+            "allow_once"
+        )
+    }
+
+    /// Bidi controls could visually reorder one option's wording to read like another, and
+    /// other control characters render unpredictably, so neither reaches the card.
+    func testStripsBidiControlsAndNeutralisesOtherControlCharacters() {
+        XCTAssertEqual(label("Allow\u{202E}ecno"), "Allowecno")
+        XCTAssertEqual(label("\u{2066}Allow\u{2069} once\u{202A}\u{202C}"), "Allow once")
+        XCTAssertEqual(label("Allow\tonce"), "Allow once")
+        XCTAssertEqual(label("Allow\u{8}once"), "Allow once")
+        for raw in ["\u{202B}Allow\u{202D}", "\u{2067}Deny\u{2068}", "Allow\u{202E}"] {
+            let rendered = label(raw) ?? ""
+            XCTAssertFalse(
+                rendered.unicodeScalars.contains { $0.properties.isBidiControl },
+                "\(rendered.unicodeScalars.map { String($0.value, radix: 16) })"
+            )
+        }
+        XCTAssertNil(label("\u{202E}\t\u{8}"))
+    }
+
+    func testKeepsEmojiSequencesIntactWhileSanitising() {
+        XCTAssertEqual(label("\u{2764}\u{FE0F} Allow"), "\u{2764}\u{FE0F} Allow")
+        XCTAssertEqual(label("\u{202E}👨‍👩‍👧‍👦 Allow"), "👨‍👩‍👧‍👦 Allow")
+    }
+
     /// Emptiness is tested by looking for a visible scalar rather than by trimming invisible
     /// ones: the subdivision flags end in a run of format characters, and trimming those
     /// truncates the flag to a plain black flag.
