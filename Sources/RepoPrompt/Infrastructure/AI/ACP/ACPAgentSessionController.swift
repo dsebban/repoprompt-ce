@@ -1040,11 +1040,24 @@ actor ACPAgentSessionController {
 
     /// A `session/load` keeps the mode the session already had, which can be a `bypass` set by an
     /// earlier Full Approval run. Restoring it under Provider Default would silently keep full
-    /// approval, so refuse. A load that fell back to `session/new` is fresh and unaffected.
-    private func refuseProviderDefaultOnLoadedBypassSession(openedSessionModeID: String) throws {
-        guard case .load = sessionConfiguration.mode,
-              fallbackResumeSessionIDForPromptClearing == nil,
-              let bypass = DevinAgentToolPreferences.PermissionLevel.fullApproval.sessionModeID,
+    /// approval, so refuse; a load that reports no mode is refused too. A load that fell back to
+    /// `session/new` is fresh and unaffected.
+    private var openedSessionWasLoaded: Bool {
+        guard case .load = sessionConfiguration.mode else { return false }
+        return fallbackResumeSessionIDForPromptClearing == nil
+    }
+
+    private func refuseProviderDefaultOnLoadedBypassSession(openedSessionModeID: String?) throws {
+        guard openedSessionWasLoaded else { return }
+        guard let openedSessionModeID else {
+            // Without mode metadata a loaded session could still hold a saved `bypass`.
+            throw AIProviderError.invalidConfiguration(
+                detail: "This resumed Devin conversation did not report its permission mode, so Provider Default "
+                    + "cannot confirm it is not in Bypass mode. Start a new conversation, or update the Devin CLI "
+                    + "so it reports session modes."
+            )
+        }
+        guard let bypass = DevinAgentToolPreferences.PermissionLevel.fullApproval.sessionModeID,
               openedSessionModeID.caseInsensitiveCompare(bypass) == .orderedSame
         else { return }
         throw AIProviderError.invalidConfiguration(
@@ -1058,8 +1071,8 @@ actor ACPAgentSessionController {
         guard let requestedModeID = requestedModeID?.trimmingCharacters(in: .whitespacesAndNewlines),
               !requestedModeID.isEmpty
         else {
-            guard let openedSessionModeID else { return }
             try refuseProviderDefaultOnLoadedBypassSession(openedSessionModeID: openedSessionModeID)
+            guard let openedSessionModeID else { return }
             try await setSessionModeSerialized(openedSessionModeID)
             return
         }

@@ -165,6 +165,28 @@ final class DevinAgentModeSessionModeBoundaryTests: XCTestCase {
         XCTAssertTrue(methods.contains("session/prompt"), "order was \(methods)")
     }
 
+    /// A loaded session that reports no mode could still be in a saved `bypass`, so Provider
+    /// Default cannot confirm it and must stop before prompting.
+    func testProviderDefaultResumeWithoutModeMetadataRefusesBeforePrompt() async throws {
+        let h = try makeHarness(startingMode: "bypass", omitModeSelector: true)
+        do {
+            try await h.run(level: .providerDefault, resumeSessionID: "devin-session")
+            XCTFail("Provider Default must not prompt a loaded session whose mode is unknown")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("did not report its permission mode"), "\(error)")
+            XCTAssertTrue(error.localizedDescription.contains("Start a new conversation"), "\(error)")
+        }
+        XCTAssertTrue(h.methods().contains("session/load"), "order was \(h.methods())")
+        XCTAssertFalse(h.methods().contains("session/prompt"), "order was \(h.methods())")
+    }
+
+    func testProviderDefaultResumeWithoutModeMetadataThatFellBackToAFreshSessionPrompts() async throws {
+        let h = try makeHarness(startingMode: "bypass", omitModeSelector: true, loadNotFound: true)
+        try await h.run(level: .providerDefault, resumeSessionID: "devin-session")
+        XCTAssertTrue(h.methods().contains("session/new"), "order was \(h.methods())")
+        XCTAssertTrue(h.methods().contains("session/prompt"), "order was \(h.methods())")
+    }
+
     // MARK: - Harness
 
     struct Harness {

@@ -202,6 +202,29 @@ final class DevinHeadlessSessionModeBoundaryTests: XCTestCase {
         )
     }
 
+    /// A loaded session that reports no mode could still be in a saved `bypass`; Provider
+    /// Default must refuse rather than prompt at an unknown level. Fresh runs still prompt.
+    func testProviderDefaultResumeWithoutModeMetadataRefusesToPrompt() async throws {
+        let h = try makeHarness(omitModeSelector: true, startingMode: "bypass")
+        let provider = h.makeProvider(level: .providerDefault)
+        do {
+            let stream = try await provider.streamAgentMessage(
+                AgentMessage(userMessage: "hi", resumeSessionID: "devin-headless-session")
+            )
+            for try await _ in stream {}
+            XCTFail("expected the resumed providerDefault request to be refused")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("did not report its permission mode"), "\(error)")
+        }
+        await provider.dispose()
+        XCTAssertTrue(h.recordedMethodOrder().contains("session/load"))
+        XCTAssertFalse(h.recordedMethodOrder().contains("session/prompt"))
+
+        let fresh = try makeHarness(omitModeSelector: true)
+        try await drain(fresh.makeProvider(level: .providerDefault))
+        XCTAssertTrue(fresh.recordedMethodOrder().contains("session/prompt"))
+    }
+
     /// The same resume at Full Approval is still allowed: it sends `bypass` and verifies it.
     func testFullApprovalResumeOfAnEscalatedSessionStillPrompts() async throws {
         let h = try makeHarness(startingMode: "bypass")
