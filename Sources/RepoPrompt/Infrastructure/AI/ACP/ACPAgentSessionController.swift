@@ -2253,7 +2253,7 @@ actor ACPAgentSessionController {
     /// selection. Admit the complete effective request using only live session
     /// authority, immediately before dispatching the prompt.
     private func validatePromptModelParameterSelections(_ request: ACPRunRequest) throws {
-        guard provider.providerID == .devin,
+        guard provider.supportsParameterizedModelPicker,
               !request.modelParameterSelections.isEmpty
         else { return }
         guard sessionModelSnapshotHasLiveAuthority,
