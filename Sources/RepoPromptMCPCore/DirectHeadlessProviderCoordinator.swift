@@ -194,7 +194,8 @@ actor DirectHeadlessProviderCoordinator {
         ]
     }
 
-    /// `exec resume` accepts no `--sandbox`, so the `exec` flags precede the `resume` subcommand.
+    /// `exec resume` accepts no `--sandbox`, so the `exec` flags precede the `resume` subcommand,
+    /// and the resumed run also gets the same mode as an explicit `sandbox_mode` config override.
     static func codexExecArguments(
         model: String?,
         purpose: ExecutionPurpose,
@@ -206,7 +207,7 @@ actor DirectHeadlessProviderCoordinator {
         }
         arguments += ["exec", "--skip-git-repo-check", "--sandbox", purpose.sandbox, "--json"]
         if let resumeThreadID {
-            arguments += ["resume", resumeThreadID]
+            arguments += ["resume", "-c", "sandbox_mode=\"\(purpose.sandbox)\"", resumeThreadID]
         }
         arguments.append("-")
         return arguments

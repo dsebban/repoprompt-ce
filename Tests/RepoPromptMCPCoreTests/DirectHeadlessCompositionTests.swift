@@ -169,8 +169,13 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertEqual(arguments, [
             "--model", "gpt-test",
             "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--json",
-            "resume", "thread-1", "-"
+            "resume", "-c", "sandbox_mode=\"workspace-write\"", "thread-1", "-"
         ])
+        XCTAssertEqual(
+            DirectHeadlessProviderCoordinator.codexExecArguments(model: nil, purpose: .oracleGroup, resumeThreadID: "t")
+                .suffix(5),
+            ["resume", "-c", "sandbox_mode=\"read-only\"", "t", "-"]
+        )
     }
 
     func testHeadlessAcceptsSteerOnlyForAgentRun() throws {

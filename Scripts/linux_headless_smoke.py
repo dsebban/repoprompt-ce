@@ -30,10 +30,10 @@ import threading
 
 TIMEOUT_SECONDS = 60
 DELETED_IMAGE_FLAG = "--as-deleted-image"
-# Answers FIRST_TURN, or RESUMED when invoked as `exec ... resume smoke-thread -`.
+# Answers FIRST_TURN, or RESUMED when invoked as `exec ... resume -c sandbox_mode=... smoke-thread -`.
 CODEX_STUB = """#!/bin/sh
 cat >/dev/null
-case " $* " in *" resume smoke-thread "*) text=RESUMED ;; *) text=FIRST_TURN ;; esac
+case " $* " in *" resume -c sandbox_mode=\\"workspace-write\\" smoke-thread "*) text=RESUMED ;; *) text=FIRST_TURN ;; esac
 printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s"}\\n' "$text"
 """
 

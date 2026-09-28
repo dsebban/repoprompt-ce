@@ -45,12 +45,14 @@ struct DirectHeadlessProviderFixture {
         #!/bin/sh
         model=default
         resume=
+        resuming=
         while [ "$#" -gt 0 ]; do
-          if [ "$1" = "--model" ]; then
+          if [ "$1" = "--model" ] || [ "$1" = "-c" ]; then
+            [ "$1" = "--model" ] && model="$2"
             shift
-            model="$1"
           elif [ "$1" = "resume" ]; then
-            shift
+            resuming=1
+          elif [ -n "$resuming" ] && [ -z "$resume" ]; then
             resume="$1"
           fi
           shift
