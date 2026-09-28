@@ -1,12 +1,19 @@
 # Multi-Oracle lane analysis: Claude vs GPT lanes and who wins the synthesis
 
-Date: 2026-09-28. Status: **directional, small sample**. Aggregates only; no prompts,
-responses, group IDs or project names are included.
+Date: 2026-09-28 (revised the same day after a two-Oracle audit of the tool). Status:
+**directional, small sample**. Aggregates only; no prompts, responses, or project names.
 
 This replicates Parts 1–3 of a community runbook (*"Runbook: comparing Claude and Codex
 Oracle lanes, and who wins the synthesis"*, shared in the RepoPrompt Discord) on a second
-user's local history, and records where that runbook's heuristics needed adjusting. The
-reproducible tool is [`Scripts/oracle_lane_analysis.py`](../../Scripts/oracle_lane_analysis.py).
+user's local history. The reproducible, read-only tool is
+[`Scripts/oracle_lane_analysis.py`](../../Scripts/oracle_lane_analysis.py).
+
+> **Correction.** The first version of this report said that in 4 of 7 recoverable
+> deliveries the synthesizer never saw the GPT lane. That was a tool bug: continuation
+> reads of an export (which don't repeat the group ID) were not followed, and Devin
+> transcripts were not parsed. After the fix, three of those four show full coverage of
+> every lane. The fourth was a hand-assembled file containing only the Claude answer, not a
+> RepoPrompt export. No case of RepoPrompt's own delivery hiding a lane was found.
 
 ## Questions
 
@@ -20,110 +27,128 @@ reproducible tool is [`Scripts/oracle_lane_analysis.py`](../../Scripts/oracle_la
 | Item | Value |
 | --- | --- |
 | RepoPrompt build | RepoPrompt CE (tip builds, Sep 2026) |
-| Lane files / groups | 53 lanes in 26 groups |
-| Usable paired responses | 21 pairs from 16 groups (9 pairs dropped: a lane was a provider error such as `-- Error: 502`; 1 dropped: <20-word smoke test) |
+| Lane files / groups | 67 lanes in 33 groups |
+| Usable cross-family pairs | 26 pairs from 21 groups. Dropped: pairs with a provider-error or empty lane (counter: Claude lane 9, GPT lane 4) and 1 trivial (“hi”) prompt |
 | Claude lanes | Fable 5.1 xhigh via a LiteLLM custom provider (direct API, **not** the Claude Code harness) |
-| GPT lanes | GPT‑6 Astra high/medium/xhigh via Devin (15 pairs); GPT‑5.5 / GPT‑5.6 Terra xhigh via Codex (6 pairs) |
-| Primary (lane 0) | Claude in every mixed group, so **position effects cannot be tested here** |
-| Synthesizers | Claude Code (Opus 5 / 5.5) ×6; GPT‑5.6 Sol under Devin ×5 (4 RepoPrompt Agent Mode, 1 Devin CLI) |
+| GPT lanes | GPT‑6 Astra high/medium/xhigh via Devin (20 pairs); GPT‑5.5 / GPT‑5.6 Terra xhigh via Codex (6 pairs) |
+| Primary (lane 0) | Claude in every cross-family group, so **position cannot be separated from model here** |
+| Synthesizers | Claude Code (Opus 5 / 5.5); GPT‑5.6 Sol under Devin (Agent Mode and Devin CLI) |
 
 Compared with the runbook author's data (218 pairs, Claude Code / Codex harnesses), this is
-~10× smaller and uses different harnesses on both sides.
+about 10× smaller and uses different harnesses on both sides. It also includes a few Oracle
+groups created while auditing this analysis.
 
 ## Part 1: paired lane comparison
 
-| Slice | Pairs | Claude median words | GPT median words | Median C/G ratio | Claude longer |
-| --- | --- | --- | --- | --- | --- |
-| All | 21 | 1,887 | 1,027 | 1.66× | 18/21 |
-| Chat | 12 | 2,180 | 1,410 | 1.51× | 9/12 |
-| Plan | 1 | 3,765 | 3,309 | 1.14× | 1/1 |
-| Review | 8 | 1,186 | 562 | 1.96× | 8/8 |
-| GPT via Codex | 6 | 2,475 | 2,188 | 1.21× | 3/6 |
-| GPT via Devin | 15 | 1,859 | 745 | 1.76× | 15/15 |
+Pairs are same group, same turn. "Per-group" is the median of per-group medians, which
+avoids overweighting groups with several turns or lanes.
 
-Review mode (n=8):
+| Slice | Pairs | Groups | Claude median words | GPT median words | Median C/G | Per-group C/G | Claude longer |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| All | 26 | 21 | 1,873 | 1,098 | 1.61× | 1.57× | 22/26 |
+| Chat | 12 | 9 | 2,180 | 1,410 | 1.51× | 1.47× | 9/12 |
+| Plan | 2 | 2 | 3,788 | 3,378 | 1.12× | 1.12× | 2/2 |
+| Review | 12 | 10 | 1,328 | 562 | 1.96× | 2.03× | 11/12 |
+| GPT via Codex | 6 | 6 | 2,475 | 2,188 | 1.21× | 1.21× | 3/6 |
+| GPT via Devin | 20 | 15 | 1,846 | 886 | 1.71× | 1.76× | 19/20 |
+
+Review mode (n=12):
 
 | Measure | Claude | GPT |
 | --- | --- | --- |
-| Runbook "finding-like items" (median) | 26.5 | 2.0 |
-| P0–P3-tagged items only (median) | 2.5 | 1.5 |
-| Reviews with any P0 | 1/8 | 5/8 |
-| Clean "no findings" verdicts | 0/8 | 0/8 |
+| P0–P3-tagged findings (median) | 2.0 | 2.0 |
+| Runbook "finding-like items" (median) | 17.5 | 2.0 |
+| Words per tagged finding (median) | 620 | 365 |
+| Reviews with a tagged, non-negated P0 | 2/12 | 8/12 |
+| Clean "no findings" verdicts | 0/12 | 0/12 |
 
 Observations:
 
-- Claude is longer, but the gap (1.66× overall, 1.96× review) is much smaller than the
-  runbook's 2.3× / 4.7×. Against Codex-harness lanes it is near parity (1.21×, n=6). Because
-  Claude here bypasses the Claude Code harness, this is weak support for the Discord point
-  that part of the gap is harness, not model.
+- Claude is longer: 1.6× overall and about 2× in reviews. That is smaller than the runbook's
+  2.3× / 4.7×. The Codex-harness slice is near parity (1.21×), but n=6 and it differs
+  from the Devin slice in model generation too, so it does **not** isolate a harness effect.
 - The runbook's "finding-like item" heuristic (any list item citing a path, P-tag or line)
-  inflates Claude badly: Claude writes many evidence bullets that cite files. Counting only
-  P-tagged items shrinks the gap from ~13× to ~1.7×. Prefer the P-tag count.
-- GPT flagged P0 more often here (5/8 vs 1/8), the opposite of the runbook's result.
+  mostly counts Claude's evidence bullets. With tagged findings only, both sides raise the
+  same number (median 2), and Claude spends about 1.7× more words on each.
+- GPT tagged a P0 far more often (8/12 vs 2/12). "No P0 issues" lines are excluded.
+- Same-family pairs as a noise floor are too few to use yet (GPT–GPT n=2, Claude–Claude
+  n=1). A roster with two identical lanes fixes this (see below).
 
-## Part 2: linking groups to syntheses
+## Part 2: linking group turns to syntheses
 
-- 11 of 16 mixed groups linked to a synthesis of ≥50 words.
-- **Mechanical visibility problem (new).** Of the 7 deliveries whose delivered text is
-  recoverable, **4 never showed the synthesizer the GPT lane body**. In each case the Claude
-  Code synthesizer read an Oracle export file (`prompt-exports/oracle-*.md`) only partially
-  (for example lines 1–160 of 630), so lane 0 (Claude) was partly or fully visible and lane 2
-  (GPT) was not visible at all. No harness truncation markers were involved.
-  - This is a lane-position effect with a mechanical cause: whatever sits later in the
-    export is what a partial read drops. It is a plausible contributor to "the primary lane
-    wins" independent of model preference.
-- RepoPrompt Agent Mode sessions persist tool results summary-only (`"summary_only": true`),
-  so what an Agent Mode synthesizer actually saw cannot be verified from disk. Those
-  syntheses are linked by matching the DomainRuntime Oracle group turn `finishedAt` to the
-  nearest successful `ask_oracle` / `context_builder` tool result and are marked
-  *unverified*.
+- 21 of 26 cross-family group turns are linked to the agent that received them; 15 have
+  synthesis text after the last delivery read.
+- **Text-recoverable deliveries (Claude Code, Devin CLI): 12.** In 9 of them every lane had
+  full sampled coverage (≥90%). Agents usually paged through long exports completely, in
+  2–5 `read_file` calls.
+- Three low-coverage lanes, none caused by RepoPrompt's own delivery:
+  - One GPT lane was missing because the agent read a hand-assembled file containing only
+    the Claude answer.
+  - One group's result was replaced by the host (Claude Code "output too large … saved to")
+    and then processed with shell commands. What it saw is **not measurable**, which is
+    different from "not delivered".
+- **Agent Mode:** 10 group turns matched to Oracle tool activities within ≤1 s of the
+  DomainRuntime `finishedAt`, so linking is reliable. Agent Mode persists tool results
+  summary-only, though, so what those synthesizers saw cannot be checked.
+- Parallel Oracle calls answered by one combined synthesis (3 groups here) are flagged
+  `shared` and excluded from Part 3.
 
-## Part 3: carry proxy
+## Part 3: reference-mention carry
 
-Lane-unique backticked references and whether the synthesis mentions them.
+For each lane: backticked, identifier-like references that no other lane mentions and that
+don't appear in the request, and whether the synthesis mentions them.
 
-| Deliveries | Groups | Unique refs offered C / G | Carried C / G | Carry rate C / G | Share of carried from Claude | Per-group sign test (C–G) |
+| Cohort | n | Unique refs C / G | Mentioned C / G | Rate C / G | Share of mentions from Claude | Per-group sign test (C–G) |
 | --- | --- | --- | --- | --- | --- | --- |
-| Verified complete (both lanes ≥90% visible) | 3 | 335 / 53 | 51 / 16 | 15.2% / 30.2% | 76% | 1–2, p=1.00 |
-| + Agent Mode (visibility unverified) | 7 | 1,069 / 156 | 97 / 21 | 9.1% / 13.5% | 82% | 4–3, p=1.00 |
+| Every lane ≥90% sampled coverage | 7 | 656 / 95 | 40 / 3 | 6.1% / 3.2% | 93% | 4–1, p=0.38 |
+| Agent Mode (coverage unknown) | 3 | 157 / 14 | 5 / 1 | 3.2% / 7.1% | 83% | 1–1, p=1.00 |
 
-Same direction as the runbook: the synthesis is dominated by Claude content by **volume**
-(Claude offers ~6–7× more unique references), while each GPT reference is at least as likely
-to survive. Nothing here is statistically significant.
+- Claude supplies about 7× more unique references, so the synthesis is dominated by Claude
+  content by **volume**, as in the runbook.
+- Unlike the runbook, this data doesn't show GPT references surviving *more often* per
+  reference. Once uniqueness is judged by content rather than by backtick styling, Claude's
+  rate is 6.1% vs GPT's 3.2%. With n=7 and p=0.38, that's no evidence either way.
+- Every one of these groups had Claude as lane 0, and 6 of 7 had a Claude synthesizer, so
+  model, position and synthesizer self-preference are fully confounded.
 
-Part 4 (blinded judge pass) was **not run**: with 3–7 usable groups it would add cost
+Part 4 (blinded judge pass) was **not run**: with about 7 usable groups it would add cost
 without resolving anything.
 
 ## Deviations from the runbook
 
 | Runbook | This tool | Why |
 | --- | --- | --- |
-| Provider from model prefix (`claude_code` / `codex`) | Model **family** (Claude vs GPT) plus a separate **harness** tag (`claude-code`, `codex`, `devin`, `api-litellm`, …) | Custom-provider / Devin lanes have neither prefix; family and harness must be separated to address the model-vs-harness question |
-| Truncation from harness markers | Also **measured visibility**: 20 × 60-char probes per lane against everything delivered in the synthesis window | Partial reads of export files have no marker |
-| All lanes | Drop provider-error lanes (`-- Error:` prefix) and <20-word pairs | Error lanes produced absurd ratios (e.g. 343×) |
-| Tool results containing any group ID | Drop records that mention more than one group ID | `grep`/listing outputs are not deliveries |
-| Claude Code / Codex transcripts | Also Devin CLI transcripts and RepoPrompt Agent Mode sessions | Where this user's syntheses actually happened |
-| Finding-like items only | Also P-tagged items | See review-mode table |
+| Provider from model prefix (`claude_code` / `codex`) | Harness parsed from the specifier prefix first (`claude-code`, `codex`, `devin`, `api-litellm`, …), then model family from the remaining model name | Keeps harness and model separate, so a lane named `claude_code__…` isn't classified by its harness |
+| Delivery = tool result containing the group ID | A RepoPrompt group header (`Oracle group: \`id\`` inline, `Group ID: \`id\`` in exports), excluding search tools and listings with >2 headers; continuation reads of the same export / saved-output path are followed | Paged reads and `grep` output were misattributed |
+| Truncation markers only | Sampled coverage per lane: 20 × 60-character probes, with whitespace and read-tool line-number prefixes removed | Partial reads have no marker; line numbers broke the probes |
+| Synthesis = all assistant text after delivery | Assistant text after the last delivery read, excluding narration attached to a tool call | "Let me read `X`" inflated the carry for whichever lane cited X |
+| Lane-unique = other lane didn't backtick it | Other lanes and the request don't *mention* it (word-boundary, unambiguous basename) | Claude backticks far more than GPT |
+| Any "P0" token | Tagged, non-negated finding lines | "No P0 issues" counted as a P0 |
+| Drop <20-word answers | Drop provider-error lanes (per message) and trivial prompts; keep short answers | Short clean verdicts are data |
+| First Claude × first GPT lane | Every lane pair, including same-family pairs as a noise floor | Needed for 3-lane rosters |
+| Claude Code / Codex transcripts | Also Devin CLI transcripts and RepoPrompt Agent Mode sessions (one-to-one timestamp match per session) | Where this user's syntheses happened |
 
 ## Rerun on another machine
 
-Requirements: macOS, `python3` ≥ 3.9. `rg` (ripgrep) is optional (used for speed; a pure
-Python fallback produces identical output). No network or model calls; read-only.
+Requirements: macOS and `python3` ≥ 3.9 (the system `/usr/bin/python3` works). `rg` is
+optional; the pure-Python fallback gives identical output. The tool is read-only and makes
+no network or model calls.
 
 ```bash
 # from a repoprompt-ce checkout (or: gh pr checkout <PR> -R repoprompt/repoprompt-ce)
 git fetch https://github.com/dsebban/repoprompt-ce.git docs/multi-oracle-lane-analysis
 git switch -c multi-oracle-lane-analysis FETCH_HEAD
+python3 Scripts/oracle_lane_analysis.py --self-test          # synthetic fixtures; expect "self-test OK"
 python3 Scripts/oracle_lane_analysis.py | tee ~/oracle-lanes-$(hostname -s).txt
 ```
 
 Useful options:
 
 ```bash
-# only lanes saved after a date (UTC), e.g. after changing one setting
+# only groups whose newest lane was saved after a date (UTC unless an offset is given)
 python3 Scripts/oracle_lane_analysis.py --since 2026-10-01T00:00:00
 
-# per-group metrics (no response text) for your own slicing
+# per-pair / per-turn metrics for your own slicing (no text; full group IDs and model names)
 python3 Scripts/oracle_lane_analysis.py --json ~/oracle-lanes.json
 
 # non-default install / transcript locations (repeatable)
@@ -131,7 +156,7 @@ python3 Scripts/oracle_lane_analysis.py \
   --chat-glob '~/Library/Application Support/RepoPrompt Beta/Workspaces/*/Chats/*.json' \
   --transcript-root ~/some/other/agent/transcripts
 
-# stricter/looser definition of a "complete" delivery for Part 3 (default 0.9)
+# stricter/looser coverage threshold for the main Part 3 cohort (default 0.9)
 python3 Scripts/oracle_lane_analysis.py --vis-threshold 0.8
 ```
 
@@ -139,50 +164,72 @@ Default locations scanned:
 
 | Data | Paths |
 | --- | --- |
-| Oracle lane chats | `~/Library/Application Support/RepoPrompt CE/Workspaces/*/Chats/*.json`, same under `RepoPrompt/` |
+| Oracle lane chats | `~/Library/Application Support/RepoPrompt CE/Workspaces/*/Chats/*.json`, and the same under `RepoPrompt/` |
 | Oracle group timing | `…/DomainRuntime/v1/*/oracle/groups/*.json` |
 | Agent Mode sessions | `…/Workspaces/*/AgentSessions/AgentSession-*.json` |
 | Claude Code | `~/.claude/projects/**/*.jsonl` |
-| Codex CLI | `~/.codex/sessions/**`, RepoPrompt-launched Codex under `…/RepoPrompt CE/Codex/<Release or Debug>/home/sessions` |
+| Codex CLI | `~/.codex/sessions/**`, plus RepoPrompt-launched Codex under `…/RepoPrompt CE/Codex/<Release or Debug>/home/sessions` |
 | Devin CLI | `~/.local/share/devin/cli/transcripts/*.json` |
 
 Sanity checks before trusting the numbers:
 
-1. `lane models:` lists the models you expect; anything classified `other` is excluded from
-   pairing (extend `family()` for non-Claude/GPT models such as Kimi).
-2. `dropped pairs:` is small relative to `paired responses:`; a large error count means
-   provider failures, not model behavior.
-3. In the Part 2 table, low `vis C`/`vis G` values mean the synthesizer did not see that
-   lane. Check a few by hand before attributing a lean to preference.
-4. `unlinked:` groups had no locatable synthesis (for example, the calling session was
-   deleted or ran in another tool).
+1. `lane models` shows `harness | model | family` for every lane. Lanes whose family is
+   `other` are excluded from pairing; extend `family()` for them. Kimi, Gemini, Grok and
+   similar get their own family: their pairs are counted by kind (e.g. `claude-kimi`), but
+   only `claude-gpt` pairs feed the tables.
+2. `dropped` is small relative to `pairs`; a large error count means provider failures,
+   not model behavior.
+3. In the Part 2 table, low coverage on a lane with `trunc=True` means the host replaced the
+   result, so it is not measurable. Low coverage without `trunc` is worth checking by hand.
+4. `shared > 1` rows are parallel Oracle calls answered by one synthesis; they are left out
+   of Part 3.
 
 What to share back (aggregates only):
 
-- the Part 1 tables, including the P-tagged finding medians;
-- counts of verified deliveries and of deliveries with a lane <10% visible, with the
-  delivering tool (`ask_oracle` result, export file read, Agent Mode);
-- both Part 3 tables with `n`;
-- your roster: which family is lane 0, each lane's harness, and synthesizer families.
+- the Part 1 tables, including tagged-finding medians and the same-family noise floor;
+- the Part 2 counts: linked, text-recoverable, full coverage, low coverage (and why);
+- both Part 3 cohorts with `n` and the by-lane-position line;
+- your roster: each lane's harness, model and effort, which lane is 0, and who synthesized.
 
-Do **not** share `--json` output together with transcripts, and never share raw lane or
-synthesis text; the runbook's privacy guardrail applies.
+Never share raw lane or synthesis text, and don't share `--json` output alongside
+transcripts. The runbook's privacy guardrail applies.
 
-### Worth testing with a larger history
+### Suggested one-week design (for a 3-Oracle roster)
 
-- **Alternate the primary lane** by session (Claude primary one session, GPT primary the
-  next). This dataset cannot separate position from model because Claude was always lane 0.
-- **Count partial-read deliveries** per primary lane. If the later lanes are systematically
-  under-read, instruct synthesizers to read Oracle export files in full, or prefer delivery
-  modes that inline all lanes.
-- **Same harness, two models** (for example two Claude models in one harness, or several
-  models through one OpenCode harness) to triangulate model vs harness effects.
-- Run Part 4 of the runbook once there are ≥30 verified-complete linked groups.
+- Make lanes 0 and 2 **identical** (same model, same effort, same harness), e.g.
+  (Codex‑A, Claude, Codex‑A). Lane 0 vs lane 2 then measures position, and doubles as the
+  noise floor for the Claude vs Codex comparison.
+- Change one thing per day (shared size/format guidance in the Oracle presets, or the
+  synthesizer: Claude Code vs Codex), not per half-week.
+- Count only group turns where every lane has full coverage. Keep partial ones as a
+  separate operational metric.
+- If possible, replay a few saved lane sets into fresh synthesis sessions with only the
+  lane order changed, and hand-score real findings rather than reference mentions.
+- Run Part 4 of the runbook once there are ≥30 fully covered, unshared linked groups.
+
+## Product observations (proposed follow-ups, not in this change)
+
+From a two-Oracle review of the delivery code (`AgentOracleExport`,
+`ToolOutputFormatter.formatOracleGroup` / `formatDiscoverContext`, the `context_builder`
+export path). No observed failure motivates these; they are cheap hardening.
+
+- **Self-describing exports.** The export instruction could state the line and lane counts
+  and ask for every lane to be read, with a lane list at the top and an end-of-export
+  marker. Agents paged fully in every observed case, but a reader can't currently tell it
+  stopped early.
+- **Lanes first in `context_builder` exports.** Generated results could come before the
+  repeated prompt and selection.
+- **Neutral group hint.** "Returned ordered … results" could read as a ranking; "N
+  independent results (order is not a ranking)" wouldn't.
+- **Auditable Agent Mode delivery.** Record result sizes, group ID and delivered lanes
+  (no text), so coverage can be checked without guessing.
+- Not recommended from this evidence: forcing Codex `model_verbosity`, shuffling lane order
+  outside experiments, or reintroducing a synthesis step.
 
 ## Limitations
 
 - Not a controlled experiment; tasks, repositories and settings varied over time.
-- "Finding", "carry" and "visibility" are pattern matches. A carried reference may be cited
-  to reject it.
-- Agent Mode visibility is inferred, not observed.
-- Sample sizes (n=3 to n=21) support direction only, not magnitude.
+- "Finding", "carry" and "coverage" are pattern matches. A mentioned reference may be cited
+  to reject it, and sampled coverage ≥90% is an estimate, not proof of complete delivery.
+- Agent Mode coverage is unknown; only the link is verified.
+- Sample sizes (n=3 to n=26) support direction only, not magnitude.
