@@ -55,15 +55,18 @@ package actor DirectHeadlessMCPService {
     private let logger: Logger
     private let environment: [String: String]
     private let currentDirectory: URL
+    private let openAICompatibleClient: DirectHeadlessOpenAICompatibleClient
 
     package init(
         logger: Logger = Logger(label: "com.repoprompt.ce.mcp.headless"),
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+        openAICompatibleClient: DirectHeadlessOpenAICompatibleClient = .init()
     ) {
         self.logger = logger
         self.environment = environment
         self.currentDirectory = currentDirectory
+        self.openAICompatibleClient = openAICompatibleClient
     }
 
     package func run() async throws {
@@ -210,7 +213,8 @@ package actor DirectHeadlessMCPService {
                 runtime: runtime,
                 context: context,
                 settingsStore: settingsStore,
-                environment: environment
+                environment: environment,
+                openAICompatibleClient: openAICompatibleClient
             )
             let oracleStore = DomainOracleConversationStore(
                 persistence: runtime.persistenceCoordinator,

@@ -149,6 +149,113 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         XCTAssertTrue(try fixture.calls().isEmpty)
     }
 
+    func testOpenAICompatibleRosterRunsDirectAndGroupedOracleOverHTTP() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "http-roster")
+        defer { fixture.cleanup() }
+        let service = fixture.service(openAIConfigured: true)
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        try await Self.setRoster(prepared, primary: "openaiCompatible:gpt-test", additional: [])
+        let direct = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("direct http")]
+        )
+        XCTAssertEqual(direct["response"] as? String, "http-gpt-test")
+        let chatID = try XCTUnwrap(direct["chat_id"] as? String)
+        let continued = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "oracle_send",
+            arguments: ["chat_id": .string(chatID), "message": .string("again")]
+        )
+        XCTAssertEqual(continued["response"] as? String, "http-gpt-test")
+
+        try await Self.setRoster(prepared, primary: "lane-0", additional: ["openaiCompatible:gpt-test"])
+        let grouped = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("grouped http")]
+        )
+        let lanes = try XCTUnwrap(grouped["oracle_results"] as? [[String: Any]])
+        XCTAssertEqual(lanes.compactMap { $0["response"] as? String }, ["response-0-lane-0", "http-gpt-test"])
+
+        let requests = fixture.httpRequests()
+        XCTAssertEqual(requests.count, 3)
+        for request in requests {
+            XCTAssertEqual(request.url?.absoluteString, "http://\(fixture.httpHost)/v1/chat/completions")
+            XCTAssertEqual(request.method, "POST")
+            XCTAssertEqual(request.authorization, "Bearer \(DirectHeadlessProviderFixture.httpAPIKey)")
+            XCTAssertEqual(request.body["model"] as? String, "gpt-test")
+        }
+        let firstMessages = try XCTUnwrap(requests[0].body["messages"] as? [[String: String]])
+        XCTAssertEqual(firstMessages, [["role": "user", "content": "direct http"]])
+        XCTAssertEqual(try fixture.calls().map(\.model), ["lane-0"])
+    }
+
+    func testOpenAICompatibleFailuresSurfaceWithoutTheKeyAndMisconfigurationSendsNothing() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "http-errors")
+        defer { fixture.cleanup() }
+        let configured = fixture.service(openAIConfigured: true)
+        let prepared = try await configured.prepareRuntime()
+        addTeardownBlock { await configured.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        for (model, expected) in [
+            ("http-401", "HTTP 401"),
+            ("http-malformed", "no assistant content"),
+            ("default", "explicit model")
+        ] {
+            try await Self.setRoster(prepared, primary: "openaiCompatible:\(model)", additional: [])
+            do {
+                _ = try await invoke(prepared: prepared, backend: backend, toolName: "ask_oracle", arguments: ["message": .string("x")])
+                XCTFail("Expected \(model) to fail")
+            } catch {
+                XCTAssertTrue(String(describing: error).contains(expected), "\(error)")
+                XCTAssertFalse(String(describing: error).contains(DirectHeadlessProviderFixture.httpAPIKey), "\(error)")
+            }
+        }
+        XCTAssertEqual(fixture.httpRequests().compactMap { $0.body["model"] as? String }, ["http-401", "http-malformed"])
+
+        try await Self.setRoster(prepared, primary: "lane-0", additional: ["openaiCompatible:http-401"])
+        let grouped = try await invoke(prepared: prepared, backend: backend, toolName: "ask_oracle", arguments: ["message": .string("x")])
+        let lanes = try XCTUnwrap(grouped["oracle_results"] as? [[String: Any]])
+        XCTAssertEqual(lanes.map { $0["status"] as? String }, ["completed", "failed"])
+        XCTAssertTrue(String(describing: lanes[1]).contains("HTTP 401"), "\(lanes[1])")
+
+        let unconfiguredFixture = try DirectHeadlessProviderFixture(name: "http-unconfigured")
+        defer { unconfiguredFixture.cleanup() }
+        let unconfigured = unconfiguredFixture.service()
+        let unconfiguredPrepared = try await unconfigured.prepareRuntime()
+        addTeardownBlock { await unconfigured.teardown(unconfiguredPrepared) }
+        try await Self.setRoster(unconfiguredPrepared, primary: "openaiCompatible:gpt-test", additional: [])
+        do {
+            _ = try await invoke(
+                prepared: unconfiguredPrepared,
+                backend: DirectHeadlessConversationBackend(
+                    providerCoordinator: unconfiguredPrepared.providerCoordinator,
+                    oracleAdapter: unconfiguredPrepared.oracleAdapter
+                ),
+                toolName: "ask_oracle",
+                arguments: ["message": .string("x")]
+            )
+            XCTFail("Expected the unconfigured HTTP provider to be unavailable")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("not configured"), "\(error)")
+        }
+        XCTAssertTrue(unconfiguredFixture.httpRequests().isEmpty)
+    }
+
     func testSingleOracleUsesDirectConversationWithoutDurableGroup() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "single-direct")
         defer { fixture.cleanup() }

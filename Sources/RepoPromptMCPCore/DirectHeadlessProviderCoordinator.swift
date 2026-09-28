@@ -6,7 +6,8 @@ import RepoPromptShared
 enum DirectHeadlessProviderID {
     static let codexExec = "codexExec"
     static let claudeCode = "claudeCode"
-    static let all = [codexExec, claudeCode]
+    static let openAICompatible = "openaiCompatible"
+    static let all = [codexExec, claudeCode, openAICompatible]
 
     static func canonical(matching raw: String) -> String? {
         all.first { $0.caseInsensitiveCompare(raw) == .orderedSame }
@@ -36,6 +37,7 @@ actor DirectHeadlessProviderCoordinator {
         enum Backend: Equatable {
             case codexCLI(executable: String)
             case claudeCLI(executable: String)
+            case openAICompatibleHTTP(DirectHeadlessOpenAICompatibleClient.Configuration)
         }
 
         let id: String
@@ -43,6 +45,11 @@ actor DirectHeadlessProviderCoordinator {
         /// `nil` when the provider is unavailable; `unavailableReason` says why.
         let backend: Backend?
         let unavailableReason: String?
+
+        /// Only CLI providers have tools and a workspace to run agents in.
+        var supportsAgentRuns: Bool {
+            id != DirectHeadlessProviderID.openAICompatible
+        }
 
         var value: Value {
             .object([
@@ -99,6 +106,7 @@ actor DirectHeadlessProviderCoordinator {
     private let context: DirectHeadlessDomainContext
     private let settingsStore: DomainDirectSettingsStore
     private let environment: [String: String]
+    private let openAICompatibleClient: DirectHeadlessOpenAICompatibleClient
     private let beginEpoch: BeginEpoch
     private var agents: [UUID: AgentRecord] = [:]
     private var providerTasks: [UUID: Task<TurnOutput, Error>] = [:]
@@ -110,12 +118,14 @@ actor DirectHeadlessProviderCoordinator {
         context: DirectHeadlessDomainContext,
         settingsStore: DomainDirectSettingsStore,
         environment: [String: String] = ProcessInfo.processInfo.environment,
+        openAICompatibleClient: DirectHeadlessOpenAICompatibleClient = .init(),
         beginEpoch: BeginEpoch? = nil
     ) {
         self.runtime = runtime
         self.context = context
         self.settingsStore = settingsStore
         self.environment = environment
+        self.openAICompatibleClient = openAICompatibleClient
         let sessionStore = runtime.agentSessionStore
         self.beginEpoch = beginEpoch ?? { registration, activationID in
             await sessionStore.beginEpoch(
@@ -138,6 +148,9 @@ actor DirectHeadlessProviderCoordinator {
     /// - `REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1` (or `true`): enables `claudeCode`, which has
     ///   no OS sandbox. It uses the CLI's stored login; API keys are never forwarded.
     /// - `REPOPROMPT_CLAUDE_COMMAND`: Claude Code executable; default `claude`. Does not enable it.
+    /// - `REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL`: enables the Oracle-only `openaiCompatible`
+    ///   chat-completions provider at this API root; `REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY` is
+    ///   its optional bearer key. Rosters select it as `openaiCompatible:<model>`.
     nonisolated static func providerCatalog(environment: [String: String]) -> [ProviderDescriptor] {
         let codex = findExecutable(named: environment["REPOPROMPT_CODEX_COMMAND"] ?? "codex", path: environment["PATH"])
         let claudeEnabled = ["1", "true"].contains(
@@ -154,6 +167,7 @@ actor DirectHeadlessProviderCoordinator {
         } else {
             nil
         }
+        let openAI = DirectHeadlessOpenAICompatibleClient.configuration(from: environment)
         return [
             ProviderDescriptor(
                 id: DirectHeadlessProviderID.codexExec,
@@ -166,6 +180,12 @@ actor DirectHeadlessProviderCoordinator {
                 displayName: "Claude Code CLI",
                 backend: claude.map { .claudeCLI(executable: $0) },
                 unavailableReason: claudeUnavailableReason
+            ),
+            ProviderDescriptor(
+                id: DirectHeadlessProviderID.openAICompatible,
+                displayName: "OpenAI-compatible HTTP",
+                backend: openAI.configuration.map { .openAICompatibleHTTP($0) },
+                unavailableReason: openAI.unavailableReason
             )
         ]
     }
@@ -189,8 +209,20 @@ actor DirectHeadlessProviderCoordinator {
 
     func validateOracleRoster(_ roster: OracleRoster) throws {
         for model in roster.orderedModels {
-            _ = try resolveProvider(model.providerID).requireBackend()
+            if case .openAICompatibleHTTP = try resolveProvider(model.providerID).requireBackend() {
+                _ = try Self.httpModel(model.modelID)
+            }
         }
+    }
+
+    /// An HTTP API has no default model of its own, so the roster must name one.
+    private nonisolated static func httpModel(_ model: String?) throws -> String {
+        guard let model = explicitModel(model) else {
+            throw MCPError.invalidRequest(
+                "openaiCompatible requires an explicit model; name it as 'openaiCompatible:<model>'."
+            )
+        }
+        return model
     }
 
     func runProviderOnce(
@@ -214,22 +246,31 @@ actor DirectHeadlessProviderCoordinator {
         )
         guard !isShuttingDown else { throw CancellationError() }
         try Task.checkCancellation()
-        let (executable, arguments, parse): (String, [String], @Sendable (String) throws -> TurnOutput) =
-            switch backend {
-            case let .codexCLI(executable):
-                (executable, Self.codexExecArguments(model: model, purpose: purpose), Self.codexTurnOutput)
-            case let .claudeCLI(executable):
-                (
-                    executable,
-                    DirectHeadlessClaudeCodeCLI.arguments(model: model, purpose: purpose),
-                    DirectHeadlessClaudeCodeCLI.parseTurnOutput
-                )
+        let (executable, arguments, parse): (String, [String], @Sendable (String) throws -> TurnOutput)
+        switch backend {
+        case let .codexCLI(path):
+            (executable, arguments, parse) = (
+                path,
+                Self.codexExecArguments(model: model, purpose: purpose),
+                { Self.codexTurnOutput(from: $0) }
+            )
+        case let .claudeCLI(path):
+            (executable, arguments, parse) = (
+                path,
+                DirectHeadlessClaudeCodeCLI.arguments(model: model, purpose: purpose),
+                { try DirectHeadlessClaudeCodeCLI.parseTurnOutput($0) }
+            )
+        case let .openAICompatibleHTTP(configuration):
+            let model = try Self.httpModel(model)
+            let client = openAICompatibleClient
+            return try await trackProviderTask {
+                try await client.complete(configuration: configuration, model: model, message: message)
             }
+        }
         let carrier = carrierEnvironment ?? DomainChildLaunchContext.current?.environment ?? [:]
-        var childEnvironment = DirectProcess.withoutPrivateCarrier(from: environment)
-        childEnvironment.merge(carrier) { _, supplied in supplied }
-        let taskID = UUID()
-        let task = Task {
+        let childEnvironment = DirectProcess.withoutPrivateCarrier(from: environment)
+            .merging(carrier) { _, supplied in supplied }
+        return try await trackProviderTask {
             let output = try await DirectProcess.run(
                 executable,
                 arguments: arguments,
@@ -239,6 +280,14 @@ actor DirectHeadlessProviderCoordinator {
             )
             return try parse(output)
         }
+    }
+
+    /// Registers the turn so `shutdown()` cancels and drains it, and forwards caller cancellation.
+    private func trackProviderTask(
+        _ operation: @escaping @Sendable () async throws -> TurnOutput
+    ) async throws -> TurnOutput {
+        let taskID = UUID()
+        let task = Task(operation: operation)
         providerTasks[taskID] = task
         defer { providerTasks.removeValue(forKey: taskID) }
         return try await withTaskCancellationHandler {
@@ -263,6 +312,11 @@ actor DirectHeadlessProviderCoordinator {
         )
         let providerID = args["model_id"]?.stringValue ?? args["agent"]?.stringValue
         let descriptor = try resolveProvider(providerID)
+        guard descriptor.supportsAgentRuns else {
+            throw MCPError.invalidRequest(
+                "Provider '\(descriptor.id)' supports Oracle conversations only; agent_run requires a CLI provider (codexExec or claudeCode)."
+            )
+        }
         _ = try descriptor.requireBackend()
         let sessionID = DomainChildLaunchContext.current?.runID ?? UUID()
         let runID = sessionID

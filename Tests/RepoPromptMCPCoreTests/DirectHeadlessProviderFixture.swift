@@ -94,8 +94,13 @@ struct DirectHeadlessProviderFixture {
     }
 
     /// `claudeEnabled` sets the operator opt-in; `REPOPROMPT_CLAUDE_COMMAND` always names the stub
-    /// so a disabled run proves the executable alone does not enable Claude.
-    func service(claudeEnabled: Bool = false, extraEnvironment: [String: String] = [:]) -> DirectHeadlessMCPService {
+    /// so a disabled run proves the executable alone does not enable Claude. `openAIConfigured`
+    /// points the HTTP provider at this fixture's `DirectHeadlessHTTPStub` host with `httpAPIKey`.
+    func service(
+        claudeEnabled: Bool = false,
+        openAIConfigured: Bool = false,
+        extraEnvironment: [String: String] = [:]
+    ) -> DirectHeadlessMCPService {
         var environment = [
             "REPOPROMPT_CODEX_COMMAND": executable.path,
             "REPOPROMPT_CLAUDE_COMMAND": claudeExecutable.path,
@@ -107,8 +112,27 @@ struct DirectHeadlessProviderFixture {
         if claudeEnabled {
             environment["REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED"] = "1"
         }
+        if openAIConfigured {
+            environment["REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"] = "http://\(httpHost)/v1/"
+            environment["REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"] = Self.httpAPIKey
+        }
         environment.merge(extraEnvironment) { _, extra in extra }
-        return DirectHeadlessMCPService(environment: environment, currentDirectory: root)
+        return DirectHeadlessMCPService(
+            environment: environment,
+            currentDirectory: root,
+            openAICompatibleClient: DirectHeadlessHTTPStub.client()
+        )
+    }
+
+    static let httpAPIKey = "stub-secret-key"
+
+    /// Unique per fixture so parallel tests never share recorded requests.
+    var httpHost: String {
+        "\(profileName).stub.invalid"
+    }
+
+    func httpRequests() -> [DirectHeadlessHTTPStub.Request] {
+        DirectHeadlessHTTPStub.requests(host: httpHost)
     }
 
     func calls() throws -> [Call] {
@@ -170,5 +194,87 @@ struct DirectHeadlessProviderFixture {
     private static func writeExecutable(_ script: String, to url: URL) throws {
         try Data(script.utf8).write(to: url)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
+    }
+}
+
+/// OpenAI-compatible endpoint stub. The requested model picks the reply: `http-401` fails with an
+/// error that echoes the key, `http-malformed` returns a non-JSON 200, `http-hang` never answers,
+/// and any other model answers `http-<model>`.
+final class DirectHeadlessHTTPStub: URLProtocol {
+    struct Request {
+        let url: URL?
+        let method: String?
+        let authorization: String?
+        let body: [String: Any]
+    }
+
+    private static let lock = NSLock()
+    private nonisolated(unsafe) static var recorded: [String: [Request]] = [:]
+
+    static func client() -> DirectHeadlessOpenAICompatibleClient {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [DirectHeadlessHTTPStub.self]
+        return DirectHeadlessOpenAICompatibleClient(session: URLSession(configuration: configuration))
+    }
+
+    static func requests(host: String) -> [Request] {
+        lock.lock()
+        defer { lock.unlock() }
+        return recorded[host] ?? []
+    }
+
+    override class func canInit(with _: URLRequest) -> Bool {
+        true
+    }
+
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest {
+        request
+    }
+
+    override func startLoading() {
+        let body = Self.body(of: request)
+        let entry = Request(
+            url: request.url,
+            method: request.httpMethod,
+            authorization: request.value(forHTTPHeaderField: "Authorization"),
+            body: (try? JSONSerialization.jsonObject(with: body) as? [String: Any]) ?? [:]
+        )
+        Self.lock.lock()
+        Self.recorded[request.url?.host ?? "", default: []].append(entry)
+        Self.lock.unlock()
+        let model = entry.body["model"] as? String ?? ""
+        let (status, payload): (Int, String)
+        switch model {
+        case "http-hang":
+            return
+        case "http-401":
+            (status, payload) = (401, #"{"error":{"message":"Incorrect API key provided: \#(DirectHeadlessProviderFixture.httpAPIKey)"}}"#)
+        case "http-malformed":
+            (status, payload) = (200, "<html>not json</html>")
+        default:
+            (status, payload) = (200, #"{"choices":[{"message":{"role":"assistant","content":"http-\#(model)"}}]}"#)
+        }
+        let response = HTTPURLResponse(url: request.url!, statusCode: status, httpVersion: "HTTP/1.1", headerFields: nil)!
+        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(payload.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+
+    override func stopLoading() {}
+
+    /// URLSession hands protocols a body stream rather than `httpBody`.
+    private static func body(of request: URLRequest) -> Data {
+        if let body = request.httpBody { return body }
+        guard let stream = request.httpBodyStream else { return Data() }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let count = stream.read(&buffer, maxLength: buffer.count)
+            guard count > 0 else { break }
+            data.append(buffer, count: count)
+        }
+        return data
     }
 }

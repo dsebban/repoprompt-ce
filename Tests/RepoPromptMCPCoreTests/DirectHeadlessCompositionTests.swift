@@ -218,7 +218,7 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             "REPOPROMPT_CODEX_COMMAND": executable,
             "REPOPROMPT_CLAUDE_COMMAND": executable
         ])
-        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode"])
+        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode", "openaiCompatible"])
         XCTAssertEqual(disabled[0].backend, .codexCLI(executable: executable))
         XCTAssertNil(disabled[1].backend)
         XCTAssertTrue(try XCTUnwrap(disabled[1].unavailableReason).contains("disabled"))
@@ -243,7 +243,8 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             ("o3", "codexExec", "o3"),
             ("claudeCode:opus", "claudeCode", "opus"),
             ("CLAUDECODE:opus", "claudeCode", "opus"),
-            ("llama3:8b", "codexExec", "llama3:8b")
+            ("llama3:8b", "codexExec", "llama3:8b"),
+            ("openaiCompatible:llama3:8b", "openaiCompatible", "llama3:8b")
         ]
         for (raw, providerID, modelID) in cases {
             XCTAssertEqual(
@@ -252,6 +253,86 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             )
         }
         XCTAssertThrowsError(try DirectHeadlessOracleRosterResolver.modelReference("claudeCode:"))
+    }
+
+    func testOpenAICompatibleProviderNeedsAValidBaseURLAndKeepsTheKeyInTheHeader() throws {
+        typealias Client = DirectHeadlessOpenAICompatibleClient
+        let unconfigured = DirectHeadlessProviderCoordinator.providerCatalog(environment: [:])[2]
+        XCTAssertEqual(unconfigured.id, "openaiCompatible")
+        XCTAssertFalse(unconfigured.supportsAgentRuns)
+        XCTAssertNil(unconfigured.backend)
+        XCTAssertTrue(try XCTUnwrap(unconfigured.unavailableReason).contains("not configured"))
+        for invalid in ["ftp://host/v1", "not a url", "http:///v1"] {
+            XCTAssertNil(Client.configuration(from: [Client.baseURLKey: invalid]).configuration, invalid)
+        }
+
+        let configured = try XCTUnwrap(Client.configuration(from: [
+            Client.baseURLKey: " http://127.0.0.1:11434/v1// ",
+            Client.apiKeyKey: "secret"
+        ]).configuration)
+        XCTAssertEqual(configured.endpoint.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
+        let request = try Client.makeRequest(configuration: configured, model: "m", message: "hi")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "m")
+        XCTAssertEqual(body["messages"] as? [[String: String]], [["role": "user", "content": "hi"]])
+
+        let keyless = try XCTUnwrap(Client.configuration(from: [Client.baseURLKey: "https://api.example/v1"]).configuration)
+        XCTAssertNil(
+            try Client.makeRequest(configuration: keyless, model: "m", message: "hi")
+                .value(forHTTPHeaderField: "Authorization")
+        )
+
+        let childEnvironment = DirectProcess.childEnvironment(
+            inherited: ["HOME": "/home", Client.apiKeyKey: "secret"],
+            overrides: [Client.apiKeyKey: "secret"]
+        )
+        XCTAssertEqual(childEnvironment["HOME"], "/home")
+        XCTAssertNil(childEnvironment[Client.apiKeyKey])
+    }
+
+    func testOpenAICompatibleResponseParsingRedactsTheKeyFromErrors() throws {
+        typealias Client = DirectHeadlessOpenAICompatibleClient
+        let configuration = try Client.Configuration(endpoint: XCTUnwrap(URL(string: "http://h/v1/chat/completions")), apiKey: "secret")
+        let ok = try Client.parseResponse(
+            data: Data(#"{"choices":[{"message":{"content":"  answer  "}}]}"#.utf8),
+            statusCode: 200,
+            configuration: configuration
+        )
+        XCTAssertEqual(ok, .init(assistantText: "  answer  ", providerSessionID: nil))
+
+        let failures: [(String, Int, String)] = [
+            (#"{"error":{"message":"bad key secret"}}"#, 401, "HTTP 401: bad key [redacted]"),
+            ("upstream exploded", 500, "HTTP 500: upstream exploded"),
+            ("<html>", 200, "no assistant content"),
+            (#"{"choices":[]}"#, 200, "no assistant content")
+        ]
+        for (body, status, expected) in failures {
+            XCTAssertThrowsError(try Client.parseResponse(data: Data(body.utf8), statusCode: status, configuration: configuration)) {
+                let text = String(describing: $0)
+                XCTAssertTrue(text.contains(expected), text)
+                XCTAssertFalse(text.contains("secret"), text)
+            }
+        }
+    }
+
+    func testOpenAICompatibleRequestCancellationStopsTheInFlightCall() async throws {
+        let client = DirectHeadlessHTTPStub.client()
+        let configuration = try DirectHeadlessOpenAICompatibleClient.Configuration(
+            endpoint: XCTUnwrap(URL(string: "http://cancel.stub.invalid/v1/chat/completions")),
+            apiKey: nil
+        )
+        let task = Task { try await client.complete(configuration: configuration, model: "http-hang", message: "wait") }
+        while DirectHeadlessHTTPStub.requests(host: "cancel.stub.invalid").isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {}
     }
 
     func testChildProcessWithoutInputSeesEndOfFileInsteadOfParentStdin() async throws {

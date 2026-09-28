@@ -56,13 +56,32 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         XCTAssertTrue(try fixture.claudeCalls().isEmpty)
     }
 
+    func testOpenAICompatibleProviderIsRefusedForAgentRunsBeforeAnythingStarts() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "agent-http")
+        defer { fixture.cleanup() }
+        let service = fixture.service(openAIConfigured: true)
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+
+        do {
+            _ = try await start(prepared, providerID: "openaiCompatible", model: "gpt-test")
+            XCTFail("Expected the HTTP provider to be refused for agent_run")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("Oracle conversations only"), "\(error)")
+        }
+        XCTAssertTrue(fixture.httpRequests().isEmpty)
+        let sessions = await prepared.providerCoordinator.listAgents()
+        XCTAssertTrue(sessions.isEmpty)
+    }
+
     private func start(
         _ prepared: DirectHeadlessMCPService.PreparedRuntime,
+        providerID: String = "claudeCode",
         model: String
     ) async throws -> [String: Any] {
         let arguments: [String: Value] = [
             "op": .string("start"),
-            "model_id": .string("claudeCode"),
+            "model_id": .string(providerID),
             "model": .string(model),
             "message": .string("hello"),
             "timeout": .double(30)
