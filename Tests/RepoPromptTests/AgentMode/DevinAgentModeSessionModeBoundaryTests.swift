@@ -52,6 +52,66 @@ final class DevinAgentModeSessionModeBoundaryTests: XCTestCase {
         )
     }
 
+    /// If the level's mode cannot be applied, the run must fail rather than prompt at whatever
+    /// mode the session happens to hold.
+    func testPromptIsNotSentWhenTheModeSetFails() async throws {
+        let h = try makeHarness(failModeSet: true)
+        do {
+            try await h.run(level: .smart)
+            XCTFail("expected the run to fail when the session mode could not be applied")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("Mode is restricted by policy"))
+        }
+        XCTAssertEqual(h.modeValues(), ["smart"])
+        XCTAssertFalse(h.methods().contains("session/prompt"), "order was \(h.methods())")
+    }
+
+    /// Model verification carries no required mode, so the mode must be the final
+    /// configuration step: model -> parameters -> mode -> prompt.
+    func testModeIsTheLastConfigurationStepBeforeThePrompt() async throws {
+        let h = try makeHarness()
+        try await h.run(
+            level: .fullApproval,
+            modelString: "swe-2-max",
+            modelParameterSelections: [ACPModelParameterSelection(
+                providerID: .devin,
+                baseModelRaw: "swe-2-max",
+                kind: .thinking,
+                configID: "thought_level",
+                valueRaw: "high"
+            )]
+        )
+
+        XCTAssertEqual(h.configIDs(), ["model", "thought_level", "mode"])
+        let methods = h.methods()
+        XCTAssertLessThan(
+            try XCTUnwrap(methods.lastIndex(of: "session/set_config_option")),
+            try XCTUnwrap(methods.firstIndex(of: "session/prompt"))
+        )
+    }
+
+    func testExplicitLevelFailsBeforePromptWhenModeMetadataIsMissing() async throws {
+        let h = try makeHarness(omitModeSelector: true)
+        do {
+            try await h.run(level: .fullApproval)
+            XCTFail("expected the run to fail when no mode selector is advertised")
+        } catch {
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Full Approval is not available for this Devin account or CLI (advertised modes: none). "
+                    + "Choose Provider Default in Devin permission settings."
+            )
+        }
+        XCTAssertTrue(h.configIDs().isEmpty)
+        XCTAssertFalse(h.methods().contains("session/prompt"))
+    }
+
+    func testProviderDefaultWithoutModeMetadataStillPrompts() async throws {
+        let h = try makeHarness(omitModeSelector: true)
+        try await h.run(level: .providerDefault)
+        XCTAssertTrue(h.methods().contains("session/prompt"))
+    }
+
     // MARK: - Resume guard
 
     func testProviderDefaultResumeOfABypassSessionRefusesBeforePrompt() async throws {
