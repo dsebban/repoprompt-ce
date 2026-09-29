@@ -58,7 +58,7 @@ if [[ -n "${QA_SIGNING_P12_BASE64:-}" ]]; then
     security create-keychain -p "$keychain_password" "$TEMP_KEYCHAIN"
     security set-keychain-settings -lut 21600 "$TEMP_KEYCHAIN"
     security unlock-keychain -p "$keychain_password" "$TEMP_KEYCHAIN"
-    security import "$p12_path" -k "$TEMP_KEYCHAIN" -P "$QA_SIGNING_P12_PASSWORD" \
+    security import "$p12_path" -k "$TEMP_KEYCHAIN" -f pkcs12 -P "$QA_SIGNING_P12_PASSWORD" \
         -T /usr/bin/codesign -T /usr/bin/security >/dev/null
     rm -f "$p12_path"
     security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$TEMP_KEYCHAIN" >/dev/null
