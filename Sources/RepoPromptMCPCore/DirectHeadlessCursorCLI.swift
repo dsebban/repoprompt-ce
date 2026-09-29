@@ -11,7 +11,8 @@ import MCP
 /// controls is Cursor's own sandbox (`--sandbox enabled` unless the operator turns it off), ask
 /// mode in read-only grouped Oracle lanes, never `--approve-mcps`, and no `--trust` unless the
 /// operator sets `trustWorkspace`. `--force` in write lanes lets Cursor run commands it would
-/// otherwise ask about, inside that sandbox.
+/// otherwise ask about; whether Cursor's sandbox actually bounds those commands on Linux is
+/// unverified.
 enum DirectHeadlessCursorCLI {
     struct Options: Equatable {
         let sandbox: Bool
@@ -24,6 +25,7 @@ enum DirectHeadlessCursorCLI {
     static let apiKeyEnvironmentKey = "CURSOR_API_KEY"
     /// Linux `MAX_ARG_STRLEN` is 128 KiB per argument, including the terminating NUL.
     static let maximumPromptUTF8Bytes = 131_072 - 1
+    static let errorDetailLimit = 500
 
     /// The prompt is the positional argument after `--`, so a prompt starting with `-` is never read
     /// as a flag; stdin stays `/dev/null`. Throws before launch for prompts argv cannot carry.
@@ -48,7 +50,12 @@ enum DirectHeadlessCursorCLI {
         if options.sandbox {
             arguments += ["--sandbox", "enabled"]
         }
-        arguments += purpose == .oracleGroup ? ["--mode", "ask"] : ["--force"]
+        switch purpose {
+        case .oracleGroup:
+            arguments += ["--mode", "ask"]
+        case .directOracle, .agent:
+            arguments.append("--force")
+        }
         if options.trustWorkspace {
             arguments.append("--trust")
         }
@@ -61,27 +68,32 @@ enum DirectHeadlessCursorCLI {
         return arguments + ["--", prompt]
     }
 
-    /// Reads the terminal `result` object printed by `--output-format json`. Stderr shares the
-    /// captured stream, so other lines are skipped; a missing, failed, or empty result is an error
-    /// rather than an answer.
-    static func parseTurnOutput(_ output: String) throws -> DirectHeadlessProviderCoordinator.TurnOutput {
-        var result: [String: Any]?
-        for line in output.split(whereSeparator: \.isNewline) {
-            guard let data = line.data(using: .utf8),
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+    /// Reads the terminal `result` object printed by `--output-format json`: the whole output as
+    /// one (possibly pretty-printed) object, else the last `result` line, since stderr shares the
+    /// captured stream. A missing, failed, or empty result is an error rather than an answer, and
+    /// error text has `apiKey` removed before it is shortened.
+    static func parseTurnOutput(
+        _ output: String,
+        redacting apiKey: String? = nil
+    ) throws -> DirectHeadlessProviderCoordinator.TurnOutput {
+        func resultObject(_ text: some StringProtocol) -> [String: Any]? {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any],
                   object["type"] as? String == "result"
-            else { continue }
-            result = object
+            else { return nil }
+            return object
         }
-        guard let result else {
-            throw MCPError.internalError(
-                "Cursor returned no result: \(output.trimmingCharacters(in: .whitespacesAndNewlines).prefix(500))"
-            )
+        func failure(_ prefix: String, _ detail: String) -> MCPError {
+            MCPError.internalError(prefix + redact(detail, apiKey: apiKey).prefix(errorDetailLimit))
+        }
+        let trimmed = output.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let result = resultObject(trimmed)
+            ?? output.split(whereSeparator: \.isNewline).compactMap(resultObject).last
+        else {
+            throw failure("Cursor returned no result: ", trimmed)
         }
         let text = result["result"] as? String
         if result["is_error"] as? Bool == true {
-            let detail = text ?? result["subtype"] as? String ?? "unknown error"
-            throw MCPError.internalError("Cursor reported an error: \(detail)")
+            throw failure("Cursor reported an error: ", text ?? result["subtype"] as? String ?? "unknown error")
         }
         guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw MCPError.internalError("Cursor result has no text.")
@@ -90,5 +102,11 @@ enum DirectHeadlessCursorCLI {
             assistantText: text,
             providerSessionID: DirectHeadlessProviderCoordinator.resumableSessionID(result["session_id"] as? String)
         )
+    }
+
+    /// Cursor's output shares a stream with stderr, which may echo the key it was given.
+    static func redact(_ text: String, apiKey: String?) -> String {
+        guard let apiKey, !apiKey.isEmpty else { return text }
+        return text.replacingOccurrences(of: apiKey, with: "[redacted]")
     }
 }

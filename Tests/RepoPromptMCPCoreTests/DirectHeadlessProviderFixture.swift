@@ -182,6 +182,8 @@ struct DirectHeadlessProviderFixture {
           slow) trap 'exit 0' TERM INT; /bin/sleep 30 ;;
           error-result) /usr/bin/printf '%s\\n' '{"type":"result","subtype":"error","is_error":true,"result":"stub failure"}'; exit 0 ;;
           no-session) /usr/bin/printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"sessionless"}'; exit 0 ;;
+          leak-exit) /usr/bin/printf 'auth failed for %s\\n' "${CURSOR_API_KEY:-}" >&2; exit 3 ;;
+          leak-result) /usr/bin/printf '{"type":"result","is_error":true,"result":"bad key %s"}\\n' "${CURSOR_API_KEY:-}"; exit 0 ;;
         esac
         /usr/bin/printf '{"type":"result","subtype":"success","is_error":false,"result":"cursor-%s-%s","session_id":"cursor-chat-%s"}\\n' \
           "$lane" "$model" "$$"

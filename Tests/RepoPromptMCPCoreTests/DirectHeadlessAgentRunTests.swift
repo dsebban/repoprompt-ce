@@ -106,6 +106,27 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         }
     }
 
+    func testCursorFailuresThatEchoTheKeyAreRedacted() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "agent-cursor-redact")
+        defer { fixture.cleanup() }
+        let sourceKey = DirectHeadlessProviderFixture.cursorSourceKeyEnvironmentKey
+        let service = try fixture.service(
+            cursor: .init(apiKeyEnv: sourceKey),
+            extraEnvironment: [sourceKey: "leaky-cursor-secret"]
+        )
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+
+        for (model, expected) in [("leak-exit", "auth failed for [redacted]"), ("leak-result", "bad key [redacted]")] {
+            let snapshot = try await start(prepared, providerID: "cursor", model: model)
+            let rendered = try String(decoding: JSONSerialization.data(withJSONObject: snapshot), as: UTF8.self)
+            XCTAssertEqual(snapshot["status"] as? String, "failed", rendered)
+            XCTAssertTrue(rendered.contains(expected), rendered)
+            XCTAssertFalse(rendered.contains("leaky-cursor-secret"), rendered)
+        }
+        XCTAssertEqual(try fixture.cursorCalls().map(\.cursorAPIKey), ["leaky-cursor-secret", "leaky-cursor-secret"])
+    }
+
     func testDisabledCursorAgentRunNeverLaunchesTheExecutable() async throws {
         for options in [nil, DirectHeadlessProviderFixture.CursorOptions(enabled: false)] {
             let fixture = try DirectHeadlessProviderFixture(name: "agent-cursor-disabled")

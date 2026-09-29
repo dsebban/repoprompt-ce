@@ -42,8 +42,8 @@ DELETED_IMAGE_FLAG = "--as-deleted-image"
 CODEX_STUB = """#!/bin/sh
 cat >/dev/null
 case " $* " in *" resume -c sandbox_mode=\\"workspace-write\\" -- smoke-thread "*) text=RESUMED ;; *) text=FIRST_TURN ;; esac
-printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s cwd=%s key=%s"}\\n' \\
-  "$text" "$(pwd -P)" "${CURSOR_API_KEY:-unset}"
+printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s cwd=%s key=%s source=%s"}\\n' \\
+  "$text" "$(pwd -P)" "${CURSOR_API_KEY:-unset}" "${SMOKE_CURSOR_API_KEY:-unset}"
 """
 # Echoes its argv, stdin, key, and cwd in a Cursor `--output-format json` result.
 CURSOR_STUB = """#!/bin/sh
@@ -281,20 +281,21 @@ def run_smoke(binary, base):
             claude_error and "Claude Code is disabled" in claude and http_error and "Oracle conversations only" in http_text,
             f"claude={claude[:200]} http={http_text[:200]}")
 
-    start, text = start_and_steer(server, "codexExec")
-    first_cwd = re.search(r"FIRST_TURN cwd=(\S+) key=unset", start)
-    resumed_cwd = re.search(r"RESUMED cwd=(\S+) key=unset", text)
+    start_error, start, is_error, text = start_and_steer(server, "codexExec")
+    first_cwd = re.search(r"FIRST_TURN cwd=(\S+) key=unset source=unset", start)
+    resumed_cwd = re.search(r"RESUMED cwd=(\S+) key=unset source=unset", text)
     require("12/14 agent_run steer resumes the Codex thread in the same directory, without the Cursor key",
-            '"completed"' in text and first_cwd and resumed_cwd
+            not start_error and not is_error and '"completed"' in text and first_cwd and resumed_cwd
             and first_cwd.group(1) == resumed_cwd.group(1) == os.path.realpath(repo),
             f"start={start[:300]} steer={text[:300]}")
 
-    start, text = start_and_steer(server, "cursor")
+    start_error, start, is_error, text = start_and_steer(server, "cursor")
     common = "-p --output-format json --sandbox enabled --force"
     tail = f"stdin=/dev/null key=cursor-smoke-key cwd={os.path.realpath(repo)}"
     require("13/14 Cursor gets the prompt after --, /dev/null stdin and its key, then steer resumes its chat",
-            f"argv={common} -- hi {tail}" in start and f"argv={common} --resume smoke-chat -- again {tail}" in text
-            and '"completed"' in text, f"start={start[:400]} steer={text[:400]}")
+            not start_error and not is_error and '"completed"' in text
+            and f"argv={common} -- hi {tail}" in start and f"argv={common} --resume smoke-chat -- again {tail}" in text,
+            f"start={start[:400]} steer={text[:400]}")
 
     rc = server.close()
     stub.shutdown()
@@ -305,9 +306,9 @@ def run_smoke(binary, base):
 def start_and_steer(server, provider):
     start_error, start = server.call_tool("agent_run", {"op": "start", "model_id": provider, "message": "hi", "timeout": 30})
     session_id = "" if start_error else json.loads(start).get("session_id", "")
-    _, text = server.call_tool("agent_run", {"op": "steer", "session_id": session_id, "message": "again",
-                                             "timeout_seconds": 30})
-    return start, text
+    is_error, text = server.call_tool("agent_run", {"op": "steer", "session_id": session_id, "message": "again",
+                                                    "timeout_seconds": 30})
+    return start_error, start, is_error, text
 
 
 def run_deleted_image_check(binary, base):

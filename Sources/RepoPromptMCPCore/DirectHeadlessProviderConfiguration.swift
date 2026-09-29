@@ -78,7 +78,8 @@ enum DirectHeadlessProviderConfigurationError: Error, LocalizedError, Equatable 
         case let .invalidSchema(path, detail):
             "Headless providers file \(path) is invalid: \(detail)"
         case let .insideWorkspaceRoot(path, root):
-            "Headless providers file \(path) is inside workspace root \(root); move the file or the root "
+            "Protected headless path \(path) (providers file or profile storage) is inside workspace root \(root); "
+                + "move the root, the profile directory, or the providers file "
                 + "(\(DirectHeadlessProviderConfiguration.fileEnvironmentKey))."
         }
     }
@@ -90,10 +91,27 @@ enum DirectHeadlessProviderConfigurationLoader {
         /// Symlink-resolved, so workspace-root containment compares real locations.
         let canonicalPath: String
         let isExplicit: Bool
+        /// The configured name (parent resolved, final component kept, so a symlink there is
+        /// covered) and its resolved target: a root containing either could redirect the file.
+        var protectedPaths: [String] {
+            aliasPath == canonicalPath ? [canonicalPath] : [aliasPath, canonicalPath]
+        }
+
+        fileprivate let aliasPath: String
     }
 
     static let maximumFileBytes = 1 << 20
 
+    /// Security comparisons never fall back to an unresolved path, which could miss an overlap
+    /// through a symlinked prefix such as `/var` -> `/private/var`.
+    static func canonicalPath(_ path: String) throws -> String {
+        guard let resolved = DomainMutationPathFence.canonicalPath(path) else {
+            throw DirectHeadlessProviderConfigurationError.unreadable(path: path, detail: "the path cannot be resolved")
+        }
+        return resolved
+    }
+
+    /// The storage directory must already exist so its real location is resolved.
     static func location(
         environment: [String: String],
         storageDirectory: URL
@@ -113,38 +131,59 @@ enum DirectHeadlessProviderConfigurationLoader {
             url = URL(fileURLWithPath: explicit)
         }
         let standardized = url.standardizedFileURL
-        return Location(
+        return try Location(
             url: standardized,
-            canonicalPath: DomainMutationPathFence.canonicalPath(standardized.path) ?? standardized.path,
-            isExplicit: !explicit.isEmpty
+            canonicalPath: canonicalPath(standardized.path),
+            isExplicit: !explicit.isEmpty,
+            aliasPath: URL(fileURLWithPath: canonicalPath(standardized.deletingLastPathComponent().path))
+                .appendingPathComponent(standardized.lastPathComponent).path
         )
     }
 
+    /// Reads through one descriptor, so the checked file is the parsed file. Only a missing file
+    /// means "absent"; any other failure, such as permission denied, stops startup rather than
+    /// falling back to the Codex-enabled defaults. The file chooses which executables run, so like
+    /// sudoers it must belong to this user and be writable by no one else.
     static func load(_ location: Location) throws -> DirectHeadlessProviderConfiguration {
         let path = location.url.path
-        guard FileManager.default.fileExists(atPath: location.canonicalPath) else {
+        func unreadable(_ detail: String) -> DirectHeadlessProviderConfigurationError {
+            .unreadable(path: path, detail: detail)
+        }
+        let descriptor = open(location.canonicalPath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
+        guard descriptor >= 0 else {
+            let code = errno
+            guard code == ENOENT else { throw unreadable(String(cString: strerror(code))) }
             if location.isExplicit {
                 throw DirectHeadlessProviderConfigurationError.explicitFileMissing(path)
             }
             return .builtIn
         }
-        let attributes = try? FileManager.default.attributesOfItem(atPath: location.canonicalPath)
-        guard attributes?[.type] as? FileAttributeType == .typeRegular else {
-            throw DirectHeadlessProviderConfigurationError.unreadable(path: path, detail: "not a regular file")
+        defer { close(descriptor) }
+        var metadata = stat()
+        guard fstat(descriptor, &metadata) == 0 else { throw unreadable(String(cString: strerror(errno))) }
+        guard metadata.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else { throw unreadable("not a regular file") }
+        guard metadata.st_uid == getuid() else { throw unreadable("not owned by uid \(getuid())") }
+        guard metadata.st_mode & mode_t(S_IWGRP | S_IWOTH) == 0 else { throw unreadable("group- or world-writable") }
+        guard metadata.st_size <= maximumFileBytes else { throw unreadable("larger than \(maximumFileBytes) bytes") }
+        var data = Data(count: maximumFileBytes + 1)
+        let count = data.withUnsafeMutableBytes { buffer -> Int in
+            guard let base = buffer.baseAddress else { return -1 }
+            var total = 0
+            while total < buffer.count {
+                let result = read(descriptor, base.advanced(by: total), buffer.count - total)
+                if result > 0 {
+                    total += result
+                } else if result == 0 {
+                    break
+                } else if errno != EINTR {
+                    return -1
+                }
+            }
+            return total
         }
-        guard ((attributes?[.size] as? NSNumber)?.intValue ?? 0) <= maximumFileBytes else {
-            throw DirectHeadlessProviderConfigurationError.unreadable(
-                path: path,
-                detail: "larger than \(maximumFileBytes) bytes"
-            )
-        }
-        let data: Data
-        do {
-            data = try Data(contentsOf: URL(fileURLWithPath: location.canonicalPath))
-        } catch {
-            throw DirectHeadlessProviderConfigurationError.unreadable(path: path, detail: error.localizedDescription)
-        }
-        return try parse(data, source: path)
+        guard count >= 0 else { throw unreadable(String(cString: strerror(errno))) }
+        guard count <= maximumFileBytes else { throw unreadable("larger than \(maximumFileBytes) bytes") }
+        return try parse(data.prefix(count), source: path)
     }
 
     static func parse(_ data: Data, source: String) throws -> DirectHeadlessProviderConfiguration {
@@ -168,11 +207,14 @@ enum DirectHeadlessProviderConfigurationLoader {
         }
     }
 
-    /// The file is read only at startup, so a copy that a workspace tool could create or rewrite
-    /// would take effect on the next start. It is refused whether or not it exists yet.
-    static func rejectWorkspaceRootOverlap(_ location: Location, roots: [URL]) throws {
-        if let root = roots.first(where: { rootContains($0, canonicalPath: location.canonicalPath) }) {
-            throw DirectHeadlessProviderConfigurationError.insideWorkspaceRoot(path: location.url.path, root: root.path)
+    /// The providers file is read only at startup, so a copy that a workspace tool could create or
+    /// rewrite would take effect on the next start; it is refused whether or not it exists yet.
+    /// The storage directory also holds the protected-mutation policy, so it is protected too.
+    static func rejectWorkspaceRootOverlap(protectedPaths: [String], roots: [URL]) throws {
+        for path in protectedPaths {
+            if let root = roots.first(where: { rootContains($0, canonicalPath: path) }) {
+                throw DirectHeadlessProviderConfigurationError.insideWorkspaceRoot(path: path, root: root.path)
+            }
         }
     }
 

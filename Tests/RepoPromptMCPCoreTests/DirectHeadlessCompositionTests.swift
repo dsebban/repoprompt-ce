@@ -314,6 +314,18 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             """),
             .init(assistantText: "  answer\n", providerSessionID: "3f2a-b")
         )
+        XCTAssertEqual(
+            try Cursor.parseTurnOutput("""
+            {
+              "type": "result",
+              "is_error": false,
+              "result": "pretty",
+              "session_id": "p-1"
+            }
+
+            """),
+            .init(assistantText: "pretty", providerSessionID: "p-1")
+        )
         for session in [#""session_id":"--continue","#, ""] {
             XCTAssertNil(try Cursor.parseTurnOutput(#"{"type":"result",\#(session)"is_error":false,"result":"ok"}"#).providerSessionID)
         }
@@ -325,6 +337,20 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         ] {
             XCTAssertThrowsError(try Cursor.parseTurnOutput(output), output) { error in
                 XCTAssertTrue(String(describing: error).contains(message), "\(error)")
+            }
+        }
+
+        // The key straddles the length bound, so redaction must happen before truncation.
+        let key = "cursor-secret-key"
+        let padding = String(repeating: "x", count: Cursor.errorDetailLimit - 5)
+        for output in [
+            "\(padding)\(key) not authenticated\n",
+            #"{"type":"result","is_error":true,"result":"\#(padding)\#(key)"}"#
+        ] {
+            XCTAssertThrowsError(try Cursor.parseTurnOutput(output, redacting: key)) { error in
+                guard case let MCPError.internalError(detail?) = error else { return XCTFail("\(error)") }
+                XCTAssertFalse(detail.contains("curso"), detail)
+                XCTAssertTrue(detail.hasSuffix(padding + "[reda"), detail)
             }
         }
     }
@@ -668,6 +694,130 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             XCTFail("a root containing the providers file must be refused")
         } catch let error as DirectHeadlessDomainContext.Error {
             guard case .protectedPathInsideWorkspaceRoot = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testProvidersFileLoaderFailsClosedOnAnythingButAMissingFile() throws {
+        typealias Loader = DirectHeadlessProviderConfigurationLoader
+        let storage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-closed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: storage) }
+        let location = try Loader.location(environment: [:], storageDirectory: storage)
+        let file = storage.appendingPathComponent("providers.json")
+        func assertUnreadable(_ expected: String, line: UInt = #line) {
+            XCTAssertThrowsError(try Loader.load(location), line: line) { error in
+                guard case let .unreadable(_, detail)? = error as? DirectHeadlessProviderConfigurationError else {
+                    return XCTFail("\(error)", line: line)
+                }
+                XCTAssertTrue(detail.contains(expected), detail, line: line)
+            }
+        }
+
+        try Data(#"{"providers":{"claudeCode":{"enabled":true}}}"#.utf8).write(to: file)
+        for (mode, expected) in [(0o000, "Permission denied"), (0o620, "group- or world-writable"), (0o602, "group- or world-writable")] {
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+            assertUnreadable(expected)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        XCTAssertTrue(try Loader.load(location).claude.enabled)
+
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        assertUnreadable("not a regular file")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createSymbolicLink(atPath: file.path, withDestinationPath: storage.appendingPathComponent("absent").path)
+        assertUnreadable("symbolic links")
+        XCTAssertThrowsError(try Loader.canonicalPath("relative/providers.json")) { error in
+            guard case .unreadable? = error as? DirectHeadlessProviderConfigurationError else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testProvidersOverlapCoversSymlinkedPrefixesAndBothEndsOfAnAlias() throws {
+        typealias Loader = DirectHeadlessProviderConfigurationLoader
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-alias-\(UUID().uuidString)", isDirectory: true)
+        let (real, link, workspace, outside) = (
+            base.appendingPathComponent("real", isDirectory: true),
+            base.appendingPathComponent("link", isDirectory: true),
+            base.appendingPathComponent("workspace", isDirectory: true),
+            base.appendingPathComponent("outside", isDirectory: true)
+        )
+        for directory in [real, workspace, outside] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        func overlap(_ location: Loader.Location, _ root: URL) -> String? {
+            do {
+                try Loader.rejectWorkspaceRootOverlap(protectedPaths: location.protectedPaths, roots: [root])
+                return nil
+            } catch let DirectHeadlessProviderConfigurationError.insideWorkspaceRoot(path, _) {
+                return path
+            } catch {
+                return "unexpected \(error)"
+            }
+        }
+
+        let throughLink = try Loader.location(environment: [:], storageDirectory: link)
+        let realFile = real.resolvingSymlinksInPath().appendingPathComponent("providers.json").path
+        XCTAssertEqual(throughLink.canonicalPath, realFile)
+        XCTAssertEqual(overlap(throughLink, real), realFile)
+        XCTAssertEqual(overlap(throughLink, link), realFile)
+
+        let key = DirectHeadlessProviderConfiguration.fileEnvironmentKey
+        let target = outside.appendingPathComponent("providers.json")
+        try Data("{}".utf8).write(to: target)
+        let alias = workspace.appendingPathComponent("providers.json")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
+        let aliased = try Loader.location(environment: [key: alias.path], storageDirectory: real)
+        XCTAssertEqual(aliased.canonicalPath, target.resolvingSymlinksInPath().path)
+        XCTAssertEqual(overlap(aliased, workspace), workspace.resolvingSymlinksInPath().appendingPathComponent("providers.json").path)
+        XCTAssertEqual(try Loader.load(aliased), .builtIn)
+
+        let inner = workspace.appendingPathComponent("inner.json")
+        try Data("{}".utf8).write(to: inner)
+        let outerAlias = outside.appendingPathComponent("alias.json")
+        try FileManager.default.createSymbolicLink(at: outerAlias, withDestinationURL: inner)
+        let reversed = try Loader.location(environment: [key: outerAlias.path], storageDirectory: real)
+        XCTAssertEqual(overlap(reversed, workspace), inner.resolvingSymlinksInPath().path)
+        XCTAssertNil(overlap(reversed, outside.appendingPathComponent("unrelated", isDirectory: true)))
+    }
+
+    func testProfileStorageDirectoryIsProtectedEvenWhenTheProvidersFileLivesElsewhere() async throws {
+        let external = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-external-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: external) }
+        let providersFile = external.appendingPathComponent("providers.json")
+        try Data("{}".utf8).write(to: providersFile)
+        let key = DirectHeadlessProviderConfiguration.fileEnvironmentKey
+
+        let inside = try DirectHeadlessProviderFixture(name: "storage-inside-root")
+        defer { inside.cleanup() }
+        let nestedProfile = inside.root.appendingPathComponent("profile", isDirectory: true)
+        do {
+            _ = try await inside.service(extraEnvironment: [
+                "REPOPROMPT_MCP_HEADLESS_PROFILE_DIR": nestedProfile.path,
+                key: providersFile.path
+            ]).prepareRuntime()
+            XCTFail("a profile storage directory inside a working directory must stop startup")
+        } catch let error as DirectHeadlessProviderConfigurationError {
+            guard case let .insideWorkspaceRoot(path, _) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(path, nestedProfile.resolvingSymlinksInPath().path)
+        }
+
+        let fixture = try DirectHeadlessProviderFixture(name: "storage-outside-root")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(extraEnvironment: [key: providersFile.path])
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        do {
+            try await prepared.context.validateWorkspaceRoots([fixture.profile.path])
+            XCTFail("a root containing the profile storage directory must be refused")
+        } catch let error as DirectHeadlessDomainContext.Error {
+            guard case let .protectedPathInsideWorkspaceRoot(path, _) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(path, fixture.profile.resolvingSymlinksInPath().path)
         }
     }
 

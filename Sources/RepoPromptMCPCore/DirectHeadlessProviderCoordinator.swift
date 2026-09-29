@@ -366,6 +366,7 @@ actor DirectHeadlessProviderCoordinator {
                 { try DirectHeadlessClaudeCodeCLI.parseTurnOutput($0) }
             )
         case let .cursorCLI(path, options):
+            let apiKey = options.apiKeyEnv.flatMap { Self.apiKey(named: $0, in: environment) }
             (executable, arguments, input, providerEnvironment, parse) = try (
                 path,
                 DirectHeadlessCursorCLI.arguments(
@@ -376,9 +377,8 @@ actor DirectHeadlessProviderCoordinator {
                     prompt: prompt
                 ),
                 nil,
-                options.apiKeyEnv.flatMap { Self.apiKey(named: $0, in: environment) }
-                    .map { [DirectHeadlessCursorCLI.apiKeyEnvironmentKey: $0] } ?? [:],
-                { try DirectHeadlessCursorCLI.parseTurnOutput($0) }
+                apiKey.map { [DirectHeadlessCursorCLI.apiKeyEnvironmentKey: $0] } ?? [:],
+                { try DirectHeadlessCursorCLI.parseTurnOutput($0, redacting: apiKey) }
             )
         case let .openAICompatibleHTTP(configuration):
             let model = try Self.httpModel(model)
@@ -393,15 +393,24 @@ actor DirectHeadlessProviderCoordinator {
         let carrier = carrierEnvironment ?? DomainChildLaunchContext.current?.environment ?? [:]
         let childEnvironment = DirectProcess.withoutPrivateCarrier(from: environment)
             .merging(carrier) { _, supplied in supplied }
+        // A failed child's error is its raw output, which may echo the key it was given.
+        let providerSecrets = Array(providerEnvironment.values)
         return try await trackProviderTask {
-            let output = try await DirectProcess.run(
-                executable,
-                arguments: arguments,
-                input: input,
-                environment: childEnvironment,
-                providerEnvironment: providerEnvironment,
-                currentDirectory: snapshot.activeRoot
-            )
+            let output: String
+            do {
+                output = try await DirectProcess.run(
+                    executable,
+                    arguments: arguments,
+                    input: input,
+                    environment: childEnvironment,
+                    providerEnvironment: providerEnvironment,
+                    currentDirectory: snapshot.activeRoot
+                )
+            } catch let MCPError.internalError(detail?) where !providerSecrets.isEmpty {
+                throw MCPError.internalError(providerSecrets.reduce(detail) {
+                    DirectHeadlessCursorCLI.redact($0, apiKey: $1)
+                })
+            }
             return try parse(output)
         }
     }
