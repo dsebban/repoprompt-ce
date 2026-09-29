@@ -25,15 +25,7 @@ final class DispatchTerminationSignalObserver: TerminationSignalObserving {
 
     func observe(_ signal: Int32, handler: @escaping () -> Void) {
         let source = DispatchSource.makeSignalSource(signal: signal, queue: .main)
-        // Deliver from a run-loop block, not from inside the main-queue callout: `NSApp.terminate`
-        // waits out `.terminateLater` in a nested run loop, and CFRunLoop never drains the main
-        // dispatch queue while nested in a main-queue callout, which would starve every MainActor
-        // shutdown job and leave the app hung. `DispatchQueue.main.async` has the same flaw.
-        source.setEventHandler {
-            let mainRunLoop = CFRunLoopGetMain()
-            CFRunLoopPerformBlock(mainRunLoop, CFRunLoopMode.commonModes.rawValue, handler)
-            CFRunLoopWakeUp(mainRunLoop)
-        }
+        source.setEventHandler(handler: handler)
         sources[signal] = source
         source.activate()
     }

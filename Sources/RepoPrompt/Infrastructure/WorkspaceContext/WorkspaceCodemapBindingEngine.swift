@@ -7316,9 +7316,6 @@ actor WorkspaceCodemapBindingEngine {
     }
 
     private func scheduleQueuedRequests() {
-        #if DEBUG
-            incrementCounter(\.queuedRequestSchedulingPasses)
-        #endif
         defer { pruneAdmissionHistory() }
         while true {
             var madeProgress = false
@@ -9916,7 +9913,6 @@ actor WorkspaceCodemapBindingEngine {
     ) -> SynchronousCancellationBatch {
         var overlayCancellations: [OverlayCancellation] = []
         var cancelledRequestCount = 0
-        var releasedActiveCapacity = false
         for requestID in requestIDs {
             if let queued = queuedRequests.removeValue(forKey: requestID) {
                 queueOrder.removeAll { $0 == requestID }
@@ -9925,7 +9921,6 @@ actor WorkspaceCodemapBindingEngine {
                 continue
             }
             guard var request = activeRequests.removeValue(forKey: requestID), !request.cancelled else { continue }
-            releasedActiveCapacity = true
             request.cancelled = true
             request.task?.cancel()
             if request.ticket != nil || request.preflight != nil {
@@ -9944,17 +9939,8 @@ actor WorkspaceCodemapBindingEngine {
             }
             cancelledRequestCount += 1
         }
-        // Every cancelled `demand` also cancels itself individually, so this runs once per
-        // request in a cancellation burst. Only a released active request frees admission
-        // capacity; rescanning the whole queue for queued or already-removed IDs made bursts
-        // quadratic and starved foreground demands (manage_selection replies) behind them.
-        if releasedActiveCapacity {
-            scheduleQueuedRequests()
-        }
-        // Graph-index admission yields to queued foreground demand, so any removal can unblock it.
-        if cancelledRequestCount > 0 {
-            scheduleGraphIndexAdmissions()
-        }
+        scheduleQueuedRequests()
+        scheduleGraphIndexAdmissions()
         return SynchronousCancellationBatch(
             overlayCancellations: overlayCancellations,
             cancelledRequestCount: cancelledRequestCount

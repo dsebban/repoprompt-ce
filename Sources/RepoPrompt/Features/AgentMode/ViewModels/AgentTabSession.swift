@@ -56,22 +56,6 @@ final class AgentTabSession: ObservableObject {
     @Published var runState: AgentSessionRunState = .idle {
         didSet {
             guard runState != oldValue else { return }
-            #if DEBUG
-                // Pins which path revives a finished run: a completed Devin session was observed
-                // reporting `running` for 40+ minutes with no provider traffic after completion.
-                if runState.isActive, !oldValue.isActive, oldValue != .idle, AgentModePerfDiagnostics.isEnabled {
-                    AgentModePerfDiagnostics.recordRunStateReactivation(tabID: tabID, fields: [
-                        "from": oldValue.rawValue,
-                        "to": runState.rawValue,
-                        "runID": AgentModePerfDiagnostics.shortID(runID),
-                        "hasAgentTask": String(agentTask != nil),
-                        "pendingInstructions": String(pendingInstructions.count),
-                        "mcpFollowUpRunPending": String(mcpFollowUpRunPending),
-                        "pendingSupersedingTurnCompletions": String(pendingSupersedingTurnCompletions),
-                        "callers": Thread.callStackSymbols.dropFirst().prefix(16).joined(separator: " | ")
-                    ])
-                }
-            #endif
             noteMonitorObservationInputsChanged()
             onRunStateChanged?(self)
         }

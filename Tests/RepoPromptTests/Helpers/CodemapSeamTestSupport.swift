@@ -159,17 +159,12 @@ final class CodemapStoreFixture: @unchecked Sendable {
 
     /// Store that forces Code Map eligibility. Retained for the existing Git scenarios, whose
     /// contracts are about serving and not about admission.
-    func makeStore(
-        codemapCancellationCleanupHook: @escaping @Sendable (
-            WorkspaceCodemapArtifactDemandTicket
-        ) async -> Void = { _ in }
-    ) -> WorkspaceFileContextStore {
+    func makeStore() -> WorkspaceFileContextStore {
         let runtimeProvider = runtimeProvider
         return WorkspaceFileContextStore(
             codemapRuntimeProvider: { try runtimeProvider.runtime() },
             codemapLocalGitClassificationProbe: .init { _ in .requiresGitPreflight },
-            codemapGitEligibilityProbe: .init { _ in .eligible },
-            codemapCancellationCleanupHook: codemapCancellationCleanupHook
+            codemapGitEligibilityProbe: .init { _ in .eligible }
         )
     }
 

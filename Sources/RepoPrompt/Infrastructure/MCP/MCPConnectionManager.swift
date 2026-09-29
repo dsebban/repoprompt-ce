@@ -1037,23 +1037,6 @@ actor ServerNetworkManager {
         onDashboardUpdate?()
     }
 
-    /// MCPError already renders its code and message; other errors that describe themselves
-    /// (for example protected-mutation or Git capture failures) must not surface as bare case names.
-    static func toolErrorMessage(for error: any Error) -> String {
-        if !(error is MCPError),
-           let description = (error as? LocalizedError)?.errorDescription,
-           !description.isEmpty
-        {
-            return "Error: \(description)"
-        }
-        return "Error: \(error)"
-    }
-
-    /// MCP spec: unknown resources are "Resource not found" (-32002); -32602 means malformed params.
-    static func unknownResourceError(uri: String) -> MCPError {
-        .serverError(code: -32002, message: "Resource not found: \(uri)")
-    }
-
     static func toolErrorResult(rawJSON: Bool, message: String) -> CallTool.Result {
         guard rawJSON else { return CallTool.Result.err(message) }
         let value: Value = .object([
@@ -12164,7 +12147,7 @@ actor ServerNetworkManager {
                     ]
                 )
             default:
-                throw Self.unknownResourceError(uri: params.uri)
+                throw MCPError.invalidParams("Unknown resource URI: \(params.uri)")
             }
         }
 
@@ -14697,7 +14680,7 @@ actor ServerNetworkManager {
                                                 EditFlowPerf.Dimensions(toolName: toolName, status: "dispatchError")
                                             )
                                             return handlerResult(
-                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: Self.toolErrorMessage(for: error)),
+                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: "Error: \(error)"),
                                                 outcome: "dispatchError"
                                             )
                                         }
@@ -14843,7 +14826,7 @@ actor ServerNetworkManager {
                                                 EditFlowPerf.Dimensions(toolName: toolName, status: "dispatchError")
                                             )
                                             return handlerResult(
-                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: Self.toolErrorMessage(for: error)),
+                                                Self.toolErrorResult(rawJSON: capturedRawJSON, message: "Error: \(error)"),
                                                 outcome: "dispatchError"
                                             )
                                         }

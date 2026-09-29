@@ -4307,10 +4307,6 @@ final class MCPServerViewModel: ObservableObject {
         }
 
         let explicitHint = try explicitContextBuilderHint(args: args, targetWindow: targetWindow)
-        let reviewBase = try ContextBuilderReviewBase.parse(
-            from: args["review_base"],
-            responseType: ContextBuilderResponseType.parse(from: args["response_type"])
-        )
         let existingBinding = connectionID.flatMap { existingTabContextBindingAcrossWindows(for: $0) }
         if let existingBinding,
            existingBinding.windowID != targetWindow.windowID
@@ -4366,8 +4362,7 @@ final class MCPServerViewModel: ObservableObject {
                         from: context,
                         workspaceRepoPaths: workspace.repoPaths,
                         workspaceDirectoryPath: targetWindow.workspaceManager.workspaceDirectory(for: workspace).path,
-                        workspaceManager: targetWindow.workspaceManager,
-                        reviewBase: reviewBase
+                        workspaceManager: targetWindow.workspaceManager
                     )
                 } catch is CancellationError {
                     throw CancellationError()
@@ -4418,7 +4413,7 @@ final class MCPServerViewModel: ObservableObject {
                     tabID: context.tabID,
                     sessionID: context.activeAgentSessionID,
                     bindings: context.worktreeBindings,
-                    base: reviewBase
+                    base: "HEAD"
                 )
             }
             let agentModeSessionID = purpose == .agentModeRun ? context.activeAgentSessionID : nil

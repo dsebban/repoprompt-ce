@@ -25,8 +25,7 @@ struct ContextBuilderWorkspaceContext {
         workspaceManager: WorkspaceManagerViewModel,
         reviewDiagnosticSink: ContextBuilderReviewDiagnosticSink? = nil,
         readinessDiagnosticSink: ContextBuilderWorkspaceReadinessDiagnosticSink? = nil,
-        boundWorkspaceProbe: ContextBuilderBoundWorkspaceProbe = .init(),
-        reviewBase: String = ContextBuilderReviewBase.uncommitted
+        boundWorkspaceProbe: ContextBuilderBoundWorkspaceProbe = .init()
     ) async throws -> ContextBuilderWorkspaceContext {
         var phase: ContextBuilderWorkspaceReadinessDiagnosticEvent.Phase? = .admission
         var primaryRootSnapshot: WorkspacePrimaryRootSnapshot?
@@ -97,7 +96,7 @@ struct ContextBuilderWorkspaceContext {
                 tabID: snapshot.tabID,
                 sessionID: parentAgentSessionID,
                 bindings: bindings,
-                base: reviewBase,
+                base: "HEAD",
                 store: store
             )
             let reviewTargetResolution = try await ContextBuilderReviewTargetResolver(

@@ -224,8 +224,8 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
         AgentSessionLinkRuntimeBridge.shared.freezeForTermination()
 
         // 2) Persist the final restorable window session before async shutdown begins.
-        // Using .terminateLater lets us do async work without deadlocking; the gate bounds it.
-        AppTerminationReplyGate.replyAfterShutdown(shutdown: { [self] in
+        // Using .terminateLater lets us do async work without deadlocking.
+        Task { @MainActor in
             if !AppLaunchConfiguration.current.suppressesWindowPersistence {
                 await WindowStatesManager.shared.persistWindowSessionImmediately(reason: "appShouldTerminate")
             }
@@ -242,9 +242,8 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
             await WindowStatesManager.shared.stopAllServers()
             await shutdownDomainRuntimeForTermination()
             await NotificationService.shared.prepareForTermination()
-        }, reply: {
             sender.reply(toApplicationShouldTerminate: true)
-        })
+        }
 
         return .terminateLater
     }

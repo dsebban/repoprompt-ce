@@ -851,14 +851,8 @@ struct WorkspaceCodemapPresentationCoordinator {
         for bundle in resources.bundles {
             _ = await store.releaseCodemapPresentation(bundle)
         }
-        // Each cancellation awaits its engine cleanup; releasing hundreds of pending
-        // auto-codemap tickets serially after the wait budget pushed MCP replies past
-        // their execution contract. Cleanups are independent, so run them together.
-        let store = store
-        await withTaskGroup(of: Void.self) { group in
-            for ticket in resources.tickets {
-                group.addTask { _ = await store.cancelCodemapArtifactDemand(ticket) }
-            }
+        for ticket in resources.tickets {
+            _ = await store.cancelCodemapArtifactDemand(ticket)
         }
     }
 

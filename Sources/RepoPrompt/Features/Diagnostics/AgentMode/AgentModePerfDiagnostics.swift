@@ -31,10 +31,6 @@ import Foundation
         private static var latestSessionSnapshots: [String: [String: Any]] = [:]
         private static var latestSessionSnapshotOrder: [String] = []
         private static var pendingSidebarDeleteByTabID: [UUID: PendingSidebarDelete] = [:]
-        /// Rare, high-value records kept apart from the metric line ring, which chatty events evict
-        /// within minutes; a revived run is usually noticed much later.
-        private static let runStateReactivationLimit = 50
-        private static var runStateReactivations: [[String: String]] = []
 
         struct SidebarDeleteBeginContext {
             let tabID: UUID
@@ -224,20 +220,6 @@ import Foundation
             }
         }
 
-        static func recordRunStateReactivation(tabID: UUID, fields: [String: String]) {
-            guard isEnabled else { return }
-            event("session.runState.reactivated", tabID: tabID, fields: fields)
-            var record = fields
-            record["tabID"] = tabID.uuidString
-            record["timestamp"] = ISO8601DateFormatter().string(from: Date())
-            bufferLock.lock()
-            runStateReactivations.append(record)
-            if runStateReactivations.count > runStateReactivationLimit {
-                runStateReactivations.removeFirst(runStateReactivations.count - runStateReactivationLimit)
-            }
-            bufferLock.unlock()
-        }
-
         static func recordConversationReplay(
             _ metrics: AgentConversationReplayMetrics,
             startMS: Double?
@@ -410,7 +392,6 @@ import Foundation
             latestSessionSnapshots.removeAll(keepingCapacity: true)
             latestSessionSnapshotOrder.removeAll(keepingCapacity: true)
             pendingSidebarDeleteByTabID.removeAll(keepingCapacity: true)
-            runStateReactivations.removeAll(keepingCapacity: true)
             bufferLock.unlock()
         }
 
@@ -431,10 +412,8 @@ import Foundation
             let structuredCount = eventRecords.count
             let structuredDropped = droppedEventRecordCount
             let pendingSidebarDeleteCount = pendingSidebarDeleteByTabID.count
-            let reactivations = runStateReactivations
             bufferLock.unlock()
             return [
-                "run_state_reactivations": reactivations,
                 "enabled": isEnabled,
                 "defaults_enabled": defaultsEnabled,
                 "environment_enabled": environmentEnabled,
