@@ -1,0 +1,82 @@
+name: QA DMG
+
+# Fork-only QA builds signed with the owner's local self-signed identity.
+# Dispatched by Scripts/qa.sh (per-PR builds and the all-features `my-tip`).
+# The workflow and scripts live only on the fork's default branch (`qa-tools`);
+# the source ref is checked out separately and built with that tooling.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to build
+        required: true
+      label:
+        description: Artifact label (defaults to the sanitized ref)
+        required: false
+
+run-name: QA DMG ${{ inputs.label || inputs.ref }}
+
+concurrency:
+  group: qa-dmg-${{ inputs.label || inputs.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    if: github.repository_owner == 'dsebban'
+    runs-on: macos-26
+    timeout-minutes: 75
+    steps:
+      - name: Resolve label
+        id: source
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          INPUT_LABEL: ${{ inputs.label }}
+        run: |
+          set -euo pipefail
+          label="$(printf '%s' "${INPUT_LABEL:-$INPUT_REF}" | tr -c 'A-Za-z0-9._-' '-' | sed 's/-*$//')"
+          echo "label=$label" >> "$GITHUB_OUTPUT"
+
+      - name: Check out QA tooling
+        uses: actions/checkout@v6
+        with:
+          path: tooling
+          persist-credentials: false
+
+      - name: Check out source
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.ref }}
+          path: source
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Restore SwiftPM build cache
+        uses: actions/cache@v6
+        with:
+          path: source/.build
+          key: ${{ runner.os }}-${{ runner.arch }}-qa-release-${{ hashFiles('source/Package.swift', 'source/Package.resolved', 'source/Vendor/Codex/manifest.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-qa-release-
+
+      - name: Build signed QA DMG
+        id: dmg
+        env:
+          QA_SIGNING_P12_BASE64: ${{ secrets.QA_SIGNING_P12_BASE64 }}
+          QA_SIGNING_P12_PASSWORD: ${{ secrets.QA_SIGNING_P12_PASSWORD }}
+          QA_SIGNING_CERT_SHA1: ${{ vars.QA_SIGNING_CERT_SHA1 }}
+          QA_SIGNING_CERT_SHA256: ${{ vars.QA_SIGNING_CERT_SHA256 }}
+          QA_SIGNING_SERVICE_GENERATION: ${{ vars.QA_SIGNING_SERVICE_GENERATION }}
+          QA_OUTPUT_DIR: ${{ runner.temp }}/qa
+        run: ./tooling/Scripts/qa_build.sh "${{ steps.source.outputs.label }}" source
+
+      - name: Upload QA DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.dmg.outputs.name }}
+          path: ${{ steps.dmg.outputs.dmg }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
