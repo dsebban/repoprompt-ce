@@ -53,13 +53,24 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Restore SwiftPM build cache
-        uses: actions/cache@v6
+      - name: Identify Swift toolchain
+        id: toolchain
+        run: |
+          set -euo pipefail
+          swift --version
+          fingerprint="$(swift --version | shasum -a 256 | awk '{print $1}')"
+          echo "fingerprint=$fingerprint" >> "$GITHUB_OUTPUT"
+
+      - name: Restore ARM64 SwiftPM build cache
+        id: build-cache
+        uses: actions/cache/restore@v6
         with:
           path: source/.build
-          key: ${{ runner.os }}-${{ runner.arch }}-qa-release-${{ hashFiles('source/Package.swift', 'source/Package.resolved', 'source/Vendor/Codex/manifest.json') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-qa-arm64-v2-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('source/Package.swift', 'source/Package.resolved', 'source/Vendor/Codex/manifest.json') }}-${{ inputs.ref }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            ${{ runner.os }}-${{ runner.arch }}-qa-release-
+            ${{ runner.os }}-${{ runner.arch }}-qa-arm64-v2-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('source/Package.swift', 'source/Package.resolved', 'source/Vendor/Codex/manifest.json') }}-${{ inputs.ref }}-
+            ${{ runner.os }}-${{ runner.arch }}-qa-arm64-v2-${{ steps.toolchain.outputs.fingerprint }}-${{ hashFiles('source/Package.swift', 'source/Package.resolved', 'source/Vendor/Codex/manifest.json') }}-
+            ${{ runner.os }}-${{ runner.arch }}-qa-release-${{ hashFiles('source/Package.swift', 'source/Package.resolved', 'source/Vendor/Codex/manifest.json') }}
 
       - name: Prepare protected release tooling
         id: release-tooling
@@ -79,7 +90,31 @@ jobs:
           chmod 700 "$runner"
           echo "runner=$runner" >> "$GITHUB_OUTPUT"
 
-      - name: Build and notarize Developer ID QA DMG
+      - name: Build and sign ARM64 QA app
+        id: build
+        env:
+          DEVID_P12_BASE64: ${{ secrets.DEVID_P12_BASE64 }}
+          DEVID_P12_PASSWORD: ${{ secrets.DEVID_P12_PASSWORD }}
+          DEVID_PROVISIONING_PROFILE_BASE64: ${{ secrets.DEVID_PROVISIONING_PROFILE_BASE64 }}
+          DEVID_SIGN_IDENTITY: ${{ vars.DEVID_SIGN_IDENTITY }}
+          DEVID_TEAM_ID: ${{ vars.DEVID_TEAM_ID }}
+          NOTARY_API_KEY_P8_BASE64: ${{ secrets.NOTARY_API_KEY_P8_BASE64 }}
+          NOTARY_API_KEY_ID: ${{ secrets.NOTARY_API_KEY_ID }}
+          NOTARY_API_ISSUER_ID: ${{ secrets.NOTARY_API_ISSUER_ID }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          NOTARIZE_PASSWORD: ${{ secrets.NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
+          QA_OUTPUT_DIR: ${{ runner.temp }}/qa
+        run: |
+          "${{ steps.release-tooling.outputs.runner }}" "${{ steps.source.outputs.label }}" source build
+
+      - name: Save completed ARM64 build cache
+        uses: actions/cache/save@v6
+        with:
+          path: source/.build
+          key: ${{ steps.build-cache.outputs.cache-primary-key }}
+
+      - name: Notarize and staple QA app and DMG
         id: dmg
         env:
           DEVID_P12_BASE64: ${{ secrets.DEVID_P12_BASE64 }}
@@ -95,7 +130,7 @@ jobs:
           APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID || secrets.APPLE_TEAM_ID }}
           QA_OUTPUT_DIR: ${{ runner.temp }}/qa
         run: |
-          "${{ steps.release-tooling.outputs.runner }}" "${{ steps.source.outputs.label }}" source
+          "${{ steps.release-tooling.outputs.runner }}" "${{ steps.source.outputs.label }}" source notarize
 
       - name: Upload QA DMG
         uses: actions/upload-artifact@v4
