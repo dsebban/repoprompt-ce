@@ -3,12 +3,16 @@ import MCP
 import RepoPromptDomainRuntime
 
 struct DirectHeadlessOracleRosterResolver: OracleRosterResolver {
+    /// Built-in fallback for callers holding a model reference without a provider; this resolver
+    /// always names one, using the operator's configured default.
     static let defaultProviderID = DirectHeadlessProviderID.codexExec
 
     private let settingsStore: DomainDirectSettingsStore
+    private let configuredDefaultProviderID: String
 
-    init(settingsStore: DomainDirectSettingsStore) {
+    init(settingsStore: DomainDirectSettingsStore, defaultProviderID: String = Self.defaultProviderID) {
         self.settingsStore = settingsStore
+        configuredDefaultProviderID = defaultProviderID
     }
 
     func resolveRoster(for request: OracleRosterResolutionRequest) async throws -> OracleRoster {
@@ -34,17 +38,20 @@ struct DirectHeadlessOracleRosterResolver: OracleRosterResolver {
             throw MCPError.internalError("Additional Oracle model setting has an invalid value type.")
         }
 
+        let defaultProviderID = configuredDefaultProviderID
         return try OracleRoster(
-            primary: Self.modelReference(request.primaryModelOverride ?? configuredPrimary),
-            additional: OracleRosterContract.normalizedAdditionalModelIDs(additional).map(Self.modelReference)
+            primary: Self.modelReference(request.primaryModelOverride ?? configuredPrimary, defaultProviderID: defaultProviderID),
+            additional: OracleRosterContract.normalizedAdditionalModelIDs(additional).map {
+                try Self.modelReference($0, defaultProviderID: defaultProviderID)
+            }
         )
     }
 
     /// A roster entry may name its provider as `provider:model` (for example `claudeCode:opus`).
-    /// Without a known provider prefix the whole entry stays a Codex model, so `llama3:8b` keeps
-    /// its meaning. Naming a provider only selects it; the coordinator still refuses a provider
-    /// the operator has not enabled.
-    static func modelReference(_ raw: String) throws -> OracleModelReference {
+    /// Without a known provider prefix the whole entry stays a model of the default provider, so
+    /// `llama3:8b` keeps its meaning. Naming a provider only selects it; the coordinator still
+    /// refuses a provider the operator has not enabled.
+    static func modelReference(_ raw: String, defaultProviderID: String) throws -> OracleModelReference {
         let entry = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let colon = entry.firstIndex(of: ":"),
            let providerID = DirectHeadlessProviderID.canonical(

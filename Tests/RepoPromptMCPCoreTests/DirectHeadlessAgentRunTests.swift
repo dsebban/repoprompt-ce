@@ -8,7 +8,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testEnabledClaudeAgentRunCompletesWithoutForwardingCredentials() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "agent-claude")
         defer { fixture.cleanup() }
-        let service = fixture.service(claudeEnabled: true, extraEnvironment: ["ANTHROPIC_API_KEY": "parent-secret"])
+        let service = try fixture.service(claudeEnabled: true, extraEnvironment: ["ANTHROPIC_API_KEY": "parent-secret"])
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -30,7 +30,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testClaudeErrorResultFailsTheRunEvenWithZeroExit() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "agent-claude-error")
         defer { fixture.cleanup() }
-        let service = fixture.service(claudeEnabled: true)
+        let service = try fixture.service(claudeEnabled: true)
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -43,7 +43,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testDisabledClaudeAgentRunNeverLaunchesTheExecutable() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "agent-claude-disabled")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -59,7 +59,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testOpenAICompatibleProviderIsRefusedForAgentRunsBeforeAnythingStarts() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "agent-http")
         defer { fixture.cleanup() }
-        let service = fixture.service(openAIConfigured: true)
+        let service = try fixture.service(openAIConfigured: true)
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -77,7 +77,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testCodexSteerResumesTheCapturedThreadAndWaitReturnsTheSecondTurn() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-codex")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -108,7 +108,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testClaudeSteerResumesTheCapturedSession() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-claude")
         defer { fixture.cleanup() }
-        let service = fixture.service(claudeEnabled: true)
+        let service = try fixture.service(claudeEnabled: true)
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -130,7 +130,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testSteerReactivatesASessionWhoseWaitHandleExpired() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-expired")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let first = try await start(prepared, providerID: "codexExec", model: "gpt-test")
@@ -158,7 +158,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         ] {
             try Self.git(arguments, in: fixture.root)
         }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 
@@ -181,7 +181,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testCancelStopsASteeredTurn() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-cancel")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let first = try await start(prepared, providerID: "codexExec", model: "slow-resume")
@@ -198,7 +198,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testSteerWithoutARoutingContextIsRefusedBeforeLookup() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-no-context")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let request = try DomainPhysicalToolRequest(argumentsJSON: JSONEncoder().encode(["op": "steer"]), securityContext: nil)
@@ -216,7 +216,7 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
     func testSteerRefusesSessionsThatCannotResumeWithoutLaunchingAnything() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-refused")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
 

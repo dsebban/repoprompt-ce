@@ -122,28 +122,39 @@ struct DirectHeadlessProviderFixture {
         try Self.writeExecutable(claudeScript, to: claudeExecutable)
     }
 
-    /// `claudeEnabled` sets the operator opt-in; `REPOPROMPT_CLAUDE_COMMAND` always names the stub
-    /// so a disabled run proves the executable alone does not enable Claude. `openAIConfigured`
-    /// points the HTTP provider at this fixture's `DirectHeadlessHTTPStub` host with `httpAPIKey`.
+    /// Writes the operator's `providers.json` at its default profile location. `claudeEnabled` sets
+    /// the opt-in; the Claude entry always names the stub so a disabled run proves the executable
+    /// alone does not enable Claude. `openAIConfigured` points the HTTP provider at this fixture's
+    /// `DirectHeadlessHTTPStub` host with `httpAPIKey` in `httpAPIKeyEnvironmentKey`.
+    /// `providersJSON` replaces the generated file verbatim.
     func service(
         claudeEnabled: Bool = false,
         openAIConfigured: Bool = false,
+        providersJSON: String? = nil,
         extraEnvironment: [String: String] = [:]
-    ) -> DirectHeadlessMCPService {
+    ) throws -> DirectHeadlessMCPService {
+        var providers: [String: Any] = [
+            "codexExec": ["command": executable.path],
+            "claudeCode": ["enabled": claudeEnabled, "command": claudeExecutable.path]
+        ]
+        if openAIConfigured {
+            providers["openaiCompatible"] = [
+                "enabled": true,
+                "baseURL": "http://\(httpHost)/v1/",
+                "apiKeyEnv": Self.httpAPIKeyEnvironmentKey
+            ]
+        }
+        let json = try providersJSON.map { Data($0.utf8) }
+            ?? JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "providers": providers])
+        try json.write(to: providersFile)
         var environment = [
-            "REPOPROMPT_CODEX_COMMAND": executable.path,
-            "REPOPROMPT_CLAUDE_COMMAND": claudeExecutable.path,
             "REPOPROMPT_MCP_HEADLESS_PROFILE": profileName,
             "REPOPROMPT_MCP_HEADLESS_PROFILE_DIR": profile.path,
             "REPOPROMPT_MCP_WORKING_DIRS": root.path,
             "PATH": ProcessInfo.processInfo.environment["PATH"] ?? ""
         ]
-        if claudeEnabled {
-            environment["REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED"] = "1"
-        }
         if openAIConfigured {
-            environment["REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"] = "http://\(httpHost)/v1/"
-            environment["REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"] = Self.httpAPIKey
+            environment[Self.httpAPIKeyEnvironmentKey] = Self.httpAPIKey
         }
         environment.merge(extraEnvironment) { _, extra in extra }
         return DirectHeadlessMCPService(
@@ -153,7 +164,12 @@ struct DirectHeadlessProviderFixture {
         )
     }
 
+    var providersFile: URL {
+        profile.appendingPathComponent("providers.json")
+    }
+
     static let httpAPIKey = "stub-secret-key"
+    static let httpAPIKeyEnvironmentKey = "RP_TEST_OPENAI_API_KEY"
 
     /// Unique per fixture so parallel tests never share recorded requests.
     var httpHost: String {

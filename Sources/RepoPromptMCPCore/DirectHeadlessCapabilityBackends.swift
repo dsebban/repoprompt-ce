@@ -1127,6 +1127,15 @@ enum DirectProcess {
         environment.filter { !childLaunchEnvironmentKeys.contains($0.key) }
     }
 
+    /// Variables a child may receive from the parent, the launch carrier, or the fixed settings
+    /// below; a provider secret must never use one of these names.
+    static func isReservedChildEnvironmentKey(_ key: String) -> Bool {
+        inheritedEnvironmentKeys.contains(key)
+            || childLaunchEnvironmentKeys.contains(key)
+            || key.hasPrefix("LC_")
+            || key == "GIT_TERMINAL_PROMPT"
+    }
+
     static func childEnvironment(
         inherited: [String: String] = ProcessInfo.processInfo.environment,
         overrides: [String: String] = [:]
@@ -1134,10 +1143,7 @@ enum DirectProcess {
         var environment = inherited.filter { key, _ in
             inheritedEnvironmentKeys.contains(key) || key.hasPrefix("LC_")
         }
-        for (key, value) in overrides where inheritedEnvironmentKeys.contains(key)
-            || childLaunchEnvironmentKeys.contains(key)
-            || key.hasPrefix("LC_")
-        {
+        for (key, value) in overrides where isReservedChildEnvironmentKey(key) {
             environment[key] = value
         }
         environment["GIT_TERMINAL_PROMPT"] = "0"

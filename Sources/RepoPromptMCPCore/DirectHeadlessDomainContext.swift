@@ -18,6 +18,7 @@ actor DirectHeadlessDomainContext {
         case invalidWorkspaceDocument
         case stateConflict(String)
         case pathOutsideWorkspace(String)
+        case protectedPathInsideWorkspaceRoot(path: String, root: String)
 
         var errorDescription: String? {
             switch self {
@@ -28,6 +29,9 @@ actor DirectHeadlessDomainContext {
             case .invalidWorkspaceDocument: "Workspace document is invalid"
             case let .stateConflict(reason): "Workspace state conflict: \(reason)"
             case let .pathOutsideWorkspace(path): "Path is outside the bound workspace roots: \(path)"
+            case let .protectedPathInsideWorkspaceRoot(path, root):
+                "Headless providers file \(path) is inside workspace root \(root); move the file or the root "
+                    + "(\(DirectHeadlessProviderConfiguration.fileEnvironmentKey))."
             }
         }
     }
@@ -61,16 +65,20 @@ actor DirectHeadlessDomainContext {
     let runtime: MCPDomainRuntime
     let scopeID: DomainStandaloneScopeID
     private let processRootOverlay: DirectHeadlessRootOverlay
+    /// Canonical paths no workspace root may contain, so workspace file tools can never reach them.
+    private let protectedPaths: [String]
     private var sessionRootOverlays: [UUID: DirectHeadlessRootOverlay] = [:]
 
     init(
         runtime: MCPDomainRuntime,
         scopeID: DomainStandaloneScopeID,
-        processRootOverlay: DirectHeadlessRootOverlay = .init(mappings: [], activeRoot: nil)
+        processRootOverlay: DirectHeadlessRootOverlay = .init(mappings: [], activeRoot: nil),
+        protectedPaths: [String] = []
     ) {
         self.runtime = runtime
         self.scopeID = scopeID
         self.processRootOverlay = processRootOverlay
+        self.protectedPaths = protectedPaths
     }
 
     func snapshot(for request: DomainPhysicalToolRequest) async throws -> Snapshot {
@@ -214,6 +222,7 @@ actor DirectHeadlessDomainContext {
         canonicalRoots: [URL],
         sessionID: UUID?
     ) async throws -> DirectHeadlessRootOverlay {
+        try rejectProtectedPaths(under: canonicalRoots)
         let preferred = sessionID.flatMap { sessionRootOverlays[$0] } ?? processRootOverlay
         let mappings: [DirectHeadlessRootMapping]
         let activeRoot: URL?
@@ -245,8 +254,19 @@ actor DirectHeadlessDomainContext {
                 throw Error.rootMappingUnavailable
             }
         }
+        try rejectProtectedPaths(under: mappings.map(\.physicalRoot))
         try await DirectHeadlessWorktreeRouting.verifyMappingsAtUse(mappings)
         return DirectHeadlessRootOverlay(mappings: mappings, activeRoot: activeRoot)
+    }
+
+    /// Every root reaches file tools through here, so `bind`, `switch`, `create`, and
+    /// `add_folder` cannot later make a protected path writable.
+    private func rejectProtectedPaths(under roots: [URL]) throws {
+        for path in protectedPaths {
+            if let root = roots.first(where: { DirectHeadlessProviderConfigurationLoader.rootContains($0, canonicalPath: path) }) {
+                throw Error.protectedPathInsideWorkspaceRoot(path: path, root: root.path)
+            }
+        }
     }
 
     func mutate(

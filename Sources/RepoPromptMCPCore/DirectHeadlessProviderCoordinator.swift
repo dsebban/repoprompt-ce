@@ -109,6 +109,7 @@ actor DirectHeadlessProviderCoordinator {
     private let runtime: MCPDomainRuntime
     private let context: DirectHeadlessDomainContext
     private let settingsStore: DomainDirectSettingsStore
+    private let configuration: DirectHeadlessProviderConfiguration
     private let environment: [String: String]
     private let openAICompatibleClient: DirectHeadlessOpenAICompatibleClient
     private let beginEpoch: BeginEpoch
@@ -121,6 +122,7 @@ actor DirectHeadlessProviderCoordinator {
         runtime: MCPDomainRuntime,
         context: DirectHeadlessDomainContext,
         settingsStore: DomainDirectSettingsStore,
+        configuration: DirectHeadlessProviderConfiguration,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         openAICompatibleClient: DirectHeadlessOpenAICompatibleClient = .init(),
         beginEpoch: BeginEpoch? = nil
@@ -128,6 +130,7 @@ actor DirectHeadlessProviderCoordinator {
         self.runtime = runtime
         self.context = context
         self.settingsStore = settingsStore
+        self.configuration = configuration
         self.environment = environment
         self.openAICompatibleClient = openAICompatibleClient
         let sessionStore = runtime.agentSessionStore
@@ -142,42 +145,42 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     func providerCatalog() -> [ProviderDescriptor] {
-        Self.providerCatalog(environment: environment)
+        Self.providerCatalog(configuration: configuration, environment: environment)
     }
 
-    /// Operator contract, read only from the `repoprompt-mcp` process environment so no request
-    /// or setting can enable a provider:
-    /// - `REPOPROMPT_CODEX_COMMAND`: Codex executable; default `codex` on `PATH`. Codex is the
-    ///   default provider because its sandbox is OS-enforced.
-    /// - `REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1` (or `true`): enables `claudeCode`, which has
-    ///   no OS sandbox. It uses the CLI's stored login; API keys are never forwarded.
-    /// - `REPOPROMPT_CLAUDE_COMMAND`: Claude Code executable; default `claude`. Does not enable it.
-    /// - `REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL`: enables the Oracle-only `openaiCompatible`
-    ///   chat-completions provider at this API root; `REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY` is
-    ///   its optional bearer key. Rosters select it as `openaiCompatible:<model>`.
-    nonisolated static func providerCatalog(environment: [String: String]) -> [ProviderDescriptor] {
-        let codex = findExecutable(named: environment["REPOPROMPT_CODEX_COMMAND"] ?? "codex", path: environment["PATH"])
-        let claudeEnabled = ["1", "true"].contains(
-            environment["REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        )
-        let claude = claudeEnabled
-            ? findExecutable(named: environment["REPOPROMPT_CLAUDE_COMMAND"] ?? "claude", path: environment["PATH"])
-            : nil
-        let claudeUnavailableReason: String? = if !claudeEnabled {
-            "Claude Code is disabled; set REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1 in the repoprompt-mcp process environment."
-        } else if claude == nil {
-            "Claude Code CLI was not found on PATH (REPOPROMPT_CLAUDE_COMMAND)."
+    /// Providers come only from the operator's startup `DirectHeadlessProviderConfiguration`, so
+    /// no request or setting can enable one. Executables are looked up per call, so a CLI
+    /// installed after startup becomes available. Claude Code uses the CLI's stored login; API
+    /// keys are never forwarded. The Oracle-only `openaiCompatible` key is read from the variable
+    /// its `apiKeyEnv` names and is sent only in the HTTP `Authorization` header.
+    nonisolated static func providerCatalog(
+        configuration: DirectHeadlessProviderConfiguration,
+        environment: [String: String]
+    ) -> [ProviderDescriptor] {
+        let path = environment["PATH"]
+        let codex = configuration.codex.enabled ? findExecutable(named: configuration.codex.command, path: path) : nil
+        let claude = configuration.claude.enabled ? findExecutable(named: configuration.claude.command, path: path) : nil
+        let codexUnavailableReason: String? = if !configuration.codex.enabled {
+            "Codex CLI is disabled in the headless providers file."
+        } else if codex == nil {
+            "Codex CLI was not found on PATH (providers.codexExec.command)."
         } else {
             nil
         }
-        let openAI = DirectHeadlessOpenAICompatibleClient.configuration(from: environment)
+        let claudeUnavailableReason: String? = if !configuration.claude.enabled {
+            "Claude Code is disabled; set providers.claudeCode.enabled to true in the headless providers file."
+        } else if claude == nil {
+            "Claude Code CLI was not found on PATH (providers.claudeCode.command)."
+        } else {
+            nil
+        }
+        let openAI = openAICompatibleBackend(configuration.openAICompatible, environment: environment)
         return [
             ProviderDescriptor(
                 id: DirectHeadlessProviderID.codexExec,
                 displayName: "Codex CLI",
                 backend: codex.map { .codexCLI(executable: $0) },
-                unavailableReason: codex == nil ? "Codex CLI was not found on PATH." : nil
+                unavailableReason: codexUnavailableReason
             ),
             ProviderDescriptor(
                 id: DirectHeadlessProviderID.claudeCode,
@@ -192,6 +195,26 @@ actor DirectHeadlessProviderCoordinator {
                 unavailableReason: openAI.unavailableReason
             )
         ]
+    }
+
+    /// A named but unset `apiKeyEnv` fails closed rather than sending unauthenticated requests.
+    private nonisolated static func openAICompatibleBackend(
+        _ entry: DirectHeadlessProviderConfiguration.OpenAICompatible?,
+        environment: [String: String]
+    ) -> (configuration: DirectHeadlessOpenAICompatibleClient.Configuration?, unavailableReason: String?) {
+        guard let entry else {
+            return (nil, "OpenAI-compatible provider is not configured; add providers.openaiCompatible to the headless providers file.")
+        }
+        guard entry.enabled else {
+            return (nil, "OpenAI-compatible provider is disabled; set providers.openaiCompatible.enabled to true in the headless providers file.")
+        }
+        guard let name = entry.apiKeyEnv else {
+            return (.init(endpoint: entry.endpoint, apiKey: nil), nil)
+        }
+        guard let key = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            return (nil, "openaiCompatible apiKeyEnv '\(name)' is not set in the repoprompt-mcp process environment.")
+        }
+        return (.init(endpoint: entry.endpoint, apiKey: key), nil)
     }
 
     /// `exec resume` accepts no `--sandbox`, so the `exec` flags precede the `resume` subcommand,
@@ -825,11 +848,11 @@ actor DirectHeadlessProviderCoordinator {
 
     private func resolveProvider(_ requested: String?) throws -> ProviderDescriptor {
         let normalized = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? DirectHeadlessProviderID.codexExec
+        let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? configuration.defaultProviderID
         let roleAliases: Set = ["pair", "explore", "engineer", "design", "default"]
         guard let descriptor = providerCatalog().first(where: {
             $0.id.caseInsensitiveCompare(id) == .orderedSame
-                || (roleAliases.contains(id.lowercased()) && $0.id == DirectHeadlessProviderID.codexExec)
+                || (roleAliases.contains(id.lowercased()) && $0.id == configuration.defaultProviderID)
         }) else {
             throw MCPError.invalidParams("unknown standalone provider '\(id)'")
         }

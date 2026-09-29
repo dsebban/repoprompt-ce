@@ -3,7 +3,8 @@
 
 Usage: python3 Scripts/linux_headless_smoke.py <path-to-repoprompt-mcp>
 
-Creates a throwaway repo and isolated headless profile, then checks:
+Creates a throwaway repo and isolated headless profile whose providers.json configures a
+stub Codex CLI and the local HTTP stub, then checks:
   1. initialize             8. apply_edits is allowed after the grant
   2. tools/list             9. ask_oracle answers through the openaiCompatible HTTP provider
   3. read_file                 (a local stub server; exercises FoundationNetworking)
@@ -208,12 +209,19 @@ def run_smoke(binary, base):
     ChatCompletionsStub.redirect_port = other_origin.server_address[1]
     for httpd in (stub, other_origin):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    env["REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"] = f"http://127.0.0.1:{stub.server_address[1]}/v1"
-    env["REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"] = "smoke-key"
-    env["REPOPROMPT_CODEX_COMMAND"] = os.path.join(base, "codex-stub")
-    with open(env["REPOPROMPT_CODEX_COMMAND"], "w") as handle:
+    codex = os.path.join(base, "codex-stub")
+    with open(codex, "w") as handle:
         handle.write(CODEX_STUB)
-    os.chmod(env["REPOPROMPT_CODEX_COMMAND"], 0o700)
+    os.chmod(codex, 0o700)
+    # Providers come only from the operator's providers.json; the key stays in the environment.
+    providers = {"providers": {
+        "codexExec": {"command": codex},
+        "openaiCompatible": {"enabled": True, "baseURL": f"http://127.0.0.1:{stub.server_address[1]}/v1",
+                             "apiKeyEnv": "SMOKE_OPENAI_API_KEY"},
+    }}
+    with open(os.path.join(env["REPOPROMPT_MCP_HEADLESS_PROFILE_DIR"], "providers.json"), "w") as handle:
+        json.dump(providers, handle)
+    env["SMOKE_OPENAI_API_KEY"] = "smoke-key"
     repo = env["REPOPROMPT_MCP_WORKING_DIRS"]
     hello, created = os.path.join(repo, "hello.txt"), os.path.join(repo, "new.txt")
     with open(hello, "w") as handle:

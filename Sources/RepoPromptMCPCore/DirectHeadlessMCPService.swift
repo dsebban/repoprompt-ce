@@ -134,6 +134,11 @@ package actor DirectHeadlessMCPService {
             environment: environment,
             currentDirectory: currentDirectory
         )
+        let providersLocation = try DirectHeadlessProviderConfigurationLoader.location(
+            environment: environment,
+            storageDirectory: locations.storageDirectory
+        )
+        let providerConfiguration = try DirectHeadlessProviderConfigurationLoader.load(providersLocation)
         for directory in [
             locations.storageDirectory,
             locations.workspaceStorageDirectory,
@@ -185,6 +190,10 @@ package actor DirectHeadlessMCPService {
                 workingDirectories: workingDirectories,
                 catalog: runtime.workspaceStore.snapshot()
             )
+            try DirectHeadlessProviderConfigurationLoader.rejectWorkspaceRootOverlap(
+                providersLocation,
+                roots: workingDirectories + initialRoute.rootOverlay.mappings.flatMap { [$0.canonicalRoot, $0.physicalRoot] }
+            )
 
             let scopeID = DomainStandaloneScopeID()
             let connectionID = UUID()
@@ -196,7 +205,8 @@ package actor DirectHeadlessMCPService {
             let context = DirectHeadlessDomainContext(
                 runtime: runtime,
                 scopeID: scopeID,
-                processRootOverlay: initialRoute.rootOverlay
+                processRootOverlay: initialRoute.rootOverlay,
+                protectedPaths: [providersLocation.canonicalPath]
             )
             let settingsStore = DomainDirectSettingsStore(
                 persistence: runtime.persistenceCoordinator,
@@ -213,6 +223,7 @@ package actor DirectHeadlessMCPService {
                 runtime: runtime,
                 context: context,
                 settingsStore: settingsStore,
+                configuration: providerConfiguration,
                 environment: environment,
                 openAICompatibleClient: openAICompatibleClient
             )
@@ -222,7 +233,10 @@ package actor DirectHeadlessMCPService {
             )
             let oracleAdapter = try DirectHeadlessOracleAdapter(
                 profileIdentifier: runtime.configuration.profileIdentifier,
-                rosterResolver: DirectHeadlessOracleRosterResolver(settingsStore: settingsStore),
+                rosterResolver: DirectHeadlessOracleRosterResolver(
+                    settingsStore: settingsStore,
+                    defaultProviderID: providerConfiguration.defaultProviderID
+                ),
                 store: oracleStore,
                 claimManager: OracleGroupClaimManager(
                     persistence: runtime.persistenceCoordinator,
