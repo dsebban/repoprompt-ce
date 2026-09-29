@@ -469,13 +469,12 @@ actor DirectHeadlessOracleAdapter {
                         guard let carrier = bundle.carrier(for: invocation.member.laneID) else {
                             throw AdapterError.childCarrierMismatch
                         }
-                        let prompt = Self.prompt(
-                            turns: invocation.priorTerminalTurns,
-                            laneIndex: invocation.member.laneID.index,
-                            next: invocation.context.input.userMessage
-                        )
                         let response = try await provider.runProviderOnce(
-                            message: prompt,
+                            message: invocation.context.input.userMessage,
+                            history: Self.history(
+                                turns: invocation.priorTerminalTurns,
+                                laneIndex: invocation.member.laneID.index
+                            ),
                             providerID: invocation.member.model.providerID,
                             model: invocation.member.model.modelID,
                             request: physicalRequest,
@@ -552,8 +551,8 @@ actor DirectHeadlessOracleAdapter {
         )
     }
 
-    private static func prompt(turns: [OracleTurnRecord], laneIndex: Int, next: String) -> String {
-        var messages: [(String, String)] = []
+    private static func history(turns: [OracleTurnRecord], laneIndex: Int) -> [(role: String, text: String)] {
+        var messages: [(role: String, text: String)] = []
         for turn in turns where turn.state == .terminal {
             messages.append(("user", turn.input.userMessage))
             guard turn.results.indices.contains(laneIndex) else { continue }
@@ -562,8 +561,7 @@ actor DirectHeadlessOracleAdapter {
                 messages.append(("assistant", response))
             }
         }
-        guard !messages.isEmpty else { return next }
-        return messages.map { "\($0.0): \($0.1)" }.joined(separator: "\n\n") + "\n\nuser: " + next
+        return messages
     }
 
     private static func messages(turns: [OracleTurnRecord], laneIndex: Int) -> [Value] {

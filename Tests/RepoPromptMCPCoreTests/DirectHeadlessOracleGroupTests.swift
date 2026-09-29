@@ -197,6 +197,11 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         }
         let firstMessages = try XCTUnwrap(requests[0].body["messages"] as? [[String: String]])
         XCTAssertEqual(firstMessages, [["role": "user", "content": "direct http"]])
+        XCTAssertEqual(try XCTUnwrap(requests[1].body["messages"] as? [[String: String]]), [
+            ["role": "user", "content": "direct http"],
+            ["role": "assistant", "content": "http-gpt-test"],
+            ["role": "user", "content": "again"]
+        ])
         XCTAssertEqual(try fixture.calls().map(\.model), ["lane-0"])
     }
 

@@ -13,6 +13,7 @@ struct DirectHeadlessProviderFixture {
         let groupID: String?
         let claimID: String?
         let resumeThreadID: String?
+        let workingDirectory: String
     }
 
     struct ClaudeCall {
@@ -50,6 +51,8 @@ struct DirectHeadlessProviderFixture {
           if [ "$1" = "--model" ] || [ "$1" = "-c" ]; then
             [ "$1" = "--model" ] && model="$2"
             shift
+          elif [ "$1" = "--" ]; then
+            :
           elif [ "$1" = "resume" ]; then
             resuming=1
           elif [ -n "$resuming" ] && [ -z "$resume" ]; then
@@ -58,10 +61,13 @@ struct DirectHeadlessProviderFixture {
           shift
         done
         lane="${REPOPROMPT_MCP_ORACLE_LANE_ID:-0}"
-        /usr/bin/printf '%s|%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
+        /usr/bin/printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
           "${REPOPROMPT_MCP_LAUNCH_ID:-}" "${REPOPROMPT_MCP_ORACLE_GROUP_ID:-}" \
-          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" "$resume" >> '\(callLog.path)'
+          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" "$resume" "$(/bin/pwd -P)" >> '\(callLog.path)'
         /bin/cat >/dev/null
+        if [ -n "$resume" ] && [ "$model" = "slow-resume" ]; then
+          trap 'exit 0' TERM INT; /bin/sleep 30
+        fi
         if [ -n "$resume" ]; then
           /usr/bin/printf '{"type":"thread.started","thread_id":"%s"}\\n' "$resume"
           /usr/bin/printf '{"type":"message","text":"resumed-%s"}\\n' "$resume"
@@ -171,7 +177,8 @@ struct DirectHeadlessProviderFixture {
                     launchID: fields[3].isEmpty ? nil : fields[3],
                     groupID: fields[4].isEmpty ? nil : fields[4],
                     claimID: fields[5].isEmpty ? nil : fields[5],
-                    resumeThreadID: fields[6].isEmpty ? nil : fields[6]
+                    resumeThreadID: fields[6].isEmpty ? nil : fields[6],
+                    workingDirectory: fields[7]
                 )
             }
     }
@@ -223,8 +230,10 @@ struct DirectHeadlessProviderFixture {
 
 /// OpenAI-compatible endpoint stub. The requested model picks the reply: `http-401` fails with an
 /// error that echoes the key, `http-malformed` returns a non-JSON 200, `http-hang` never answers,
-/// and any other model answers `http-<model>`.
+/// `http-redirect` redirects to `redirectTargetHost`, and any other model answers `http-<model>`.
 final class DirectHeadlessHTTPStub: URLProtocol {
+    static let redirectTargetHost = "redirect-target.stub.invalid"
+
     struct Request {
         let url: URL?
         let method: String?
@@ -238,7 +247,7 @@ final class DirectHeadlessHTTPStub: URLProtocol {
     static func client() -> DirectHeadlessOpenAICompatibleClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [DirectHeadlessHTTPStub.self]
-        return DirectHeadlessOpenAICompatibleClient(session: URLSession(configuration: configuration))
+        return DirectHeadlessOpenAICompatibleClient(sessionConfiguration: configuration)
     }
 
     static func requests(host: String) -> [Request] {
@@ -270,6 +279,22 @@ final class DirectHeadlessHTTPStub: URLProtocol {
         let (status, payload): (Int, String)
         switch model {
         case "http-hang":
+            return
+        case "http-redirect" where request.url?.host != Self.redirectTargetHost:
+            // Redirects to another host with the credential copied, as corelibs would.
+            var components = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)!
+            components.host = Self.redirectTargetHost
+            var redirected = request
+            redirected.url = components.url
+            let response = HTTPURLResponse(
+                url: request.url!,
+                statusCode: 307,
+                httpVersion: "HTTP/1.1",
+                headerFields: ["Location": components.url!.absoluteString]
+            )!
+            client?.urlProtocol(self, wasRedirectedTo: redirected, redirectResponse: response)
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocolDidFinishLoading(self)
             return
         case "http-401":
             (status, payload) = (401, #"{"error":{"message":"Incorrect API key provided: \#(DirectHeadlessProviderFixture.httpAPIKey)"}}"#)

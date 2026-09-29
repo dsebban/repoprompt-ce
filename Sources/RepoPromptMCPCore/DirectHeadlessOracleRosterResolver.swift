@@ -47,9 +47,12 @@ struct DirectHeadlessOracleRosterResolver: OracleRosterResolver {
     static func modelReference(_ raw: String) throws -> OracleModelReference {
         let entry = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let colon = entry.firstIndex(of: ":"),
-           let providerID = DirectHeadlessProviderID.canonical(matching: String(entry[..<colon]))
+           let providerID = DirectHeadlessProviderID.canonical(
+               matching: entry[..<colon].trimmingCharacters(in: .whitespacesAndNewlines)
+           )
         {
-            return try OracleModelReference(providerID: providerID, modelID: String(entry[entry.index(after: colon)...]))
+            let modelID = entry[entry.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            return try OracleModelReference(providerID: providerID, modelID: modelID)
         }
         return try OracleModelReference(providerID: defaultProviderID, modelID: entry)
     }

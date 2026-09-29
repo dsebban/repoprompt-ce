@@ -10,8 +10,9 @@ enum DirectHeadlessClaudeCodeCLI {
     /// Runs ignore project and local `.claude` settings and every MCP server, which the reviewed
     /// repository controls. `--tools` limits which built-ins exist and `dontAsk` denies anything
     /// not pre-approved, so user settings cannot widen the set. Bash is denied in every lane: even
-    /// `git status` can run programs named by the repository's git configuration. The prompt
-    /// arrives on stdin.
+    /// `git status` can run programs named by the repository's git configuration. User settings
+    /// still load, and their hooks run shell commands regardless of the tool policy, so the
+    /// higher-precedence `--settings` layer turns every hook off. The prompt arrives on stdin.
     static func arguments(
         model: String?,
         purpose: DirectHeadlessProviderCoordinator.ExecutionPurpose,
@@ -22,6 +23,7 @@ enum DirectHeadlessClaudeCodeCLI {
             "-p",
             "--output-format", "json",
             "--setting-sources", "user",
+            "--settings", #"{"disableAllHooks":true}"#,
             "--strict-mcp-config",
             "--permission-mode", "dontAsk",
             "--tools", tools,
@@ -59,6 +61,9 @@ enum DirectHeadlessClaudeCodeCLI {
             throw MCPError.internalError("Claude Code reported an error: \(detail)")
         }
         guard let text else { throw MCPError.internalError("Claude Code result has no text.") }
-        return .init(assistantText: text, providerSessionID: result["session_id"] as? String)
+        return .init(
+            assistantText: text,
+            providerSessionID: DirectHeadlessProviderCoordinator.resumableSessionID(result["session_id"] as? String)
+        )
     }
 }

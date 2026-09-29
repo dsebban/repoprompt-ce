@@ -169,13 +169,28 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertEqual(arguments, [
             "--model", "gpt-test",
             "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--json",
-            "resume", "-c", "sandbox_mode=\"workspace-write\"", "thread-1", "-"
+            "resume", "-c", "sandbox_mode=\"workspace-write\"", "--", "thread-1", "-"
         ])
         XCTAssertEqual(
             DirectHeadlessProviderCoordinator.codexExecArguments(model: nil, purpose: .oracleGroup, resumeThreadID: "t")
-                .suffix(5),
-            ["resume", "-c", "sandbox_mode=\"read-only\"", "t", "-"]
+                .suffix(6),
+            ["resume", "-c", "sandbox_mode=\"read-only\"", "--", "t", "-"]
         )
+    }
+
+    func testProviderSessionIDsThatCouldBeReadAsFlagsAreNeverResumable() throws {
+        typealias Coordinator = DirectHeadlessProviderCoordinator
+        for valid in ["01a0ea60-5090-7db0-bc58-3a491997c9ac", "thread_1.a-b"] {
+            XCTAssertEqual(Coordinator.resumableSessionID(valid), valid)
+        }
+        for invalid in [nil, "", "--last", "-x", "a b", "a=b", "a/b", "é", String(repeating: "a", count: 257)] {
+            XCTAssertNil(Coordinator.resumableSessionID(invalid), invalid ?? "nil")
+        }
+        let flagThread = #"{"type":"thread.started","thread_id":"--dangerously-bypass-approvals-and-sandbox"}"#
+        XCTAssertNil(Coordinator.codexTurnOutput(from: flagThread).providerSessionID)
+        XCTAssertNil(try DirectHeadlessClaudeCodeCLI.parseTurnOutput(
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"--continue"}"#
+        ).providerSessionID)
     }
 
     func testHeadlessAcceptsSteerOnlyForAgentRun() throws {
@@ -215,6 +230,7 @@ final class DirectHeadlessCompositionTests: XCTestCase {
                 "-p",
                 "--output-format", "json",
                 "--setting-sources", "user",
+                "--settings", #"{"disableAllHooks":true}"#,
                 "--strict-mcp-config",
                 "--permission-mode", "dontAsk",
                 "--tools", expectedTools,
@@ -277,7 +293,8 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             ("claudeCode:opus", "claudeCode", "opus"),
             ("CLAUDECODE:opus", "claudeCode", "opus"),
             ("llama3:8b", "codexExec", "llama3:8b"),
-            ("openaiCompatible:llama3:8b", "openaiCompatible", "llama3:8b")
+            ("openaiCompatible:llama3:8b", "openaiCompatible", "llama3:8b"),
+            (" claudeCode : opus ", "claudeCode", "opus")
         ]
         for (raw, providerID, modelID) in cases {
             XCTAssertEqual(
@@ -295,8 +312,15 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertFalse(unconfigured.supportsAgentRuns)
         XCTAssertNil(unconfigured.backend)
         XCTAssertTrue(try XCTUnwrap(unconfigured.unavailableReason).contains("not configured"))
-        for invalid in ["ftp://host/v1", "not a url", "http:///v1"] {
+        for invalid in ["ftp://host/v1", "not a url", "http:///v1", "https://h/v1?key=x", "https://h/v1#frag"] {
             XCTAssertNil(Client.configuration(from: [Client.baseURLKey: invalid]).configuration, invalid)
+        }
+        for (raw, endpoint) in [
+            ("https://h/v1/chat/completions", "https://h/v1/chat/completions"),
+            ("https://h/v1/chat/completions/", "https://h/v1/chat/completions"),
+            ("https://h", "https://h/chat/completions")
+        ] {
+            XCTAssertEqual(Client.configuration(from: [Client.baseURLKey: raw]).configuration?.endpoint.absoluteString, endpoint)
         }
 
         let configured = try XCTUnwrap(Client.configuration(from: [
@@ -304,7 +328,15 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             Client.apiKeyKey: "secret"
         ]).configuration)
         XCTAssertEqual(configured.endpoint.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
-        let request = try Client.makeRequest(configuration: configured, model: "m", message: "hi")
+        let backend = DirectHeadlessProviderCoordinator.ProviderDescriptor.Backend.openAICompatibleHTTP(configured)
+        for rendered in [String(describing: configured), String(reflecting: configured), String(describing: backend)] {
+            XCTAssertTrue(rendered.contains("<set>"), rendered)
+            XCTAssertFalse(rendered.contains("secret"), rendered)
+        }
+        var dumped = ""
+        dump(configured, to: &dumped)
+        XCTAssertFalse(dumped.contains("secret"), dumped)
+        let request = try Client.makeRequest(configuration: configured, model: "m", messages: [.init(role: "user", content: "hi")])
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
@@ -314,7 +346,7 @@ final class DirectHeadlessCompositionTests: XCTestCase {
 
         let keyless = try XCTUnwrap(Client.configuration(from: [Client.baseURLKey: "https://api.example/v1"]).configuration)
         XCTAssertNil(
-            try Client.makeRequest(configuration: keyless, model: "m", message: "hi")
+            try Client.makeRequest(configuration: keyless, model: "m", messages: [.init(role: "user", content: "hi")])
                 .value(forHTTPHeaderField: "Authorization")
         )
 
@@ -351,13 +383,48 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         }
     }
 
+    func testOpenAICompatibleErrorsRedactAKeyThatStraddlesTheTruncationLimit() throws {
+        typealias Client = DirectHeadlessOpenAICompatibleClient
+        let key = "sk-straddling-secret-key"
+        let configuration = try Client.Configuration(endpoint: XCTUnwrap(URL(string: "http://h/v1/chat/completions")), apiKey: key)
+        // "HTTP 502: " plus the padding puts the key across the 500-character cut.
+        let padding = String(repeating: "x", count: Client.errorDetailLimit - "HTTP 502: ".count - 8)
+        for body in [padding + key + " trailing", #"{"error":{"message":"\#(padding + key)"}}"#] {
+            XCTAssertThrowsError(try Client.parseResponse(data: Data(body.utf8), statusCode: 502, configuration: configuration)) {
+                let text = String(describing: $0)
+                XCTAssertFalse(text.contains("sk-strad"), text)
+                XCTAssertTrue(text.contains("[red"), text)
+                XCTAssertLessThan(text.count, Client.errorDetailLimit + 100, text)
+            }
+        }
+    }
+
+    func testOpenAICompatibleClientRefusesCrossHostRedirectsWithoutSendingTheKey() async throws {
+        let client = DirectHeadlessHTTPStub.client()
+        let host = "redirect-source.stub.invalid"
+        let configuration = try DirectHeadlessOpenAICompatibleClient.Configuration(
+            endpoint: XCTUnwrap(URL(string: "http://\(host)/v1/chat/completions")),
+            apiKey: "redirect-secret"
+        )
+        do {
+            _ = try await client.complete(configuration: configuration, model: "http-redirect", messages: [.init(role: "user", content: "hi")])
+            XCTFail("Expected the redirect response to fail the turn")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("HTTP 307"), "\(error)")
+        }
+        XCTAssertEqual(DirectHeadlessHTTPStub.requests(host: host).count, 1)
+        XCTAssertTrue(DirectHeadlessHTTPStub.requests(host: DirectHeadlessHTTPStub.redirectTargetHost).isEmpty)
+    }
+
     func testOpenAICompatibleRequestCancellationStopsTheInFlightCall() async throws {
         let client = DirectHeadlessHTTPStub.client()
         let configuration = try DirectHeadlessOpenAICompatibleClient.Configuration(
             endpoint: XCTUnwrap(URL(string: "http://cancel.stub.invalid/v1/chat/completions")),
             apiKey: nil
         )
-        let task = Task { try await client.complete(configuration: configuration, model: "http-hang", message: "wait") }
+        let task = Task {
+            try await client.complete(configuration: configuration, model: "http-hang", messages: [.init(role: "user", content: "wait")])
+        }
         while DirectHeadlessHTTPStub.requests(host: "cancel.stub.invalid").isEmpty {
             try await Task.sleep(nanoseconds: 10_000_000)
         }

@@ -96,6 +96,8 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         let threadID = "codex-thread-\(calls[0].processID)"
         XCTAssertEqual(calls[1].resumeThreadID, threadID)
         XCTAssertEqual(calls[1].model, "gpt-test")
+        XCTAssertEqual(calls[1].workingDirectory, calls[0].workingDirectory)
+        XCTAssertEqual(calls[0].workingDirectory, Self.physicalPath(fixture.root))
         for snapshot in [waited, polled] {
             XCTAssertEqual(snapshot["session_id"] as? String, sessionID)
             XCTAssertEqual(snapshot["status"] as? String, "completed")
@@ -145,6 +147,72 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         XCTAssertEqual(steered["assistant_text"] as? String, "resumed-codex-thread-\(firstCall.processID)")
     }
 
+    func testSteerOfAWorktreeBoundSessionRunsInTheSameWorktree() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "steer-worktree")
+        defer { fixture.cleanup() }
+        let worktree = fixture.profile.appendingPathComponent("wt", isDirectory: true)
+        for arguments in [
+            ["init", "-q"],
+            ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"],
+            ["worktree", "add", "-q", "-b", "steer-wt", worktree.path]
+        ] {
+            try Self.git(arguments, in: fixture.root)
+        }
+        let service = fixture.service()
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+
+        let first = try await agentRun(prepared, [
+            "op": .string("start"),
+            "model_id": .string("codexExec"),
+            "model": .string("gpt-test"),
+            "message": .string("hello"),
+            "worktree": .string(worktree.path),
+            "timeout": .double(30)
+        ])
+        XCTAssertEqual(first["status"] as? String, "completed", "\(first)")
+        let steered = try await steer(prepared, sessionID: XCTUnwrap(first["session_id"] as? String))
+
+        XCTAssertEqual(steered["status"] as? String, "completed")
+        let directories = try fixture.calls().map(\.workingDirectory)
+        XCTAssertEqual(directories, Array(repeating: Self.physicalPath(worktree), count: 2))
+    }
+
+    func testCancelStopsASteeredTurn() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "steer-cancel")
+        defer { fixture.cleanup() }
+        let service = fixture.service()
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let first = try await start(prepared, providerID: "codexExec", model: "slow-resume")
+        let sessionID = try XCTUnwrap(first["session_id"] as? String)
+
+        let steered = try await agentRun(prepared, ["op": .string("steer"), "session_id": .string(sessionID), "message": .string("again")])
+        XCTAssertEqual(steered["status"] as? String, "running")
+        _ = try await agentRun(prepared, ["op": .string("cancel"), "session_id": .string(sessionID)])
+        let settled = try await agentRun(prepared, ["op": .string("wait"), "session_id": .string(sessionID), "timeout": .double(30)])
+
+        XCTAssertEqual(settled["status"] as? String, "cancelled")
+    }
+
+    func testSteerWithoutARoutingContextIsRefusedBeforeLookup() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "steer-no-context")
+        defer { fixture.cleanup() }
+        let service = fixture.service()
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let request = try DomainPhysicalToolRequest(argumentsJSON: JSONEncoder().encode(["op": "steer"]), securityContext: nil)
+
+        do {
+            _ = try await prepared.providerCoordinator.steerAgent(
+                sessionID: UUID(),
+                args: ["message": .string("again")],
+                request: request
+            )
+            XCTFail("Expected steer without a routing context to fail")
+        } catch DirectHeadlessDomainContext.Error.routingUnavailable {}
+    }
+
     func testSteerRefusesSessionsThatCannotResumeWithoutLaunchingAnything() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "steer-refused")
         defer { fixture.cleanup() }
@@ -177,6 +245,23 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         let calls = try fixture.calls()
         XCTAssertEqual(calls.map(\.model).filter { $0 != "cancel-0" }, ["fail", "no-thread"])
         XCTAssertTrue(calls.allSatisfy { $0.resumeThreadID == nil })
+    }
+
+    /// What `pwd -P` prints; Foundation's symlink resolution drops macOS's `/private` prefix.
+    private static func physicalPath(_ url: URL) -> String {
+        guard let resolved = realpath(url.path, nil) else { return url.path }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    private static func git(_ arguments: [String], in directory: URL) throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0, "git \(arguments.joined(separator: " "))")
     }
 
     private func assertSteerFails(
