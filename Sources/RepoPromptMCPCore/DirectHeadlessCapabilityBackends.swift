@@ -1127,21 +1127,33 @@ enum DirectProcess {
         environment.filter { !childLaunchEnvironmentKeys.contains($0.key) }
     }
 
+    /// Variables a child may receive from the parent, the launch carrier, or the fixed settings
+    /// below; a provider secret must never use one of these names.
+    static func isReservedChildEnvironmentKey(_ key: String) -> Bool {
+        inheritedEnvironmentKeys.contains(key)
+            || childLaunchEnvironmentKeys.contains(key)
+            || key.hasPrefix("LC_")
+            || key == "GIT_TERMINAL_PROMPT"
+    }
+
+    /// `providerEnvironment` carries one provider's own secret (the Cursor API key) to that child
+    /// alone; it can add variables but never replace a reserved one.
     static func childEnvironment(
         inherited: [String: String] = ProcessInfo.processInfo.environment,
-        overrides: [String: String] = [:]
+        overrides: [String: String] = [:],
+        providerEnvironment: [String: String] = [:]
     ) -> [String: String] {
         var environment = inherited.filter { key, _ in
             inheritedEnvironmentKeys.contains(key) || key.hasPrefix("LC_")
         }
-        for (key, value) in overrides where inheritedEnvironmentKeys.contains(key)
-            || childLaunchEnvironmentKeys.contains(key)
-            || key.hasPrefix("LC_")
-        {
+        for (key, value) in overrides where isReservedChildEnvironmentKey(key) {
             environment[key] = value
         }
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["LC_ALL"] = "C"
+        for (key, value) in providerEnvironment where !isReservedChildEnvironmentKey(key) {
+            environment[key] = value
+        }
         return environment
     }
 
@@ -1150,6 +1162,7 @@ enum DirectProcess {
         arguments: [String],
         input: Data? = nil,
         environment: [String: String] = [:],
+        providerEnvironment: [String: String] = [:],
         currentDirectory: URL? = nil
     ) async throws -> String {
         try await DirectProcessInvocation(
@@ -1157,6 +1170,7 @@ enum DirectProcess {
             arguments: arguments,
             input: input,
             environment: environment,
+            providerEnvironment: providerEnvironment,
             currentDirectory: currentDirectory
         ).run()
     }
@@ -1226,13 +1240,14 @@ private final class DirectProcessInvocation: @unchecked Sendable {
         arguments: [String],
         input: Data?,
         environment overrides: [String: String],
+        providerEnvironment: [String: String],
         currentDirectory: URL?
     ) {
         self.input = input
         inputPipe = input == nil ? nil : Pipe()
         process.executableURL = URL(fileURLWithPath: executable)
         process.arguments = arguments
-        process.environment = DirectProcess.childEnvironment(overrides: overrides)
+        process.environment = DirectProcess.childEnvironment(overrides: overrides, providerEnvironment: providerEnvironment)
         process.currentDirectoryURL = currentDirectory
         process.standardOutput = pipe
         process.standardError = pipe

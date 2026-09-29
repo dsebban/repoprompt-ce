@@ -31,8 +31,10 @@ package struct DirectHeadlessOpenAICompatibleClient {
         let content: String
     }
 
-    static let baseURLKey = "REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"
-    static let apiKeyKey = "REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"
+    struct EndpointError: Error, Equatable {
+        let reason: String
+    }
+
     static let errorDetailLimit = 500
 
     private let sessionConfiguration: URLSessionConfiguration
@@ -41,24 +43,18 @@ package struct DirectHeadlessOpenAICompatibleClient {
         self.sessionConfiguration = sessionConfiguration
     }
 
-    /// Reads `REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL` (an `http`/`https` API root such as
-    /// `https://api.openai.com/v1`; a trailing `/chat/completions` is accepted) and the optional
-    /// `REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY`.
-    static func configuration(
-        from environment: [String: String]
-    ) -> (configuration: Configuration?, unavailableReason: String?) {
-        let raw = environment[baseURLKey]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !raw.isEmpty else {
-            return (nil, "OpenAI-compatible provider is not configured; set \(baseURLKey) in the repoprompt-mcp process environment.")
-        }
+    /// The `/chat/completions` endpoint under an `http`/`https` API root such as
+    /// `https://api.openai.com/v1`; a trailing `/chat/completions` is accepted.
+    static func endpoint(baseURL: String) throws -> URL {
+        let raw = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         guard var components = URLComponents(string: raw),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
               components.host?.isEmpty == false
         else {
-            return (nil, "\(baseURLKey) is not a valid http(s) URL.")
+            throw EndpointError(reason: "is not a valid http(s) URL.")
         }
         guard components.query == nil, components.fragment == nil else {
-            return (nil, "\(baseURLKey) must not contain a query or fragment.")
+            throw EndpointError(reason: "must not contain a query or fragment.")
         }
         var path = components.path
         while path.hasSuffix("/") {
@@ -69,10 +65,9 @@ package struct DirectHeadlessOpenAICompatibleClient {
         }
         components.path = path + "/chat/completions"
         guard let url = components.url else {
-            return (nil, "\(baseURLKey) is not a valid http(s) URL.")
+            throw EndpointError(reason: "is not a valid http(s) URL.")
         }
-        let key = environment[apiKeyKey]?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return (Configuration(endpoint: url, apiKey: key?.isEmpty == false ? key : nil), nil)
+        return url
     }
 
     static func makeRequest(configuration: Configuration, model: String, messages: [Message]) throws -> URLRequest {

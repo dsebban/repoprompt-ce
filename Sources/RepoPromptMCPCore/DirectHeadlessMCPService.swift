@@ -134,8 +134,21 @@ package actor DirectHeadlessMCPService {
             environment: environment,
             currentDirectory: currentDirectory
         )
+        // Storage exists before the providers path is resolved, so the overlap checks compare
+        // real locations; the other directories wait until the configuration is valid.
+        try FileManager.default.createDirectory(
+            at: locations.storageDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let providersLocation = try DirectHeadlessProviderConfigurationLoader.location(
+            environment: environment,
+            storageDirectory: locations.storageDirectory
+        )
+        let protectedPaths = try providersLocation.protectedPaths
+            + [DirectHeadlessProviderConfigurationLoader.canonicalPath(locations.storageDirectory.path)]
+        let providerConfiguration = try DirectHeadlessProviderConfigurationLoader.load(providersLocation)
         for directory in [
-            locations.storageDirectory,
             locations.workspaceStorageDirectory,
             locations.eventDirectory,
             locations.temporaryDirectory
@@ -185,6 +198,10 @@ package actor DirectHeadlessMCPService {
                 workingDirectories: workingDirectories,
                 catalog: runtime.workspaceStore.snapshot()
             )
+            try DirectHeadlessProviderConfigurationLoader.rejectWorkspaceRootOverlap(
+                protectedPaths: protectedPaths,
+                roots: workingDirectories + initialRoute.rootOverlay.mappings.flatMap { [$0.canonicalRoot, $0.physicalRoot] }
+            )
 
             let scopeID = DomainStandaloneScopeID()
             let connectionID = UUID()
@@ -196,7 +213,8 @@ package actor DirectHeadlessMCPService {
             let context = DirectHeadlessDomainContext(
                 runtime: runtime,
                 scopeID: scopeID,
-                processRootOverlay: initialRoute.rootOverlay
+                processRootOverlay: initialRoute.rootOverlay,
+                protectedPaths: protectedPaths
             )
             let settingsStore = DomainDirectSettingsStore(
                 persistence: runtime.persistenceCoordinator,
@@ -213,6 +231,7 @@ package actor DirectHeadlessMCPService {
                 runtime: runtime,
                 context: context,
                 settingsStore: settingsStore,
+                configuration: providerConfiguration,
                 environment: environment,
                 openAICompatibleClient: openAICompatibleClient
             )
@@ -222,7 +241,10 @@ package actor DirectHeadlessMCPService {
             )
             let oracleAdapter = try DirectHeadlessOracleAdapter(
                 profileIdentifier: runtime.configuration.profileIdentifier,
-                rosterResolver: DirectHeadlessOracleRosterResolver(settingsStore: settingsStore),
+                rosterResolver: DirectHeadlessOracleRosterResolver(
+                    settingsStore: settingsStore,
+                    defaultProviderID: providerConfiguration.defaultProviderID
+                ),
                 store: oracleStore,
                 claimManager: OracleGroupClaimManager(
                     persistence: runtime.persistenceCoordinator,

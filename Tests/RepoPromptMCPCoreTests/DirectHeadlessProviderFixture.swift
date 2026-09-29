@@ -3,7 +3,7 @@ import MCP
 import RepoPromptDomainRuntime
 @testable import RepoPromptMCPCore
 
-/// Headless runtime backed by fake Codex and Claude Code executables that log each call.
+/// Headless runtime backed by fake Codex, Claude Code, and Cursor executables that log each call.
 struct DirectHeadlessProviderFixture {
     struct Call {
         let lane: Int
@@ -14,6 +14,8 @@ struct DirectHeadlessProviderFixture {
         let claimID: String?
         let resumeThreadID: String?
         let workingDirectory: String
+        /// Any Cursor key this child could see, which must always be empty.
+        let cursorKey: String
     }
 
     struct ClaudeCall {
@@ -22,12 +24,39 @@ struct DirectHeadlessProviderFixture {
         let anthropicAPIKey: String
     }
 
+    struct CursorCall {
+        let lane: Int
+        let processID: Int32
+        /// Every argument before `--`.
+        let flags: [String]
+        /// How many arguments followed `--`; the prompt must be exactly one.
+        let positionalCount: Int
+        let prompt: String
+        let cursorAPIKey: String
+        /// The configured source variable, which must never reach the child under its own name.
+        let sourceKey: String
+        let stdinBytes: Int
+        let workingDirectory: String
+    }
+
+    /// The `providers.cursor` entry; `nil` fields are omitted so the loader's defaults apply.
+    struct CursorOptions {
+        var enabled = true
+        var sandbox: Bool?
+        var trustWorkspace: Bool?
+        var apiKeyEnv: String?
+    }
+
+    static let cursorSourceKeyEnvironmentKey = "RP_TEST_CURSOR_KEY"
+
     let root: URL
     let profile: URL
     let executable: URL
     let callLog: URL
     let claudeExecutable: URL
     let claudeCallLog: URL
+    let cursorExecutable: URL
+    let cursorCallLog: URL
     let profileName: String
 
     init(name: String) throws {
@@ -39,6 +68,8 @@ struct DirectHeadlessProviderFixture {
         callLog = profile.appendingPathComponent("calls.log")
         claudeExecutable = profile.appendingPathComponent("claude-stub")
         claudeCallLog = profile.appendingPathComponent("claude-calls.log")
+        cursorExecutable = profile.appendingPathComponent("cursor-stub")
+        cursorCallLog = profile.appendingPathComponent("cursor-calls.log")
         profileName = "oracle-\(name)"
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: profile, withIntermediateDirectories: true)
@@ -61,9 +92,10 @@ struct DirectHeadlessProviderFixture {
           shift
         done
         lane="${REPOPROMPT_MCP_ORACLE_LANE_ID:-0}"
-        /usr/bin/printf '%s|%s|%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
+        /usr/bin/printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' "$lane" "$model" "$$" \
           "${REPOPROMPT_MCP_LAUNCH_ID:-}" "${REPOPROMPT_MCP_ORACLE_GROUP_ID:-}" \
-          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" "$resume" "$(/bin/pwd -P)" >> '\(callLog.path)'
+          "${REPOPROMPT_MCP_ORACLE_GROUP_CLAIM_ID:-}" "$resume" "$(/bin/pwd -P)" \
+          "${CURSOR_API_KEY:-}${\(Self.cursorSourceKeyEnvironmentKey):-}" >> '\(callLog.path)'
         /bin/cat >/dev/null
         if [ -n "$resume" ] && [ "$model" = "slow-resume" ]; then
           trap 'exit 0' TERM INT; /bin/sleep 30
@@ -120,30 +152,87 @@ struct DirectHeadlessProviderFixture {
           "$lane" "$model" "$$"
         """
         try Self.writeExecutable(claudeScript, to: claudeExecutable)
+        // The prompt is logged base64-encoded because it may hold newlines or `|`.
+        let cursorScript = """
+        #!/bin/sh
+        lane="${REPOPROMPT_MCP_ORACLE_LANE_ID:-0}"
+        stdin_bytes=$(/usr/bin/head -c 8 | /usr/bin/wc -c | /usr/bin/tr -d ' ')
+        flags=
+        model=default
+        resume=
+        while [ "$#" -gt 0 ] && [ "$1" != "--" ]; do
+          flags="$flags $1"
+          [ "$1" = "--model" ] && model="$2"
+          [ "$1" = "--resume" ] && resume="$2"
+          shift
+        done
+        [ "$#" -gt 0 ] && shift
+        count=$#
+        prompt=$(/usr/bin/printf '%s' "$1" | /usr/bin/base64 | /usr/bin/tr -d '\\n')
+        /usr/bin/printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' "$lane" "$$" "${flags# }" "$count" "$prompt" \
+          "${CURSOR_API_KEY:-}" "${\(Self.cursorSourceKeyEnvironmentKey):-}" "$stdin_bytes" "$(/bin/pwd -P)" \
+          >> '\(cursorCallLog.path)'
+        /usr/bin/printf '%s\\n' 'cursor stderr notice' >&2
+        if [ -n "$resume" ]; then
+          /usr/bin/printf '{"type":"result","subtype":"success","is_error":false,"result":"cursor-resumed-%s","session_id":"%s"}\\n' \
+            "$resume" "$resume"
+          exit 0
+        fi
+        case "$model" in
+          slow) trap 'exit 0' TERM INT; /bin/sleep 30 ;;
+          error-result) /usr/bin/printf '%s\\n' '{"type":"result","subtype":"error","is_error":true,"result":"stub failure"}'; exit 0 ;;
+          no-session) /usr/bin/printf '%s\\n' '{"type":"result","subtype":"success","is_error":false,"result":"sessionless"}'; exit 0 ;;
+          leak-exit) /usr/bin/printf 'auth failed for %s\\n' "${CURSOR_API_KEY:-}" >&2; exit 3 ;;
+          leak-result) /usr/bin/printf '{"type":"result","is_error":true,"result":"bad key %s"}\\n' "${CURSOR_API_KEY:-}"; exit 0 ;;
+        esac
+        /usr/bin/printf '{"type":"result","subtype":"success","is_error":false,"result":"cursor-%s-%s","session_id":"cursor-chat-%s"}\\n' \
+          "$lane" "$model" "$$"
+        """
+        try Self.writeExecutable(cursorScript, to: cursorExecutable)
     }
 
-    /// `claudeEnabled` sets the operator opt-in; `REPOPROMPT_CLAUDE_COMMAND` always names the stub
-    /// so a disabled run proves the executable alone does not enable Claude. `openAIConfigured`
-    /// points the HTTP provider at this fixture's `DirectHeadlessHTTPStub` host with `httpAPIKey`.
+    /// Writes the operator's `providers.json` at its default profile location. `claudeEnabled` sets
+    /// the opt-in; the Claude entry always names the stub so a disabled run proves the executable
+    /// alone does not enable Claude. `openAIConfigured` points the HTTP provider at this fixture's
+    /// `DirectHeadlessHTTPStub` host with `httpAPIKey` in `httpAPIKeyEnvironmentKey`.
+    /// `cursor` adds a Cursor entry naming the stub; without it the entry is absent.
+    /// `providersJSON` replaces the generated file verbatim.
     func service(
         claudeEnabled: Bool = false,
         openAIConfigured: Bool = false,
+        cursor: CursorOptions? = nil,
+        providersJSON: String? = nil,
         extraEnvironment: [String: String] = [:]
-    ) -> DirectHeadlessMCPService {
+    ) throws -> DirectHeadlessMCPService {
+        var providers: [String: Any] = [
+            "codexExec": ["command": executable.path],
+            "claudeCode": ["enabled": claudeEnabled, "command": claudeExecutable.path]
+        ]
+        if openAIConfigured {
+            providers["openaiCompatible"] = [
+                "enabled": true,
+                "baseURL": "http://\(httpHost)/v1/",
+                "apiKeyEnv": Self.httpAPIKeyEnvironmentKey
+            ]
+        }
+        if let cursor {
+            var entry: [String: Any] = ["enabled": cursor.enabled, "command": cursorExecutable.path]
+            entry["sandbox"] = cursor.sandbox
+            entry["trustWorkspace"] = cursor.trustWorkspace
+            entry["apiKeyEnv"] = cursor.apiKeyEnv
+            providers["cursor"] = entry
+        }
+        let json = try providersJSON.map { Data($0.utf8) }
+            ?? JSONSerialization.data(withJSONObject: ["schemaVersion": 1, "providers": providers])
+        try json.write(to: providersFile)
         var environment = [
-            "REPOPROMPT_CODEX_COMMAND": executable.path,
-            "REPOPROMPT_CLAUDE_COMMAND": claudeExecutable.path,
             "REPOPROMPT_MCP_HEADLESS_PROFILE": profileName,
             "REPOPROMPT_MCP_HEADLESS_PROFILE_DIR": profile.path,
             "REPOPROMPT_MCP_WORKING_DIRS": root.path,
             "PATH": ProcessInfo.processInfo.environment["PATH"] ?? ""
         ]
-        if claudeEnabled {
-            environment["REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED"] = "1"
-        }
         if openAIConfigured {
-            environment["REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"] = "http://\(httpHost)/v1/"
-            environment["REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"] = Self.httpAPIKey
+            environment[Self.httpAPIKeyEnvironmentKey] = Self.httpAPIKey
         }
         environment.merge(extraEnvironment) { _, extra in extra }
         return DirectHeadlessMCPService(
@@ -153,7 +242,12 @@ struct DirectHeadlessProviderFixture {
         )
     }
 
+    var providersFile: URL {
+        profile.appendingPathComponent("providers.json")
+    }
+
     static let httpAPIKey = "stub-secret-key"
+    static let httpAPIKeyEnvironmentKey = "RP_TEST_OPENAI_API_KEY"
 
     /// Unique per fixture so parallel tests never share recorded requests.
     var httpHost: String {
@@ -178,7 +272,28 @@ struct DirectHeadlessProviderFixture {
                     groupID: fields[4].isEmpty ? nil : fields[4],
                     claimID: fields[5].isEmpty ? nil : fields[5],
                     resumeThreadID: fields[6].isEmpty ? nil : fields[6],
-                    workingDirectory: fields[7]
+                    workingDirectory: fields[7],
+                    cursorKey: fields[8]
+                )
+            }
+    }
+
+    func cursorCalls() throws -> [CursorCall] {
+        guard FileManager.default.fileExists(atPath: cursorCallLog.path) else { return [] }
+        return try String(contentsOf: cursorCallLog, encoding: .utf8)
+            .split(separator: "\n")
+            .map { line in
+                let fields = line.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                return CursorCall(
+                    lane: Int(fields[0]) ?? -1,
+                    processID: Int32(fields[1]) ?? -1,
+                    flags: fields[2].split(separator: " ").map(String.init),
+                    positionalCount: Int(fields[3]) ?? -1,
+                    prompt: Data(base64Encoded: fields[4]).map { String(decoding: $0, as: UTF8.self) } ?? "<undecodable>",
+                    cursorAPIKey: fields[5],
+                    sourceKey: fields[6],
+                    stdinBytes: Int(fields[7]) ?? -1,
+                    workingDirectory: fields[8]
                 )
             }
     }

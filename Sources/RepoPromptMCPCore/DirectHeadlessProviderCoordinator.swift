@@ -7,7 +7,8 @@ enum DirectHeadlessProviderID {
     static let codexExec = "codexExec"
     static let claudeCode = "claudeCode"
     static let openAICompatible = "openaiCompatible"
-    static let all = [codexExec, claudeCode, openAICompatible]
+    static let cursor = "cursor"
+    static let all = [codexExec, claudeCode, openAICompatible, cursor]
 
     static func canonical(matching raw: String) -> String? {
         all.first { $0.caseInsensitiveCompare(raw) == .orderedSame }
@@ -40,6 +41,7 @@ actor DirectHeadlessProviderCoordinator {
             case codexCLI(executable: String)
             case claudeCLI(executable: String)
             case openAICompatibleHTTP(DirectHeadlessOpenAICompatibleClient.Configuration)
+            case cursorCLI(executable: String, options: DirectHeadlessCursorCLI.Options)
         }
 
         let id: String
@@ -71,7 +73,7 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     /// One provider turn. `providerSessionID` is the provider's own conversation handle
-    /// (Codex `thread_id`, Claude `session_id`) for resuming it later.
+    /// (Codex `thread_id`, Claude and Cursor `session_id`) for resuming it later.
     struct TurnOutput: Equatable {
         let assistantText: String
         let providerSessionID: String?
@@ -109,6 +111,7 @@ actor DirectHeadlessProviderCoordinator {
     private let runtime: MCPDomainRuntime
     private let context: DirectHeadlessDomainContext
     private let settingsStore: DomainDirectSettingsStore
+    private let configuration: DirectHeadlessProviderConfiguration
     private let environment: [String: String]
     private let openAICompatibleClient: DirectHeadlessOpenAICompatibleClient
     private let beginEpoch: BeginEpoch
@@ -121,6 +124,7 @@ actor DirectHeadlessProviderCoordinator {
         runtime: MCPDomainRuntime,
         context: DirectHeadlessDomainContext,
         settingsStore: DomainDirectSettingsStore,
+        configuration: DirectHeadlessProviderConfiguration,
         environment: [String: String] = ProcessInfo.processInfo.environment,
         openAICompatibleClient: DirectHeadlessOpenAICompatibleClient = .init(),
         beginEpoch: BeginEpoch? = nil
@@ -128,6 +132,7 @@ actor DirectHeadlessProviderCoordinator {
         self.runtime = runtime
         self.context = context
         self.settingsStore = settingsStore
+        self.configuration = configuration
         self.environment = environment
         self.openAICompatibleClient = openAICompatibleClient
         let sessionStore = runtime.agentSessionStore
@@ -142,42 +147,59 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     func providerCatalog() -> [ProviderDescriptor] {
-        Self.providerCatalog(environment: environment)
+        Self.providerCatalog(configuration: configuration, environment: environment)
     }
 
-    /// Operator contract, read only from the `repoprompt-mcp` process environment so no request
-    /// or setting can enable a provider:
-    /// - `REPOPROMPT_CODEX_COMMAND`: Codex executable; default `codex` on `PATH`. Codex is the
-    ///   default provider because its sandbox is OS-enforced.
-    /// - `REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1` (or `true`): enables `claudeCode`, which has
-    ///   no OS sandbox. It uses the CLI's stored login; API keys are never forwarded.
-    /// - `REPOPROMPT_CLAUDE_COMMAND`: Claude Code executable; default `claude`. Does not enable it.
-    /// - `REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL`: enables the Oracle-only `openaiCompatible`
-    ///   chat-completions provider at this API root; `REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY` is
-    ///   its optional bearer key. Rosters select it as `openaiCompatible:<model>`.
-    nonisolated static func providerCatalog(environment: [String: String]) -> [ProviderDescriptor] {
-        let codex = findExecutable(named: environment["REPOPROMPT_CODEX_COMMAND"] ?? "codex", path: environment["PATH"])
-        let claudeEnabled = ["1", "true"].contains(
-            environment["REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED"]?
-                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
-        )
-        let claude = claudeEnabled
-            ? findExecutable(named: environment["REPOPROMPT_CLAUDE_COMMAND"] ?? "claude", path: environment["PATH"])
-            : nil
-        let claudeUnavailableReason: String? = if !claudeEnabled {
-            "Claude Code is disabled; set REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED=1 in the repoprompt-mcp process environment."
-        } else if claude == nil {
-            "Claude Code CLI was not found on PATH (REPOPROMPT_CLAUDE_COMMAND)."
+    /// Providers come only from the operator's startup `DirectHeadlessProviderConfiguration`, so
+    /// no request or setting can enable one. Executables are looked up per call, so a CLI
+    /// installed after startup becomes available. Claude Code uses the CLI's stored login; API
+    /// keys are never forwarded. The Oracle-only `openaiCompatible` key is read from the variable
+    /// its `apiKeyEnv` names and is sent only in the HTTP `Authorization` header; Cursor's reaches
+    /// only the Cursor child, as `CURSOR_API_KEY`.
+    nonisolated static func providerCatalog(
+        configuration: DirectHeadlessProviderConfiguration,
+        environment: [String: String]
+    ) -> [ProviderDescriptor] {
+        let path = environment["PATH"]
+        let codex = configuration.codex.enabled ? findExecutable(named: configuration.codex.command, path: path) : nil
+        let claude = configuration.claude.enabled ? findExecutable(named: configuration.claude.command, path: path) : nil
+        let codexUnavailableReason: String? = if !configuration.codex.enabled {
+            "Codex CLI is disabled in the headless providers file."
+        } else if codex == nil {
+            "Codex CLI was not found on PATH (providers.codexExec.command)."
         } else {
             nil
         }
-        let openAI = DirectHeadlessOpenAICompatibleClient.configuration(from: environment)
+        let claudeUnavailableReason: String? = if !configuration.claude.enabled {
+            "Claude Code is disabled; set providers.claudeCode.enabled to true in the headless providers file."
+        } else if claude == nil {
+            "Claude Code CLI was not found on PATH (providers.claudeCode.command)."
+        } else {
+            nil
+        }
+        let openAI = openAICompatibleBackend(configuration.openAICompatible, environment: environment)
+        let cursor = configuration.cursor
+        let cursorExecutable = cursor.enabled ? findExecutable(named: cursor.command, path: path) : nil
+        let cursorUnavailableReason: String? = if !cursor.enabled {
+            "Cursor CLI is disabled; set providers.cursor.enabled to true in the headless providers file."
+        } else if cursorExecutable == nil {
+            "Cursor CLI was not found on PATH (providers.cursor.command)."
+        } else if let name = cursor.apiKeyEnv, apiKey(named: name, in: environment) == nil {
+            "cursor apiKeyEnv '\(name)' is not set in the repoprompt-mcp process environment."
+        } else {
+            nil
+        }
+        let cursorOptions = DirectHeadlessCursorCLI.Options(
+            sandbox: cursor.sandbox,
+            trustWorkspace: cursor.trustWorkspace,
+            apiKeyEnv: cursor.apiKeyEnv
+        )
         return [
             ProviderDescriptor(
                 id: DirectHeadlessProviderID.codexExec,
                 displayName: "Codex CLI",
                 backend: codex.map { .codexCLI(executable: $0) },
-                unavailableReason: codex == nil ? "Codex CLI was not found on PATH." : nil
+                unavailableReason: codexUnavailableReason
             ),
             ProviderDescriptor(
                 id: DirectHeadlessProviderID.claudeCode,
@@ -190,8 +212,44 @@ actor DirectHeadlessProviderCoordinator {
                 displayName: "OpenAI-compatible HTTP",
                 backend: openAI.configuration.map { .openAICompatibleHTTP($0) },
                 unavailableReason: openAI.unavailableReason
+            ),
+            ProviderDescriptor(
+                id: DirectHeadlessProviderID.cursor,
+                displayName: "Cursor CLI",
+                backend: cursorUnavailableReason == nil
+                    ? cursorExecutable.map { .cursorCLI(executable: $0, options: cursorOptions) }
+                    : nil,
+                unavailableReason: cursorUnavailableReason
             )
         ]
+    }
+
+    /// A named but unset or blank key variable counts as missing.
+    private nonisolated static func apiKey(named name: String, in environment: [String: String]) -> String? {
+        guard let key = environment[name]?.trimmingCharacters(in: .whitespacesAndNewlines), !key.isEmpty else {
+            return nil
+        }
+        return key
+    }
+
+    /// A named but unset `apiKeyEnv` fails closed rather than sending unauthenticated requests.
+    private nonisolated static func openAICompatibleBackend(
+        _ entry: DirectHeadlessProviderConfiguration.OpenAICompatible?,
+        environment: [String: String]
+    ) -> (configuration: DirectHeadlessOpenAICompatibleClient.Configuration?, unavailableReason: String?) {
+        guard let entry else {
+            return (nil, "OpenAI-compatible provider is not configured; add providers.openaiCompatible to the headless providers file.")
+        }
+        guard entry.enabled else {
+            return (nil, "OpenAI-compatible provider is disabled; set providers.openaiCompatible.enabled to true in the headless providers file.")
+        }
+        guard let name = entry.apiKeyEnv else {
+            return (.init(endpoint: entry.endpoint, apiKey: nil), nil)
+        }
+        guard let key = apiKey(named: name, in: environment) else {
+            return (nil, "openaiCompatible apiKeyEnv '\(name)' is not set in the repoprompt-mcp process environment.")
+        }
+        return (.init(endpoint: entry.endpoint, apiKey: key), nil)
     }
 
     /// `exec resume` accepts no `--sandbox`, so the `exec` flags precede the `resume` subcommand,
@@ -279,23 +337,48 @@ actor DirectHeadlessProviderCoordinator {
         )
         guard !isShuttingDown else { throw CancellationError() }
         try Task.checkCancellation()
-        let (executable, arguments, parse): (String, [String], @Sendable (String) throws -> TurnOutput)
+        let prompt = history.isEmpty
+            ? message
+            : history.map { "\($0.role): \($0.text)" }.joined(separator: "\n\n") + "\n\nuser: " + message
+        // Codex and Claude read the prompt from stdin; Cursor takes it as an argument.
+        let (executable, arguments, input, providerEnvironment, parse): (
+            String, [String], Data?, [String: String], @Sendable (String) throws -> TurnOutput
+        )
         switch backend {
         case let .codexCLI(path):
-            (executable, arguments, parse) = (
+            (executable, arguments, input, providerEnvironment, parse) = (
                 path,
                 Self.codexExecArguments(model: model, purpose: purpose, resumeThreadID: resumeProviderSessionID),
+                Data(prompt.utf8),
+                [:],
                 { Self.codexTurnOutput(from: $0) }
             )
         case let .claudeCLI(path):
-            (executable, arguments, parse) = (
+            (executable, arguments, input, providerEnvironment, parse) = (
                 path,
                 DirectHeadlessClaudeCodeCLI.arguments(
                     model: model,
                     purpose: purpose,
                     resumeSessionID: resumeProviderSessionID
                 ),
+                Data(prompt.utf8),
+                [:],
                 { try DirectHeadlessClaudeCodeCLI.parseTurnOutput($0) }
+            )
+        case let .cursorCLI(path, options):
+            let apiKey = options.apiKeyEnv.flatMap { Self.apiKey(named: $0, in: environment) }
+            (executable, arguments, input, providerEnvironment, parse) = try (
+                path,
+                DirectHeadlessCursorCLI.arguments(
+                    model: model,
+                    purpose: purpose,
+                    options: options,
+                    resumeSessionID: resumeProviderSessionID,
+                    prompt: prompt
+                ),
+                nil,
+                apiKey.map { [DirectHeadlessCursorCLI.apiKeyEnvironmentKey: $0] } ?? [:],
+                { try DirectHeadlessCursorCLI.parseTurnOutput($0, redacting: apiKey) }
             )
         case let .openAICompatibleHTTP(configuration):
             let model = try Self.httpModel(model)
@@ -307,20 +390,27 @@ actor DirectHeadlessProviderCoordinator {
                 try await client.complete(configuration: configuration, model: model, messages: messages)
             }
         }
-        let prompt = history.isEmpty
-            ? message
-            : history.map { "\($0.role): \($0.text)" }.joined(separator: "\n\n") + "\n\nuser: " + message
         let carrier = carrierEnvironment ?? DomainChildLaunchContext.current?.environment ?? [:]
         let childEnvironment = DirectProcess.withoutPrivateCarrier(from: environment)
             .merging(carrier) { _, supplied in supplied }
+        // A failed child's error is its raw output, which may echo the key it was given.
+        let providerSecrets = Array(providerEnvironment.values)
         return try await trackProviderTask {
-            let output = try await DirectProcess.run(
-                executable,
-                arguments: arguments,
-                input: Data(prompt.utf8),
-                environment: childEnvironment,
-                currentDirectory: snapshot.activeRoot
-            )
+            let output: String
+            do {
+                output = try await DirectProcess.run(
+                    executable,
+                    arguments: arguments,
+                    input: input,
+                    environment: childEnvironment,
+                    providerEnvironment: providerEnvironment,
+                    currentDirectory: snapshot.activeRoot
+                )
+            } catch let MCPError.internalError(detail?) where !providerSecrets.isEmpty {
+                throw MCPError.internalError(providerSecrets.reduce(detail) {
+                    DirectHeadlessCursorCLI.redact($0, apiKey: $1)
+                })
+            }
             return try parse(output)
         }
     }
@@ -412,7 +502,7 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     /// Continues a completed run inside the provider's own conversation (Codex `exec resume`,
-    /// Claude `--resume`) as a `.steering` epoch of the same session. Running, failed, and
+    /// Claude and Cursor `--resume`) as a `.steering` epoch of the same session. Running, failed, and
     /// cancelled runs are refused rather than queued, and sessions from an earlier runtime are
     /// unknown because provider session IDs are not durable.
     func steerAgent(sessionID: UUID, args: [String: Value], request: DomainPhysicalToolRequest) async throws -> Value {
@@ -484,7 +574,7 @@ actor DirectHeadlessProviderCoordinator {
         let descriptor = try resolveProvider(requested)
         guard descriptor.supportsAgentRuns else {
             throw MCPError.invalidRequest(
-                "Provider '\(descriptor.id)' supports Oracle conversations only; agent_run requires a CLI provider (codexExec or claudeCode)."
+                "Provider '\(descriptor.id)' supports Oracle conversations only; agent_run requires a CLI provider (codexExec, claudeCode, or cursor)."
             )
         }
         _ = try descriptor.requireBackend()
@@ -825,11 +915,11 @@ actor DirectHeadlessProviderCoordinator {
 
     private func resolveProvider(_ requested: String?) throws -> ProviderDescriptor {
         let normalized = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? DirectHeadlessProviderID.codexExec
+        let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? configuration.defaultProviderID
         let roleAliases: Set = ["pair", "explore", "engineer", "design", "default"]
         guard let descriptor = providerCatalog().first(where: {
             $0.id.caseInsensitiveCompare(id) == .orderedSame
-                || (roleAliases.contains(id.lowercased()) && $0.id == DirectHeadlessProviderID.codexExec)
+                || (roleAliases.contains(id.lowercased()) && $0.id == configuration.defaultProviderID)
         }) else {
             throw MCPError.invalidParams("unknown standalone provider '\(id)'")
         }

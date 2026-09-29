@@ -261,30 +261,265 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         }
     }
 
+    func testCursorArgumentsPinLaneFlagsAndKeepThePromptPositional() throws {
+        typealias Cursor = DirectHeadlessCursorCLI
+        let secure = Cursor.Options(sandbox: true, trustWorkspace: false, apiKeyEnv: nil)
+        for (purpose, laneFlags) in [
+            (DirectHeadlessProviderCoordinator.ExecutionPurpose.agent, ["--force"]),
+            (.directOracle, ["--force"]),
+            (.oracleGroup, ["--mode", "ask"])
+        ] {
+            XCTAssertEqual(
+                try Cursor.arguments(model: "default", purpose: purpose, options: secure, prompt: "-rf --force"),
+                ["-p", "--output-format", "json", "--sandbox", "enabled"] + laneFlags + ["--", "-rf --force"]
+            )
+        }
+        XCTAssertEqual(
+            try Cursor.arguments(
+                model: "gpt-5",
+                purpose: .agent,
+                options: .init(sandbox: false, trustWorkspace: true, apiKeyEnv: "K"),
+                resumeSessionID: "chat-1",
+                prompt: "again"
+            ),
+            ["-p", "--output-format", "json", "--force", "--trust", "--model", "gpt-5", "--resume", "chat-1", "--", "again"]
+        )
+    }
+
+    func testCursorPromptLimitCountsUTF8BytesAndRejectsNUL() throws {
+        let options = DirectHeadlessCursorCLI.Options(sandbox: true, trustWorkspace: false, apiKeyEnv: nil)
+        func arguments(_ prompt: String) throws -> [String] {
+            try DirectHeadlessCursorCLI.arguments(model: nil, purpose: .agent, options: options, prompt: prompt)
+        }
+        XCTAssertEqual(DirectHeadlessCursorCLI.maximumPromptUTF8Bytes, 131_071)
+        for accepted in [String(repeating: "a", count: 131_071), String(repeating: "é", count: 65535) + "a"] {
+            XCTAssertEqual(try arguments(accepted).last, accepted)
+        }
+        for rejected in [String(repeating: "a", count: 131_072), String(repeating: "é", count: 65536)] {
+            XCTAssertThrowsError(try arguments(rejected)) { error in
+                XCTAssertTrue(String(describing: error).contains("131072 bytes; the limit is 131071"), "\(error)")
+            }
+        }
+        XCTAssertThrowsError(try arguments("a\u{0}b")) { error in
+            XCTAssertTrue(String(describing: error).contains("NUL"), "\(error)")
+        }
+    }
+
+    func testCursorParserReadsTerminalResultAndGatesTheSessionID() throws {
+        typealias Cursor = DirectHeadlessCursorCLI
+        XCTAssertEqual(
+            try Cursor.parseTurnOutput("""
+            cursor stderr notice
+            {"type":"result","subtype":"success","is_error":false,"duration_ms":1,"result":"  answer\\n","session_id":"3f2a-b"}
+            """),
+            .init(assistantText: "  answer\n", providerSessionID: "3f2a-b")
+        )
+        XCTAssertEqual(
+            try Cursor.parseTurnOutput("""
+            {
+              "type": "result",
+              "is_error": false,
+              "result": "pretty",
+              "session_id": "p-1"
+            }
+
+            """),
+            .init(assistantText: "pretty", providerSessionID: "p-1")
+        )
+        for session in [#""session_id":"--continue","#, ""] {
+            XCTAssertNil(try Cursor.parseTurnOutput(#"{"type":"result",\#(session)"is_error":false,"result":"ok"}"#).providerSessionID)
+        }
+        for (output, message) in [
+            (#"{"type":"result","subtype":"error","is_error":true,"result":"stub failure"}"#, "reported an error: stub failure"),
+            (#"{"type":"result","is_error":false,"result":"  "}"#, "result has no text"),
+            (#"{"type":"result","is_error":false,"session_id":"s"}"#, "result has no text"),
+            ("Error: not authenticated\n", "returned no result")
+        ] {
+            XCTAssertThrowsError(try Cursor.parseTurnOutput(output), output) { error in
+                XCTAssertTrue(String(describing: error).contains(message), "\(error)")
+            }
+        }
+
+        // The key straddles the length bound, so redaction must happen before truncation.
+        let key = "cursor-secret-key"
+        let padding = String(repeating: "x", count: Cursor.errorDetailLimit - 5)
+        for output in [
+            "\(padding)\(key) not authenticated\n",
+            #"{"type":"result","is_error":true,"result":"\#(padding)\#(key)"}"#
+        ] {
+            XCTAssertThrowsError(try Cursor.parseTurnOutput(output, redacting: key)) { error in
+                guard case let MCPError.internalError(detail?) = error else { return XCTFail("\(error)") }
+                XCTAssertFalse(detail.contains("curso"), detail)
+                XCTAssertTrue(detail.hasSuffix(padding + "[reda"), detail)
+            }
+        }
+    }
+
+    func testCursorCatalogRequiresOptInACommandAndAnyNamedKey() throws {
+        func cursor(_ json: String, _ environment: [String: String] = [:]) throws -> DirectHeadlessProviderCoordinator.ProviderDescriptor {
+            try XCTUnwrap(DirectHeadlessProviderCoordinator.providerCatalog(configuration: Self.providers(json), environment: environment).last)
+        }
+        let absent = try cursor(#"{}"#)
+        XCTAssertEqual(absent.id, "cursor")
+        XCTAssertTrue(absent.supportsAgentRuns)
+        XCTAssertNil(absent.backend)
+        XCTAssertTrue(try XCTUnwrap(absent.unavailableReason).contains("Cursor CLI is disabled"))
+        XCTAssertNil(try cursor(#"{"providers":{"cursor":{"enabled":false,"command":"/bin/sh"}}}"#).backend)
+        XCTAssertEqual(try Self.providers(#"{"providers":{"cursor":{"enabled":true}}}"#).cursor, .init(
+            enabled: true, command: "agent", apiKeyEnv: nil, sandbox: true, trustWorkspace: false
+        ))
+        let missing = try cursor(#"{"providers":{"cursor":{"enabled":true}}}"#, ["PATH": "/nonexistent"])
+        XCTAssertTrue(try XCTUnwrap(missing.unavailableReason).contains("Cursor CLI was not found on PATH (providers.cursor.command)"))
+        XCTAssertEqual(
+            try cursor(#"{"providers":{"cursor":{"enabled":true,"command":"/bin/sh"}}}"#).backend,
+            .cursorCLI(executable: "/bin/sh", options: .init(sandbox: true, trustWorkspace: false, apiKeyEnv: nil))
+        )
+
+        let keyed = #"{"providers":{"cursor":{"enabled":true,"command":"/bin/sh","apiKeyEnv":"MY_CURSOR_KEY","sandbox":false,"trustWorkspace":true}}}"#
+        for unset in [[:], ["MY_CURSOR_KEY": " "]] {
+            let descriptor = try cursor(keyed, unset)
+            XCTAssertNil(descriptor.backend)
+            XCTAssertTrue(try XCTUnwrap(descriptor.unavailableReason).contains("apiKeyEnv 'MY_CURSOR_KEY' is not set"))
+        }
+        let backend = try XCTUnwrap(try cursor(keyed, ["MY_CURSOR_KEY": "secret"]).backend)
+        XCTAssertEqual(backend, .cursorCLI(executable: "/bin/sh", options: .init(sandbox: false, trustWorkspace: true, apiKeyEnv: "MY_CURSOR_KEY")))
+        XCTAssertFalse(String(describing: backend).contains("secret"))
+    }
+
+    func testCursorKeyIsAddedOnlyThroughTheProviderEnvironment() {
+        let inherited = ["HOME": "/home", "PATH": "/usr/bin", "CURSOR_API_KEY": "parent"]
+        XCTAssertNil(DirectProcess.childEnvironment(inherited: inherited)["CURSOR_API_KEY"])
+        let environment = DirectProcess.childEnvironment(
+            inherited: inherited,
+            providerEnvironment: ["CURSOR_API_KEY": "configured", "PATH": "/attacker", "LC_ALL": "x"]
+        )
+        XCTAssertEqual(environment["CURSOR_API_KEY"], "configured")
+        XCTAssertEqual(environment["PATH"], "/usr/bin")
+        XCTAssertEqual(environment["LC_ALL"], "C")
+    }
+
+    private static func providers(_ json: String) throws -> DirectHeadlessProviderConfiguration {
+        try DirectHeadlessProviderConfigurationLoader.parse(Data(json.utf8), source: "providers.json")
+    }
+
     func testProviderCatalogKeepsCodexDefaultAndRequiresOperatorOptInForClaude() throws {
         let executable = "/bin/sh"
-        let disabled = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
-            "REPOPROMPT_CODEX_COMMAND": executable,
-            "REPOPROMPT_CLAUDE_COMMAND": executable
-        ])
-        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode", "openaiCompatible"])
+        let disabled = try DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: Self.providers(#"{"providers":{"codexExec":{"command":"/bin/sh"},"claudeCode":{"command":"/bin/sh"}}}"#),
+            environment: [:]
+        )
+        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode", "openaiCompatible", "cursor"])
         XCTAssertEqual(disabled[0].backend, .codexCLI(executable: executable))
         XCTAssertNil(disabled[1].backend)
-        XCTAssertTrue(try XCTUnwrap(disabled[1].unavailableReason).contains("disabled"))
+        XCTAssertTrue(try XCTUnwrap(disabled[1].unavailableReason).contains("Claude Code is disabled"))
 
-        let missing = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
-            "REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED": "1",
-            "REPOPROMPT_CLAUDE_COMMAND": "missing-claude-\(UUID().uuidString)",
-            "PATH": "/nonexistent"
-        ])
+        let missing = try DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: Self.providers(#"{"providers":{"claudeCode":{"enabled":true,"command":"missing-claude-x"}}}"#),
+            environment: ["PATH": "/nonexistent"]
+        )
         XCTAssertNil(missing[1].backend)
         XCTAssertTrue(try XCTUnwrap(missing[1].unavailableReason).contains("not found"))
 
-        let enabled = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
-            "REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED": "TRUE",
-            "REPOPROMPT_CLAUDE_COMMAND": executable
-        ])
+        let enabled = try DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: Self.providers(#"{"providers":{"claudeCode":{"enabled":true,"command":"/bin/sh"}}}"#),
+            environment: [:]
+        )
         XCTAssertEqual(enabled[1].backend, .claudeCLI(executable: executable))
+
+        let codexOff = try DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: Self.providers(
+                #"{"defaultProvider":"claudeCode","providers":{"codexExec":{"enabled":false,"command":"/bin/sh"},"claudeCode":{"enabled":true,"command":"/bin/sh"}}}"#
+            ),
+            environment: [:]
+        )
+        XCTAssertNil(codexOff[0].backend)
+        XCTAssertTrue(try XCTUnwrap(codexOff[0].unavailableReason).contains("disabled"))
+    }
+
+    func testMissingDefaultProvidersFileMeansCodexOnlyAndAnExplicitFileMustExist() throws {
+        typealias Loader = DirectHeadlessProviderConfigurationLoader
+        let storage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: storage) }
+
+        let defaultLocation = try Loader.location(environment: [:], storageDirectory: storage)
+        XCTAssertFalse(defaultLocation.isExplicit)
+        XCTAssertEqual(defaultLocation.url.path, storage.appendingPathComponent("providers.json").path)
+        XCTAssertEqual(try Loader.load(defaultLocation), .builtIn)
+        let catalog = DirectHeadlessProviderCoordinator.providerCatalog(configuration: .builtIn, environment: ["PATH": "/nonexistent"])
+        XCTAssertEqual(catalog.map(\.id), ["codexExec", "claudeCode", "openaiCompatible", "cursor"])
+        XCTAssertTrue(catalog.allSatisfy { $0.backend == nil })
+        XCTAssertEqual(
+            catalog.map { $0.unavailableReason?.components(separatedBy: ";").first ?? "" },
+            [
+                "Codex CLI was not found on PATH (providers.codexExec.command).",
+                "Claude Code is disabled",
+                "OpenAI-compatible provider is not configured",
+                "Cursor CLI is disabled"
+            ]
+        )
+
+        let absent = storage.appendingPathComponent("absent.json").path
+        let explicitMissing = try Loader.location(
+            environment: [DirectHeadlessProviderConfiguration.fileEnvironmentKey: absent],
+            storageDirectory: storage
+        )
+        XCTAssertThrowsError(try Loader.load(explicitMissing)) {
+            XCTAssertEqual($0 as? DirectHeadlessProviderConfigurationError, .explicitFileMissing(absent))
+        }
+        XCTAssertThrowsError(try Loader.location(
+            environment: [DirectHeadlessProviderConfiguration.fileEnvironmentKey: "relative/providers.json"],
+            storageDirectory: storage
+        ))
+
+        let minimal = storage.appendingPathComponent("mounted.json")
+        try Data(#"{"providers":{"claudeCode":{"enabled":true}}}"#.utf8).write(to: minimal)
+        let loaded = try Loader.load(Loader.location(
+            environment: [DirectHeadlessProviderConfiguration.fileEnvironmentKey: minimal.path],
+            storageDirectory: storage
+        ))
+        XCTAssertEqual(loaded.defaultProviderID, "codexExec")
+        XCTAssertEqual(loaded.codex, .init(enabled: true, command: "codex"))
+        XCTAssertEqual(loaded.claude, .init(enabled: true, command: "claude"))
+        XCTAssertNil(loaded.openAICompatible)
+    }
+
+    func testProvidersFileRejectsMalformedJSONAndEverySchemaViolation() {
+        let cases: [(json: String, message: String)] = [
+            ("{", "is not valid JSON"),
+            ("[]", "the top level must be an object"),
+            (#"{"schemaVersion":2}"#, "schemaVersion must be 1"),
+            (#"{"schemaVersion":true}"#, "schemaVersion must be an integer"),
+            (#"{"version":1}"#, "version is not a known key"),
+            (#"{"providers":{"gemini":{}}}"#, "providers.gemini is not a known key"),
+            (#"{"providers":{"claudeCode":{"type":"claudeCode"}}}"#, "providers.claudeCode.type is not a known key"),
+            (#"{"providers":{"claudeCode":{"enabled":1}}}"#, "providers.claudeCode.enabled must be a boolean"),
+            (#"{"providers":{"codexExec":{"command":"bin/codex"}}}"#, "providers.codexExec.command must be"),
+            (#"{"providers":{"codexExec":{"command":" "}}}"#, "providers.codexExec.command must be"),
+            (#"{"defaultProvider":"gemini"}"#, "defaultProvider 'gemini' is not one of"),
+            (#"{"defaultProvider":"claudeCode"}"#, "defaultProvider 'claudeCode' is not enabled"),
+            (#"{"providers":{"openaiCompatible":{"enabled":true}}}"#, "providers.openaiCompatible.baseURL is required"),
+            (#"{"providers":{"openaiCompatible":{"baseURL":"ftp://h/v1"}}}"#, "baseURL is not a valid http(s) URL"),
+            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h/v1?key=x"}}}"#, "baseURL must not contain a query"),
+            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"HOME"}}}"#, "must not name HOME"),
+            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"LC_KEY"}}}"#, "must not name LC_KEY"),
+            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"1KEY"}}}"#, "environment variable name"),
+            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"MY-KEY"}}}"#, "environment variable name"),
+            (#"{"providers":{"cursor":{"sandbox":"enabled"}}}"#, "providers.cursor.sandbox must be a boolean"),
+            (#"{"providers":{"cursor":{"trustWorkspace":"yes"}}}"#, "providers.cursor.trustWorkspace must be a boolean"),
+            (#"{"providers":{"cursor":{"mode":"ask"}}}"#, "providers.cursor.mode is not a known key"),
+            (#"{"providers":{"cursor":{"command":"bin/agent"}}}"#, "providers.cursor.command must be"),
+            (#"{"providers":{"cursor":{"apiKeyEnv":"PATH"}}}"#, "providers.cursor.apiKeyEnv must not name PATH"),
+            (#"{"defaultProvider":"cursor","providers":{"cursor":{}}}"#, "defaultProvider 'cursor' is not enabled")
+        ]
+        for (json, message) in cases {
+            XCTAssertThrowsError(try Self.providers(json), json) { error in
+                XCTAssertTrue(error is DirectHeadlessProviderConfigurationError, "\(error)")
+                let text = error.localizedDescription
+                XCTAssertTrue(text.contains("providers.json") && text.contains(message), "\(json): \(text)")
+            }
+        }
     }
 
     func testOracleRosterEntriesSelectProviderOnlyByKnownPrefix() throws {
@@ -294,41 +529,65 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             ("CLAUDECODE:opus", "claudeCode", "opus"),
             ("llama3:8b", "codexExec", "llama3:8b"),
             ("openaiCompatible:llama3:8b", "openaiCompatible", "llama3:8b"),
-            (" claudeCode : opus ", "claudeCode", "opus")
+            (" claudeCode : opus ", "claudeCode", "opus"),
+            ("cursor:gpt-5", "cursor", "gpt-5"),
+            ("Cursor:gpt-5", "cursor", "gpt-5")
         ]
         for (raw, providerID, modelID) in cases {
             XCTAssertEqual(
-                try DirectHeadlessOracleRosterResolver.modelReference(raw),
+                try DirectHeadlessOracleRosterResolver.modelReference(raw, defaultProviderID: "codexExec"),
                 try OracleModelReference(providerID: providerID, modelID: modelID)
             )
         }
-        XCTAssertThrowsError(try DirectHeadlessOracleRosterResolver.modelReference("claudeCode:"))
+        XCTAssertEqual(
+            try DirectHeadlessOracleRosterResolver.modelReference("sonnet", defaultProviderID: "claudeCode"),
+            try OracleModelReference(providerID: "claudeCode", modelID: "sonnet")
+        )
+        XCTAssertEqual(
+            try DirectHeadlessOracleRosterResolver.modelReference("gpt-5", defaultProviderID: "cursor"),
+            try OracleModelReference(providerID: "cursor", modelID: "gpt-5")
+        )
+        XCTAssertThrowsError(try DirectHeadlessOracleRosterResolver.modelReference("claudeCode:", defaultProviderID: "codexExec"))
     }
 
     func testOpenAICompatibleProviderNeedsAValidBaseURLAndKeepsTheKeyInTheHeader() throws {
         typealias Client = DirectHeadlessOpenAICompatibleClient
-        let unconfigured = DirectHeadlessProviderCoordinator.providerCatalog(environment: [:])[2]
+        let unconfigured = DirectHeadlessProviderCoordinator.providerCatalog(configuration: .builtIn, environment: [:])[2]
         XCTAssertEqual(unconfigured.id, "openaiCompatible")
         XCTAssertFalse(unconfigured.supportsAgentRuns)
         XCTAssertNil(unconfigured.backend)
         XCTAssertTrue(try XCTUnwrap(unconfigured.unavailableReason).contains("not configured"))
         for invalid in ["ftp://host/v1", "not a url", "http:///v1", "https://h/v1?key=x", "https://h/v1#frag"] {
-            XCTAssertNil(Client.configuration(from: [Client.baseURLKey: invalid]).configuration, invalid)
+            XCTAssertThrowsError(try Client.endpoint(baseURL: invalid), invalid)
         }
         for (raw, endpoint) in [
             ("https://h/v1/chat/completions", "https://h/v1/chat/completions"),
             ("https://h/v1/chat/completions/", "https://h/v1/chat/completions"),
             ("https://h", "https://h/chat/completions")
         ] {
-            XCTAssertEqual(Client.configuration(from: [Client.baseURLKey: raw]).configuration?.endpoint.absoluteString, endpoint)
+            XCTAssertEqual(try Client.endpoint(baseURL: raw).absoluteString, endpoint)
         }
 
-        let configured = try XCTUnwrap(Client.configuration(from: [
-            Client.baseURLKey: " http://127.0.0.1:11434/v1// ",
-            Client.apiKeyKey: "secret"
-        ]).configuration)
+        let entry = #"{"providers":{"openaiCompatible":{"enabled":true,"baseURL":" http://127.0.0.1:11434/v1// ","apiKeyEnv":"OPENAI_API_KEY"}}}"#
+        let configuration = try Self.providers(entry)
+        let disabledEntry = try Self.providers(#"{"providers":{"openaiCompatible":{"baseURL":"https://h/v1"}}}"#)
+        XCTAssertTrue(try XCTUnwrap(DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: disabledEntry,
+            environment: [:]
+        )[2].unavailableReason).contains("disabled"))
+        XCTAssertTrue(try XCTUnwrap(DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: configuration,
+            environment: [:]
+        )[2].unavailableReason).contains("apiKeyEnv 'OPENAI_API_KEY' is not set"))
+        let backend = try XCTUnwrap(DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: configuration,
+            environment: ["OPENAI_API_KEY": "secret"]
+        )[2].backend)
+        guard case let .openAICompatibleHTTP(configured) = backend else {
+            return XCTFail("expected the HTTP backend, got \(backend)")
+        }
         XCTAssertEqual(configured.endpoint.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
-        let backend = DirectHeadlessProviderCoordinator.ProviderDescriptor.Backend.openAICompatibleHTTP(configured)
+        XCTAssertEqual(configured.apiKey, "secret")
         for rendered in [String(describing: configured), String(reflecting: configured), String(describing: backend)] {
             XCTAssertTrue(rendered.contains("<set>"), rendered)
             XCTAssertFalse(rendered.contains("secret"), rendered)
@@ -344,18 +603,222 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertEqual(body["model"] as? String, "m")
         XCTAssertEqual(body["messages"] as? [[String: String]], [["role": "user", "content": "hi"]])
 
-        let keyless = try XCTUnwrap(Client.configuration(from: [Client.baseURLKey: "https://api.example/v1"]).configuration)
+        let keylessBackend = try DirectHeadlessProviderCoordinator.providerCatalog(
+            configuration: Self.providers(#"{"providers":{"openaiCompatible":{"enabled":true,"baseURL":"https://api.example/v1"}}}"#),
+            environment: ["OPENAI_API_KEY": "secret"]
+        )[2].backend
+        guard case let .openAICompatibleHTTP(keyless) = keylessBackend else {
+            return XCTFail("expected the keyless HTTP backend, got \(String(describing: keylessBackend))")
+        }
+        XCTAssertNil(keyless.apiKey)
         XCTAssertNil(
             try Client.makeRequest(configuration: keyless, model: "m", messages: [.init(role: "user", content: "hi")])
                 .value(forHTTPHeaderField: "Authorization")
         )
 
         let childEnvironment = DirectProcess.childEnvironment(
-            inherited: ["HOME": "/home", Client.apiKeyKey: "secret"],
-            overrides: [Client.apiKeyKey: "secret"]
+            inherited: ["HOME": "/home", "OPENAI_API_KEY": "secret"],
+            overrides: ["OPENAI_API_KEY": "secret"]
         )
         XCTAssertEqual(childEnvironment["HOME"], "/home")
-        XCTAssertNil(childEnvironment[Client.apiKeyKey])
+        XCTAssertNil(childEnvironment["OPENAI_API_KEY"])
+        XCTAssertFalse(childEnvironment.values.contains("secret"))
+    }
+
+    func testInvalidProvidersFileStopsStartupBeforeTheRuntimeStarts() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "providers-invalid")
+        defer { fixture.cleanup() }
+        for (json, expected) in [("{", "is not valid JSON"), (#"{"providers":{"codex":{}}}"#, "providers.codex is not a known key")] {
+            do {
+                _ = try await fixture.service(providersJSON: json).prepareRuntime()
+                XCTFail("\(json) must stop startup")
+            } catch let error as DirectHeadlessProviderConfigurationError {
+                XCTAssertTrue(error.localizedDescription.contains(expected), error.localizedDescription)
+            }
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.profile.appendingPathComponent("Workspaces").path))
+    }
+
+    func testProvidersFileInsideAWorkspaceRootIsRefusedAndFileToolsCannotReachIt() async throws {
+        let inside = try DirectHeadlessProviderFixture(name: "providers-inside-root")
+        defer { inside.cleanup() }
+        let nestedProfile = inside.root.appendingPathComponent("profile", isDirectory: true)
+        try FileManager.default.createDirectory(at: nestedProfile, withIntermediateDirectories: true)
+        let insideService = try inside.service(
+            extraEnvironment: ["REPOPROMPT_MCP_HEADLESS_PROFILE_DIR": nestedProfile.path]
+        )
+        do {
+            _ = try await insideService.prepareRuntime()
+            XCTFail("a providers file inside a working directory must stop startup")
+        } catch let error as DirectHeadlessProviderConfigurationError {
+            guard case let .insideWorkspaceRoot(path, root) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(path, nestedProfile.resolvingSymlinksInPath().appendingPathComponent("providers.json").path)
+            XCTAssertEqual(root, inside.root.resolvingSymlinksInPath().path)
+        }
+
+        let fixture = try DirectHeadlessProviderFixture(name: "providers-outside-root")
+        defer { fixture.cleanup() }
+        let service = try fixture.service()
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let original = try Data(contentsOf: fixture.providersFile)
+        let security = try await DirectHeadlessProviderFixture.securityContext(prepared)
+        let filesystem = DirectHeadlessFilesystemBackend(context: prepared.context)
+        let createRequest = try DomainPhysicalToolRequest(
+            argumentsJSON: JSONEncoder().encode([
+                "action": "create", "path": fixture.providersFile.path, "content": "{}", "if_exists": "overwrite"
+            ]),
+            securityContext: security
+        )
+        let editRequest = try DomainPhysicalToolRequest(
+            argumentsJSON: JSONEncoder().encode([
+                "path": fixture.providersFile.path, "search": "schemaVersion", "replace": "x"
+            ]),
+            securityContext: security
+        )
+        for attempt in [
+            { _ = try await filesystem.manageFiles(createRequest) },
+            { _ = try await filesystem.applyFileEdits(editRequest) }
+        ] as [() async throws -> Void] {
+            do {
+                try await attempt()
+                XCTFail("file tools must not reach the providers file")
+            } catch let error as DirectHeadlessDomainContext.Error {
+                guard case .pathOutsideWorkspace = error else { return XCTFail("\(error)") }
+            }
+        }
+        XCTAssertEqual(try Data(contentsOf: fixture.providersFile), original)
+
+        do {
+            try await prepared.context.validateWorkspaceRoots([fixture.profile.path])
+            XCTFail("a root containing the providers file must be refused")
+        } catch let error as DirectHeadlessDomainContext.Error {
+            guard case .protectedPathInsideWorkspaceRoot = error else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testProvidersFileLoaderFailsClosedOnAnythingButAMissingFile() throws {
+        typealias Loader = DirectHeadlessProviderConfigurationLoader
+        let storage = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-closed-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: storage, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: storage) }
+        let location = try Loader.location(environment: [:], storageDirectory: storage)
+        let file = storage.appendingPathComponent("providers.json")
+        func assertUnreadable(_ expected: String, line: UInt = #line) {
+            XCTAssertThrowsError(try Loader.load(location), line: line) { error in
+                guard case let .unreadable(_, detail)? = error as? DirectHeadlessProviderConfigurationError else {
+                    return XCTFail("\(error)", line: line)
+                }
+                XCTAssertTrue(detail.contains(expected), detail, line: line)
+            }
+        }
+
+        try Data(#"{"providers":{"claudeCode":{"enabled":true}}}"#.utf8).write(to: file)
+        for (mode, expected) in [(0o000, "Permission denied"), (0o620, "group- or world-writable"), (0o602, "group- or world-writable")] {
+            try FileManager.default.setAttributes([.posixPermissions: mode], ofItemAtPath: file.path)
+            assertUnreadable(expected)
+        }
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        XCTAssertTrue(try Loader.load(location).claude.enabled)
+
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createDirectory(at: file, withIntermediateDirectories: false)
+        assertUnreadable("not a regular file")
+        try FileManager.default.removeItem(at: file)
+        try FileManager.default.createSymbolicLink(atPath: file.path, withDestinationPath: storage.appendingPathComponent("absent").path)
+        assertUnreadable("symbolic links")
+        XCTAssertThrowsError(try Loader.canonicalPath("relative/providers.json")) { error in
+            guard case .unreadable? = error as? DirectHeadlessProviderConfigurationError else { return XCTFail("\(error)") }
+        }
+    }
+
+    func testProvidersOverlapCoversSymlinkedPrefixesAndBothEndsOfAnAlias() throws {
+        typealias Loader = DirectHeadlessProviderConfigurationLoader
+        let base = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-alias-\(UUID().uuidString)", isDirectory: true)
+        let (real, link, workspace, outside) = (
+            base.appendingPathComponent("real", isDirectory: true),
+            base.appendingPathComponent("link", isDirectory: true),
+            base.appendingPathComponent("workspace", isDirectory: true),
+            base.appendingPathComponent("outside", isDirectory: true)
+        )
+        for directory in [real, workspace, outside] {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+        defer { try? FileManager.default.removeItem(at: base) }
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: real)
+        func overlap(_ location: Loader.Location, _ root: URL) -> String? {
+            do {
+                try Loader.rejectWorkspaceRootOverlap(protectedPaths: location.protectedPaths, roots: [root])
+                return nil
+            } catch let DirectHeadlessProviderConfigurationError.insideWorkspaceRoot(path, _) {
+                return path
+            } catch {
+                return "unexpected \(error)"
+            }
+        }
+
+        let throughLink = try Loader.location(environment: [:], storageDirectory: link)
+        let realFile = real.resolvingSymlinksInPath().appendingPathComponent("providers.json").path
+        XCTAssertEqual(throughLink.canonicalPath, realFile)
+        XCTAssertEqual(overlap(throughLink, real), realFile)
+        XCTAssertEqual(overlap(throughLink, link), realFile)
+
+        let key = DirectHeadlessProviderConfiguration.fileEnvironmentKey
+        let target = outside.appendingPathComponent("providers.json")
+        try Data("{}".utf8).write(to: target)
+        let alias = workspace.appendingPathComponent("providers.json")
+        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: target)
+        let aliased = try Loader.location(environment: [key: alias.path], storageDirectory: real)
+        XCTAssertEqual(aliased.canonicalPath, target.resolvingSymlinksInPath().path)
+        XCTAssertEqual(overlap(aliased, workspace), workspace.resolvingSymlinksInPath().appendingPathComponent("providers.json").path)
+        XCTAssertEqual(try Loader.load(aliased), .builtIn)
+
+        let inner = workspace.appendingPathComponent("inner.json")
+        try Data("{}".utf8).write(to: inner)
+        let outerAlias = outside.appendingPathComponent("alias.json")
+        try FileManager.default.createSymbolicLink(at: outerAlias, withDestinationURL: inner)
+        let reversed = try Loader.location(environment: [key: outerAlias.path], storageDirectory: real)
+        XCTAssertEqual(overlap(reversed, workspace), inner.resolvingSymlinksInPath().path)
+        XCTAssertNil(overlap(reversed, outside.appendingPathComponent("unrelated", isDirectory: true)))
+    }
+
+    func testProfileStorageDirectoryIsProtectedEvenWhenTheProvidersFileLivesElsewhere() async throws {
+        let external = FileManager.default.temporaryDirectory
+            .appendingPathComponent("rp-providers-external-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: external, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: external) }
+        let providersFile = external.appendingPathComponent("providers.json")
+        try Data("{}".utf8).write(to: providersFile)
+        let key = DirectHeadlessProviderConfiguration.fileEnvironmentKey
+
+        let inside = try DirectHeadlessProviderFixture(name: "storage-inside-root")
+        defer { inside.cleanup() }
+        let nestedProfile = inside.root.appendingPathComponent("profile", isDirectory: true)
+        do {
+            _ = try await inside.service(extraEnvironment: [
+                "REPOPROMPT_MCP_HEADLESS_PROFILE_DIR": nestedProfile.path,
+                key: providersFile.path
+            ]).prepareRuntime()
+            XCTFail("a profile storage directory inside a working directory must stop startup")
+        } catch let error as DirectHeadlessProviderConfigurationError {
+            guard case let .insideWorkspaceRoot(path, _) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(path, nestedProfile.resolvingSymlinksInPath().path)
+        }
+
+        let fixture = try DirectHeadlessProviderFixture(name: "storage-outside-root")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(extraEnvironment: [key: providersFile.path])
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        do {
+            try await prepared.context.validateWorkspaceRoots([fixture.profile.path])
+            XCTFail("a root containing the profile storage directory must be refused")
+        } catch let error as DirectHeadlessDomainContext.Error {
+            guard case let .protectedPathInsideWorkspaceRoot(path, _) = error else { return XCTFail("\(error)") }
+            XCTAssertEqual(path, fixture.profile.resolvingSymlinksInPath().path)
+        }
     }
 
     func testOpenAICompatibleResponseParsingRedactsTheKeyFromErrors() throws {

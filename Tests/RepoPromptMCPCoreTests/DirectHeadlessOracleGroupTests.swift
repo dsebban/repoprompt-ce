@@ -9,7 +9,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testTwoAndFiveOracleStartsUsePhysicalLaneCarriersAndReturnLaneOrder() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "ordering")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -50,7 +50,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testGroupedResponseWhitespaceSurvivesMCPEncoding() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "exact-whitespace")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "exact", additional: ["lane-1"])
@@ -73,7 +73,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testEnabledClaudeRosterRunsDirectAndGroupedOracleWithLanePolicies() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "claude-roster")
         defer { fixture.cleanup() }
-        let service = fixture.service(claudeEnabled: true)
+        let service = try fixture.service(claudeEnabled: true)
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -125,7 +125,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testRosterNamingDisabledClaudeFailsBeforeAnyProviderLaunch() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "claude-disabled")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -149,10 +149,82 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         XCTAssertTrue(try fixture.calls().isEmpty)
     }
 
+    func testEnabledCursorRosterUsesForceForDirectOracleAndAskModeInGroupedLanes() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "cursor-roster")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(cursor: .init())
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        try await Self.setRoster(prepared, primary: "cursor:gpt-5", additional: [])
+        let direct = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("direct cursor")]
+        )
+        XCTAssertEqual(direct["response"] as? String, "cursor-0-gpt-5")
+        let continued = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "oracle_send",
+            arguments: ["chat_id": .string(XCTUnwrap(direct["chat_id"] as? String)), "message": .string("again")]
+        )
+        XCTAssertEqual(continued["response"] as? String, "cursor-0-gpt-5")
+
+        try await Self.setRoster(prepared, primary: "cursor:gpt-5", additional: ["lane-1"])
+        let grouped = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("grouped cursor")]
+        )
+        let lanes = try XCTUnwrap(grouped["oracle_results"] as? [[String: Any]])
+        XCTAssertEqual(lanes.compactMap { $0["response"] as? String }, ["cursor-0-gpt-5", "response-1-lane-1"])
+
+        let calls = try fixture.cursorCalls()
+        XCTAssertEqual(calls.count, 3)
+        let secure = ["-p", "--output-format", "json", "--sandbox", "enabled"]
+        XCTAssertEqual(calls.map(\.flags), [
+            secure + ["--force", "--model", "gpt-5"],
+            secure + ["--force", "--model", "gpt-5"],
+            secure + ["--mode", "ask", "--model", "gpt-5"]
+        ])
+        XCTAssertEqual(calls[1].prompt, "user: direct cursor\n\nassistant: cursor-0-gpt-5\n\nuser: again")
+        XCTAssertTrue(calls.allSatisfy { $0.stdinBytes == 0 && $0.positionalCount == 1 })
+        XCTAssertEqual(try fixture.calls().map(\.model), ["lane-1"])
+    }
+
+    func testRosterNamingDisabledCursorFailsBeforeAnyProviderLaunch() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "cursor-disabled")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(cursor: .init(enabled: false))
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        try await Self.setRoster(prepared, primary: "cursor:gpt-5", additional: ["lane-1"])
+        do {
+            _ = try await invoke(prepared: prepared, backend: backend, toolName: "ask_oracle", arguments: ["message": .string("x")])
+            XCTFail("Expected disabled Cursor to be refused")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("Cursor CLI is disabled"), "\(error)")
+        }
+        XCTAssertTrue(try fixture.cursorCalls().isEmpty)
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
     func testOpenAICompatibleRosterRunsDirectAndGroupedOracleOverHTTP() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "http-roster")
         defer { fixture.cleanup() }
-        let service = fixture.service(openAIConfigured: true)
+        let service = try fixture.service(openAIConfigured: true)
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -208,7 +280,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testOpenAICompatibleFailuresSurfaceWithoutTheKeyAndMisconfigurationSendsNothing() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "http-errors")
         defer { fixture.cleanup() }
-        let configured = fixture.service(openAIConfigured: true)
+        let configured = try fixture.service(openAIConfigured: true)
         let prepared = try await configured.prepareRuntime()
         addTeardownBlock { await configured.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -240,7 +312,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
 
         let unconfiguredFixture = try DirectHeadlessProviderFixture(name: "http-unconfigured")
         defer { unconfiguredFixture.cleanup() }
-        let unconfigured = unconfiguredFixture.service()
+        let unconfigured = try unconfiguredFixture.service()
         let unconfiguredPrepared = try await unconfigured.prepareRuntime()
         addTeardownBlock { await unconfigured.teardown(unconfiguredPrepared) }
         try await Self.setRoster(unconfiguredPrepared, primary: "openaiCompatible:gpt-test", additional: [])
@@ -264,7 +336,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testSingleOracleUsesDirectConversationWithoutDurableGroup() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "single-direct")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -323,7 +395,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testContextBuilderRejectsOraclePresetBeforeProviderWork() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "app-only-oracle-preset")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -352,7 +424,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testNamedDirectContinuationStaysSingleLaneAfterEnablingGroupedSettings() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "named-direct-grouped-settings")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -393,7 +465,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testShutdownClearsPreparedDirectPlanWithoutChangingMissingPlanError() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "shutdown-direct-sentinel")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -426,7 +498,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testDeletedContinuationAfterPlanningRetainsRosterConflictError() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "deleted-after-planning")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "lane-0", additional: ["lane-1"])
@@ -480,7 +552,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testMessageOnlyOracleSendUsesPrimaryDirectFallbackAndContinuesMostRecent() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "implicit-direct")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -518,7 +590,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testMessageOnlyOracleSendContinuesMostRecentCanonicalGroup() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "implicit-group")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -558,7 +630,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testLogAndMessageOnlySendChooseNewestDirectOrGroupConversation() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "latest-log")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -611,7 +683,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testImplicitDirectContinuationFreezesConversationAcrossPlanningBarrier() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "implicit-direct-frozen")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "default", additional: [])
@@ -685,7 +757,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testGroupContinuationThroughAdditionalMemberColdLoadsSiblingsAndLogsIdentity() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "continuation")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "lane-0", additional: ["lane-1"])
@@ -703,7 +775,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         let primaryID = try XCTUnwrap(firstLanes[0]["chat_id"] as? String)
         let additionalID = try XCTUnwrap(firstLanes[1]["chat_id"] as? String)
 
-        let coldService = fixture.service()
+        let coldService = try fixture.service()
         let cold = try await coldService.prepareRuntime()
         addTeardownBlock { await coldService.teardown(cold) }
         let coldBackend = DirectHeadlessConversationBackend(
@@ -742,7 +814,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testGroupContinuationReloadsAfterClaimWhenPriorPublisherAdvancesRevision() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "continuation-post-claim-reload")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "lane-0", additional: ["lane-1"])
@@ -804,7 +876,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testGroupContinuationRejectsMismatchedCarrierBeforeHistoryMutation() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "continuation-carrier")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "lane-0", additional: ["lane-1"])
@@ -849,7 +921,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testPartialAndPrimaryFailuresRemainOrderedStructuredResults() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "failures")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let backend = DirectHeadlessConversationBackend(
@@ -896,7 +968,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testTerminalReconciliationFailureRetriesCanonicalOutcomeWithoutSyntheticSettlement() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "terminal-save")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let store = TerminalPublicationFaultOracleStore(
@@ -949,7 +1021,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testTwoTerminalReconciliationFailuresRecoverExactOutcomeOnContinuation() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "terminal-two-failures")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let store = TerminalPublicationFaultOracleStore(
@@ -1029,7 +1101,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testTerminalReconciliationCommitThenThrowReturnsAndPreservesExactOutcome() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "terminal-commit-throw")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let store = TerminalPublicationFaultOracleStore(
@@ -1103,7 +1175,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testTerminalStageCommitThenPersistenceThrowReturnsExactOutcome() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "terminal-stage-commit-throw")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let store = TerminalPublicationFaultOracleStore(
@@ -1139,7 +1211,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testFailedStageAndTransientReconcileRetrySameIntent() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "terminal-restage")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let store = TerminalPublicationFaultOracleStore(
@@ -1176,7 +1248,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testFailedRestagingPreservesUnderlyingErrorWhenNothingWasStaged() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "terminal-restage-fails")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         let store = TerminalPublicationFaultOracleStore(
@@ -1213,7 +1285,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testRosterConflictAndRawContextBuilderGateFailBeforeProviderDispatch() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "gates")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "lane-0", additional: ["lane-1"])
@@ -1263,7 +1335,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testThreeOracleContextBuilderUsesOnePersistedCanonicalFrozenPack() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "frozen-context")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "lane-0", additional: ["lane-1", "lane-2"])
@@ -1300,7 +1372,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
     func testParentCancellationDrainsAllPhysicalLaneProcesses() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "cancellation")
         defer { fixture.cleanup() }
-        let service = fixture.service()
+        let service = try fixture.service()
         let prepared = try await service.prepareRuntime()
         addTeardownBlock { await service.teardown(prepared) }
         try await Self.setRoster(prepared, primary: "cancel-0", additional: ["cancel-1"])
