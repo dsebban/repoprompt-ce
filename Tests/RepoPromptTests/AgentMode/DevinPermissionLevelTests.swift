@@ -221,6 +221,128 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertEqual(outcome["optionId"], "reject_once")
     }
 
+    /// A permission request that echoes a cached toolCallId but supplies its own
+    /// conflicting title/rawInput must not inherit the cached `_meta` RepoPrompt
+    /// identity — auto-approval must fall through to the user.
+    func testSparsePermissionDoesNotInheritMetaFromConflictingToolCall() async throws {
+        let directory = try makeTestDirectory(name: "DevinConflictingToolPermission")
+        let executable = directory.appendingPathComponent("devin")
+        let record = directory.appendingPathComponent("permission.json")
+        let script = #"""
+        #!/usr/bin/env python3
+        import json
+        import sys
+        def send(message):
+            print(json.dumps({"jsonrpc": "2.0", **message}), flush=True)
+        prompt_id = None
+        for line in sys.stdin:
+            request = json.loads(line)
+            method = request.get("method")
+            if method == "initialize":
+                send({"id": request["id"], "result": {"agentCapabilities": {}, "authMethods": []}})
+            elif method == "session/new":
+                send({"id": request["id"], "result": {"sessionId": "test-session"}})
+            elif method == "session/prompt":
+                prompt_id = request["id"]
+                send({"method": "session/update", "params": {"sessionId": "test-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "RepoPrompt roots",
+                    "kind": "read", "rawInput": {"type": "roots", "serverName": "RepoPromptCE"},
+                    "_meta": {"cognition.ai/toolName": "mcp__RepoPromptCE__get_file_tree"}
+                }}})
+                send({"method": "session/update", "params": {"sessionId": "test-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "tool-2", "title": "RepoPrompt tree",
+                    "kind": "read", "rawInput": {"type": "roots", "serverName": "RepoPromptCE"}
+                }}})
+                send({"method": "session/update", "params": {"sessionId": "test-session", "update": {
+                    "sessionUpdate": "tool_call", "toolCallId": "tool-3", "title": "RepoPrompt roots",
+                    "kind": "read", "rawInput": {"type": "roots"},
+                    "_meta": {"cognition.ai/toolName": "mcp__RepoPromptCE__get_file_tree"}
+                }}})
+                send({"method": "session/update", "params": {"sessionId": "test-session", "update": {
+                    "sessionUpdate": "tool_call_update", "toolCallId": "tool-3",
+                    "rawInput": {"serverName": "RepoPromptCE"}
+                }}})
+                send({"id": "permission-1", "method": "session/request_permission", "params": {
+                    "sessionId": "test-session", "toolCall": {
+                        "toolCallId": "tool-1", "title": "Shell command",
+                        "kind": "execute"
+                    },
+                    "options": [{"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                                {"optionId": "reject_once", "kind": "reject_once", "name": "Decline"}]
+                }})
+            elif request.get("id") == "permission-1":
+                with open(r"\#(record.path)", "w", encoding="utf-8") as output:
+                    json.dump(request.get("result"), output)
+                send({"id": "permission-2", "method": "session/request_permission", "params": {
+                    "sessionId": "test-session", "toolCall": {
+                        "toolCallId": "tool-2", "title": "Shell command",
+                        "kind": "execute"
+                    },
+                    "options": [{"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                                {"optionId": "reject_once", "kind": "reject_once", "name": "Decline"}]
+                }})
+            elif request.get("id") == "permission-2":
+                send({"id": "permission-3", "method": "session/request_permission", "params": {
+                    "sessionId": "test-session", "toolCall": {
+                        "toolCallId": "tool-3", "title": "Shell command",
+                        "kind": "execute"
+                    },
+                    "options": [{"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                                {"optionId": "reject_once", "kind": "reject_once", "name": "Decline"}]
+                }})
+            elif request.get("id") == "permission-3":
+                send({"id": "permission-4", "method": "session/request_permission", "params": {
+                    "sessionId": "test-session", "toolCall": {
+                        "toolCallId": "tool-1",
+                        "_meta": {"cognition.ai/toolName": "shell"}
+                    },
+                    "options": [{"optionId": "allow_once", "kind": "allow_once", "name": "Allow"},
+                                {"optionId": "reject_once", "kind": "reject_once", "name": "Decline"}]
+                }})
+            elif request.get("id") == "permission-4":
+                send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
+        """#
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let request = makeRequest(workspacePath: directory.path)
+        let controller = try ACPAgentSessionController(
+            provider: DevinACPAgentProvider(config: DevinAgentConfig(
+                commandName: executable.path,
+                includeRepoPromptMCPServer: false
+            )),
+            runRequest: request
+        )
+        do {
+            _ = try await controller.bootstrap()
+            let events = await controller.events
+            let responder = Task {
+                var surfaced = 0
+                for await event in events {
+                    if case let .approvalRequested(approval) = event {
+                        await controller.respondToPermissionRequest(id: approval.requestID.displayValue, decision: .decline)
+                        surfaced += 1
+                        if surfaced == 4 { return surfaced }
+                    }
+                }
+                return surfaced
+            }
+            try await controller.prompt(AgentMessage(userMessage: "Run"), request: request)
+            responder.cancel()
+            let requestedApprovals = await responder.value
+            XCTAssertEqual(
+                requestedApprovals, 4,
+                "conflicting or uncorroborated tool identity must surface to the user, not auto-approve"
+            )
+            await controller.shutdown()
+        } catch {
+            await controller.shutdown()
+            throw error
+        }
+        let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: record)) as? [String: Any])
+        let outcome = try XCTUnwrap(response["outcome"] as? [String: String])
+        XCTAssertEqual(outcome["optionId"], "reject_once")
+    }
+
     func testExplicitDevinPermissionUsesExactIDsOrCancels() async throws {
         for (options, decision, expectedID) in [
             (#"[{"optionId":"ALLOW_ONCE","kind":"allow_once"},{"optionId":"allow_session","kind":"allow_always"}]"#, AgentApprovalDecision.accept, nil),

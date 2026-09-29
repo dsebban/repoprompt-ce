@@ -1911,8 +1911,25 @@ actor ACPAgentSessionController {
         }
 
         let toolCallID = (toolCall["toolCallId"] as? String) ?? UUID().uuidString
-        var resolvedToolCall = recentDevinToolCalls[toolCallID] ?? [:]
+        let cachedToolCall = recentDevinToolCalls[toolCallID] ?? [:]
+        var resolvedToolCall = cachedToolCall
         resolvedToolCall.merge(toolCall) { _, requestValue in requestValue }
+        // The cached tool call is the authorization context auto-approval matches on
+        // (`_meta` RepoPrompt identity, `rawInput` server identifier). Trust it only
+        // when the request does not contradict it: a same-ID request that supplies its
+        // own identity fields must not inherit ANY of the earlier call's authorization
+        // evidence unless every supplied field is corroborated by the cache, so the
+        // whole cached entry is discarded on divergence or partial corroboration.
+        let identityKeys = ["title", "kind", "rawInput", "_meta"]
+        let requestSuppliesIdentity = identityKeys.contains { toolCall[$0] != nil }
+        let identityDiverges = identityKeys.contains { key in
+            guard let requestValue = toolCall[key] else { return false }
+            guard let cachedValue = cachedToolCall[key] else { return true }
+            return serializeJSON(requestValue) != serializeJSON(cachedValue)
+        }
+        if requestSuppliesIdentity, identityDiverges {
+            resolvedToolCall = toolCall
+        }
         let toolTitle = (resolvedToolCall["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
         let toolKind = (resolvedToolCall["kind"] as? String)?.lowercased()
         let rawInputJSON = serializeJSON(resolvedToolCall["rawInput"])
