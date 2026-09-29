@@ -159,6 +159,318 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         )
     }
 
+    func testCodexResumeKeepsExecSandboxFlagsBeforeTheResumeSubcommand() {
+        let arguments = DirectHeadlessProviderCoordinator.codexExecArguments(
+            model: "gpt-test",
+            purpose: .agent,
+            resumeThreadID: "thread-1"
+        )
+
+        XCTAssertEqual(arguments, [
+            "--model", "gpt-test",
+            "exec", "--skip-git-repo-check", "--sandbox", "workspace-write", "--json",
+            "resume", "-c", "sandbox_mode=\"workspace-write\"", "--", "thread-1", "-"
+        ])
+        XCTAssertEqual(
+            DirectHeadlessProviderCoordinator.codexExecArguments(model: nil, purpose: .oracleGroup, resumeThreadID: "t")
+                .suffix(6),
+            ["resume", "-c", "sandbox_mode=\"read-only\"", "--", "t", "-"]
+        )
+    }
+
+    func testProviderSessionIDsThatCouldBeReadAsFlagsAreNeverResumable() throws {
+        typealias Coordinator = DirectHeadlessProviderCoordinator
+        for valid in ["01a0ea60-5090-7db0-bc58-3a491997c9ac", "thread_1.a-b"] {
+            XCTAssertEqual(Coordinator.resumableSessionID(valid), valid)
+        }
+        for invalid in [nil, "", "--last", "-x", "a b", "a=b", "a/b", "é", String(repeating: "a", count: 257)] {
+            XCTAssertNil(Coordinator.resumableSessionID(invalid), invalid ?? "nil")
+        }
+        let flagThread = #"{"type":"thread.started","thread_id":"--dangerously-bypass-approvals-and-sandbox"}"#
+        XCTAssertNil(Coordinator.codexTurnOutput(from: flagThread).providerSessionID)
+        XCTAssertNil(try DirectHeadlessClaudeCodeCLI.parseTurnOutput(
+            #"{"type":"result","is_error":false,"result":"ok","session_id":"--continue"}"#
+        ).providerSessionID)
+    }
+
+    func testHeadlessAcceptsSteerOnlyForAgentRun() throws {
+        let steer: [String: Value] = ["op": .string("steer"), "message": .string("again")]
+
+        XCTAssertEqual(try DirectHeadlessMCPService.validatedCallArguments(toolName: "agent_run", arguments: steer), steer)
+        for (tool, op) in [("agent_explore", "steer"), ("agent_run", "respond")] {
+            XCTAssertThrowsError(try DirectHeadlessMCPService.validatedCallArguments(
+                toolName: tool,
+                arguments: ["op": .string(op)]
+            )) { error in
+                XCTAssertTrue(String(describing: error).contains("op must be one of"), "\(error)")
+            }
+        }
+    }
+
+    func testCodexTurnOutputKeepsAssistantTextAndCapturesThreadID() {
+        let output = DirectHeadlessProviderCoordinator.codexTurnOutput(from: """
+        {"type":"thread.started","thread_id":"thread-1"}
+        {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"  answer  "}}
+        {"type":"turn.completed"}
+        """)
+
+        XCTAssertEqual(output, .init(assistantText: "  answer  ", providerSessionID: "thread-1"))
+        XCTAssertEqual(
+            DirectHeadlessProviderCoordinator.codexTurnOutput(from: "  plain text\n"),
+            .init(assistantText: "plain text", providerSessionID: nil)
+        )
+    }
+
+    func testClaudeArgumentsUseUserSettingsOnlyAndDenyBashInEveryLane() {
+        let purposes: [DirectHeadlessProviderCoordinator.ExecutionPurpose] = [.agent, .directOracle, .oracleGroup]
+        for purpose in purposes {
+            let arguments = DirectHeadlessClaudeCodeCLI.arguments(model: "default", purpose: purpose)
+            let expectedTools = purpose == .oracleGroup ? "Read,Glob,Grep" : "Read,Glob,Grep,Edit,Write"
+            XCTAssertEqual(arguments, [
+                "-p",
+                "--output-format", "json",
+                "--setting-sources", "user",
+                "--settings", #"{"disableAllHooks":true}"#,
+                "--strict-mcp-config",
+                "--permission-mode", "dontAsk",
+                "--tools", expectedTools,
+                "--allowedTools", expectedTools,
+                "--disallowedTools", "Bash"
+            ])
+        }
+        XCTAssertEqual(
+            Array(DirectHeadlessClaudeCodeCLI.arguments(model: "opus", purpose: .agent, resumeSessionID: "s-1").suffix(4)),
+            ["--model", "opus", "--resume", "s-1"]
+        )
+    }
+
+    func testClaudeParserReadsTerminalResultAndRejectsErrorsOrMissingResult() throws {
+        let output = try DirectHeadlessClaudeCodeCLI.parseTurnOutput("""
+        stderr warning
+        {"type":"result","subtype":"success","is_error":false,"result":"  answer  ","session_id":"s-1"}
+        """)
+        XCTAssertEqual(output, .init(assistantText: "  answer  ", providerSessionID: "s-1"))
+
+        XCTAssertThrowsError(try DirectHeadlessClaudeCodeCLI.parseTurnOutput(
+            #"{"type":"result","subtype":"error_max_turns","is_error":true,"session_id":"s-1"}"#
+        )) { error in
+            XCTAssertTrue(String(describing: error).contains("error_max_turns"), "\(error)")
+        }
+        XCTAssertThrowsError(try DirectHeadlessClaudeCodeCLI.parseTurnOutput("not json\n")) { error in
+            XCTAssertTrue(String(describing: error).contains("no result"), "\(error)")
+        }
+    }
+
+    func testProviderCatalogKeepsCodexDefaultAndRequiresOperatorOptInForClaude() throws {
+        let executable = "/bin/sh"
+        let disabled = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
+            "REPOPROMPT_CODEX_COMMAND": executable,
+            "REPOPROMPT_CLAUDE_COMMAND": executable
+        ])
+        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode", "openaiCompatible"])
+        XCTAssertEqual(disabled[0].backend, .codexCLI(executable: executable))
+        XCTAssertNil(disabled[1].backend)
+        XCTAssertTrue(try XCTUnwrap(disabled[1].unavailableReason).contains("disabled"))
+
+        let missing = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
+            "REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED": "1",
+            "REPOPROMPT_CLAUDE_COMMAND": "missing-claude-\(UUID().uuidString)",
+            "PATH": "/nonexistent"
+        ])
+        XCTAssertNil(missing[1].backend)
+        XCTAssertTrue(try XCTUnwrap(missing[1].unavailableReason).contains("not found"))
+
+        let enabled = DirectHeadlessProviderCoordinator.providerCatalog(environment: [
+            "REPOPROMPT_MCP_HEADLESS_CLAUDE_ENABLED": "TRUE",
+            "REPOPROMPT_CLAUDE_COMMAND": executable
+        ])
+        XCTAssertEqual(enabled[1].backend, .claudeCLI(executable: executable))
+    }
+
+    func testOracleRosterEntriesSelectProviderOnlyByKnownPrefix() throws {
+        let cases: [(String, String, String)] = [
+            ("o3", "codexExec", "o3"),
+            ("claudeCode:opus", "claudeCode", "opus"),
+            ("CLAUDECODE:opus", "claudeCode", "opus"),
+            ("llama3:8b", "codexExec", "llama3:8b"),
+            ("openaiCompatible:llama3:8b", "openaiCompatible", "llama3:8b"),
+            (" claudeCode : opus ", "claudeCode", "opus")
+        ]
+        for (raw, providerID, modelID) in cases {
+            XCTAssertEqual(
+                try DirectHeadlessOracleRosterResolver.modelReference(raw),
+                try OracleModelReference(providerID: providerID, modelID: modelID)
+            )
+        }
+        XCTAssertThrowsError(try DirectHeadlessOracleRosterResolver.modelReference("claudeCode:"))
+    }
+
+    func testOpenAICompatibleProviderNeedsAValidBaseURLAndKeepsTheKeyInTheHeader() throws {
+        typealias Client = DirectHeadlessOpenAICompatibleClient
+        let unconfigured = DirectHeadlessProviderCoordinator.providerCatalog(environment: [:])[2]
+        XCTAssertEqual(unconfigured.id, "openaiCompatible")
+        XCTAssertFalse(unconfigured.supportsAgentRuns)
+        XCTAssertNil(unconfigured.backend)
+        XCTAssertTrue(try XCTUnwrap(unconfigured.unavailableReason).contains("not configured"))
+        for invalid in ["ftp://host/v1", "not a url", "http:///v1", "https://h/v1?key=x", "https://h/v1#frag"] {
+            XCTAssertNil(Client.configuration(from: [Client.baseURLKey: invalid]).configuration, invalid)
+        }
+        for (raw, endpoint) in [
+            ("https://h/v1/chat/completions", "https://h/v1/chat/completions"),
+            ("https://h/v1/chat/completions/", "https://h/v1/chat/completions"),
+            ("https://h", "https://h/chat/completions")
+        ] {
+            XCTAssertEqual(Client.configuration(from: [Client.baseURLKey: raw]).configuration?.endpoint.absoluteString, endpoint)
+        }
+
+        let configured = try XCTUnwrap(Client.configuration(from: [
+            Client.baseURLKey: " http://127.0.0.1:11434/v1// ",
+            Client.apiKeyKey: "secret"
+        ]).configuration)
+        XCTAssertEqual(configured.endpoint.absoluteString, "http://127.0.0.1:11434/v1/chat/completions")
+        let backend = DirectHeadlessProviderCoordinator.ProviderDescriptor.Backend.openAICompatibleHTTP(configured)
+        for rendered in [String(describing: configured), String(reflecting: configured), String(describing: backend)] {
+            XCTAssertTrue(rendered.contains("<set>"), rendered)
+            XCTAssertFalse(rendered.contains("secret"), rendered)
+        }
+        var dumped = ""
+        dump(configured, to: &dumped)
+        XCTAssertFalse(dumped.contains("secret"), dumped)
+        let request = try Client.makeRequest(configuration: configured, model: "m", messages: [.init(role: "user", content: "hi")])
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer secret")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: Any])
+        XCTAssertEqual(body["model"] as? String, "m")
+        XCTAssertEqual(body["messages"] as? [[String: String]], [["role": "user", "content": "hi"]])
+
+        let keyless = try XCTUnwrap(Client.configuration(from: [Client.baseURLKey: "https://api.example/v1"]).configuration)
+        XCTAssertNil(
+            try Client.makeRequest(configuration: keyless, model: "m", messages: [.init(role: "user", content: "hi")])
+                .value(forHTTPHeaderField: "Authorization")
+        )
+
+        let childEnvironment = DirectProcess.childEnvironment(
+            inherited: ["HOME": "/home", Client.apiKeyKey: "secret"],
+            overrides: [Client.apiKeyKey: "secret"]
+        )
+        XCTAssertEqual(childEnvironment["HOME"], "/home")
+        XCTAssertNil(childEnvironment[Client.apiKeyKey])
+    }
+
+    func testOpenAICompatibleResponseParsingRedactsTheKeyFromErrors() throws {
+        typealias Client = DirectHeadlessOpenAICompatibleClient
+        let configuration = try Client.Configuration(endpoint: XCTUnwrap(URL(string: "http://h/v1/chat/completions")), apiKey: "secret")
+        let ok = try Client.parseResponse(
+            data: Data(#"{"choices":[{"message":{"content":"  answer  "}}]}"#.utf8),
+            statusCode: 200,
+            configuration: configuration
+        )
+        XCTAssertEqual(ok, .init(assistantText: "  answer  ", providerSessionID: nil))
+
+        let failures: [(String, Int, String)] = [
+            (#"{"error":{"message":"bad key secret"}}"#, 401, "HTTP 401: bad key [redacted]"),
+            ("upstream exploded", 500, "HTTP 500: upstream exploded"),
+            ("<html>", 200, "no assistant content"),
+            (#"{"choices":[]}"#, 200, "no assistant content")
+        ]
+        for (body, status, expected) in failures {
+            XCTAssertThrowsError(try Client.parseResponse(data: Data(body.utf8), statusCode: status, configuration: configuration)) {
+                let text = String(describing: $0)
+                XCTAssertTrue(text.contains(expected), text)
+                XCTAssertFalse(text.contains("secret"), text)
+            }
+        }
+    }
+
+    func testOpenAICompatibleErrorsRedactAKeyThatStraddlesTheTruncationLimit() throws {
+        typealias Client = DirectHeadlessOpenAICompatibleClient
+        let key = "sk-straddling-secret-key"
+        let configuration = try Client.Configuration(endpoint: XCTUnwrap(URL(string: "http://h/v1/chat/completions")), apiKey: key)
+        // "HTTP 502: " plus the padding puts the key across the 500-character cut.
+        let padding = String(repeating: "x", count: Client.errorDetailLimit - "HTTP 502: ".count - 8)
+        for body in [padding + key + " trailing", #"{"error":{"message":"\#(padding + key)"}}"#] {
+            XCTAssertThrowsError(try Client.parseResponse(data: Data(body.utf8), statusCode: 502, configuration: configuration)) {
+                let text = String(describing: $0)
+                XCTAssertFalse(text.contains("sk-strad"), text)
+                XCTAssertTrue(text.contains("[red"), text)
+                XCTAssertLessThan(text.count, Client.errorDetailLimit + 100, text)
+            }
+        }
+    }
+
+    func testOpenAICompatibleClientRefusesCrossHostRedirectsWithoutSendingTheKey() async throws {
+        let client = DirectHeadlessHTTPStub.client()
+        let host = "redirect-source.stub.invalid"
+        let configuration = try DirectHeadlessOpenAICompatibleClient.Configuration(
+            endpoint: XCTUnwrap(URL(string: "http://\(host)/v1/chat/completions")),
+            apiKey: "redirect-secret"
+        )
+        do {
+            _ = try await client.complete(configuration: configuration, model: "http-redirect", messages: [.init(role: "user", content: "hi")])
+            XCTFail("Expected the redirect response to fail the turn")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("HTTP 307"), "\(error)")
+        }
+        XCTAssertEqual(DirectHeadlessHTTPStub.requests(host: host).count, 1)
+        XCTAssertTrue(DirectHeadlessHTTPStub.requests(host: DirectHeadlessHTTPStub.redirectTargetHost).isEmpty)
+    }
+
+    func testOpenAICompatibleRequestCancellationStopsTheInFlightCall() async throws {
+        let client = DirectHeadlessHTTPStub.client()
+        let configuration = try DirectHeadlessOpenAICompatibleClient.Configuration(
+            endpoint: XCTUnwrap(URL(string: "http://cancel.stub.invalid/v1/chat/completions")),
+            apiKey: nil
+        )
+        let task = Task {
+            try await client.complete(configuration: configuration, model: "http-hang", messages: [.init(role: "user", content: "wait")])
+        }
+        while DirectHeadlessHTTPStub.requests(host: "cancel.stub.invalid").isEmpty {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected cancellation")
+        } catch is CancellationError {}
+    }
+
+    func testChildProcessWithoutInputSeesEndOfFileInsteadOfParentStdin() async throws {
+        var descriptors = [Int32](repeating: -1, count: 2)
+        XCTAssertEqual(Darwin.pipe(&descriptors), 0)
+        let savedStdin = dup(STDIN_FILENO)
+        XCTAssertGreaterThanOrEqual(savedStdin, 0)
+        XCTAssertEqual(dup2(descriptors[0], STDIN_FILENO), STDIN_FILENO)
+        defer {
+            dup2(savedStdin, STDIN_FILENO)
+            close(savedStdin)
+            close(descriptors[0])
+            close(descriptors[1])
+        }
+
+        let run = Task {
+            try await DirectProcess.run("/bin/sh", arguments: ["-c", "/bin/cat >/dev/null; echo done"])
+        }
+        let timeout = Task {
+            try await Task.sleep(for: .seconds(5))
+            run.cancel()
+        }
+        defer { timeout.cancel() }
+        let output = try await run.value
+        XCTAssertEqual(output.trimmingCharacters(in: .whitespacesAndNewlines), "done")
+    }
+
+    func testChildEnvironmentKeepsClaudeConfigurationButDropsCredentials() {
+        let environment = DirectProcess.childEnvironment(
+            inherited: ["ANTHROPIC_API_KEY": "inherited", "CLAUDE_CONFIG_DIR": "/config", "HOME": "/home"],
+            overrides: ["ANTHROPIC_API_KEY": "override", "CLAUDE_CODE_OAUTH_TOKEN": "token"]
+        )
+
+        XCTAssertEqual(environment["CLAUDE_CONFIG_DIR"], "/config")
+        XCTAssertNil(environment["ANTHROPIC_API_KEY"])
+        XCTAssertNil(environment["CLAUDE_CODE_OAUTH_TOKEN"])
+    }
+
     func testGroupedOracleChildPolicyIsStrictlyReadOnly() {
         let groupID = OracleGroupID()
         let restricted = DirectHeadlessMCPService.childRestrictedToolNames(

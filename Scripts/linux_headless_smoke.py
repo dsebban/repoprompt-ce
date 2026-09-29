@@ -4,20 +4,28 @@
 Usage: python3 Scripts/linux_headless_smoke.py <path-to-repoprompt-mcp>
 
 Creates a throwaway repo and isolated headless profile, then checks:
-  1. initialize            5. `policy grant` for this driver's fingerprint (under a PTY)
-  2. tools/list            6. the same create is allowed after the grant
-  3. read_file             7. apply_edits is allowed after the grant
-  4. create denied with    8. stdin EOF exits cleanly
-     grantMissing
+  1. initialize             8. apply_edits is allowed after the grant
+  2. tools/list             9. ask_oracle answers through the openaiCompatible HTTP provider
+  3. read_file                 (a local stub server; exercises FoundationNetworking)
+  4. create denied with    10. a redirect to another origin is refused and gets no key
+     grantMissing          11. agent_run refuses disabled claudeCode and Oracle-only
+  5. agent_run steer           openaiCompatible
+     denied with           12. agent_run start, then steer resumes the stub Codex thread
+     grantMissing              in the same working directory
+  6. `policy grant` for    13. stdin EOF exits cleanly
+     this driver (PTY)
+  7. the same create is allowed after the grant
 plus: a parent whose image was unlinked is never fingerprinted through a decoy file
 named "<path> (deleted)". Exits non-zero at the first failure. Python stdlib only.
 """
 
 import hashlib
+import http.server
 import json
 import os
 import pty
 import queue
+import re
 import select
 import shutil
 import subprocess
@@ -27,10 +35,58 @@ import threading
 
 TIMEOUT_SECONDS = 60
 DELETED_IMAGE_FLAG = "--as-deleted-image"
+# Answers FIRST_TURN, or RESUMED when invoked as `exec ... resume -c sandbox_mode=... -- smoke-thread -`,
+# followed by its physical working directory.
+CODEX_STUB = """#!/bin/sh
+cat >/dev/null
+case " $* " in *" resume -c sandbox_mode=\\"workspace-write\\" -- smoke-thread "*) text=RESUMED ;; *) text=FIRST_TURN ;; esac
+printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s cwd=%s"}\\n' "$text" "$(pwd -P)"
+"""
 
 
 class SmokeFailure(Exception):
     pass
+
+
+class RedirectTarget(http.server.BaseHTTPRequestHandler):
+    """Records every request that reaches the other origin."""
+
+    hits = []
+
+    def do_POST(self):
+        RedirectTarget.hits.append(self.headers.get("Authorization"))
+        self.send_response(500)
+        self.end_headers()
+
+    def log_message(self, *_):
+        pass
+
+
+class ChatCompletionsStub(http.server.BaseHTTPRequestHandler):
+    """Answers only an authorized POST /v1/chat/completions; model `redirect-model` redirects."""
+
+    redirect_port = 0
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
+        if body.get("model") == "redirect-model":
+            self.send_response(307)
+            self.send_header("Location", f"http://127.0.0.1:{self.redirect_port}/v1/chat/completions")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        ok = self.path == "/v1/chat/completions" and self.headers.get("Authorization") == "Bearer smoke-key"
+        reply = ({"choices": [{"message": {"content": f"HTTP_ORACLE_OK {body.get('model')}"}}]} if ok
+                 else {"error": {"message": f"unexpected {self.path}"}})
+        data = json.dumps(reply).encode()
+        self.send_response(200 if ok else 400)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def log_message(self, *_):
+        pass
 
 
 def headless_env(base):
@@ -124,7 +180,8 @@ def policy_grant(binary, env, fingerprint, root):
     master, slave = pty.openpty()
     proc = subprocess.Popen(
         [binary, "policy", "grant", "--principal-fingerprint", fingerprint,
-         "--operation", "file_actions.create", "--operation", "apply_edits.*",
+         "--operation", "file_actions.create", "--operation", "apply_edits.*", "--operation", "ask_oracle.*",
+         "--operation", "agent_run.*",
          "--root", root, "--expires-in", "600"],
         stdin=slave, stderr=slave, stdout=subprocess.PIPE, env=env,
     )
@@ -146,6 +203,17 @@ def policy_grant(binary, env, fingerprint, root):
 
 def run_smoke(binary, base):
     env = headless_env(base)
+    stub = http.server.ThreadingHTTPServer(("127.0.0.1", 0), ChatCompletionsStub)
+    other_origin = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectTarget)
+    ChatCompletionsStub.redirect_port = other_origin.server_address[1]
+    for httpd in (stub, other_origin):
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    env["REPOPROMPT_MCP_HEADLESS_OPENAI_BASE_URL"] = f"http://127.0.0.1:{stub.server_address[1]}/v1"
+    env["REPOPROMPT_MCP_HEADLESS_OPENAI_API_KEY"] = "smoke-key"
+    env["REPOPROMPT_CODEX_COMMAND"] = os.path.join(base, "codex-stub")
+    with open(env["REPOPROMPT_CODEX_COMMAND"], "w") as handle:
+        handle.write(CODEX_STUB)
+    os.chmod(env["REPOPROMPT_CODEX_COMMAND"], 0o700)
     repo = env["REPOPROMPT_MCP_WORKING_DIRS"]
     hello, created = os.path.join(repo, "hello.txt"), os.path.join(repo, "new.txt")
     with open(hello, "w") as handle:
@@ -153,33 +221,63 @@ def run_smoke(binary, base):
     server = HeadlessServer(binary, env, os.path.join(base, "server.stderr"))
 
     info = server.initialize().get("result", {}).get("serverInfo", {})
-    require("1/8 initialize", info.get("name") == "RepoPrompt CE", f"serverInfo={info}")
+    require("1/13 initialize", info.get("name") == "RepoPrompt CE", f"serverInfo={info}")
 
     tools = {tool["name"] for tool in server.request("tools/list", {}).get("result", {}).get("tools", [])}
     expected = {"read_file", "get_file_tree", "file_search", "file_actions", "apply_edits"}
-    require("2/8 tools/list", expected <= tools, f"missing {sorted(expected - tools)} from {sorted(tools)}")
+    require("2/13 tools/list", expected <= tools, f"missing {sorted(expected - tools)} from {sorted(tools)}")
 
     is_error, text = server.call_tool("read_file", {"path": hello})
-    require("3/8 read_file", not is_error and "hello linux" in text, text[:200])
+    require("3/13 read_file", not is_error and "hello linux" in text, text[:200])
 
     create = {"action": "create", "path": created, "content": "created\n"}
     is_error, text = server.call_tool("file_actions", create)
-    require("4/8 create denied with grantMissing",
+    require("4/13 create denied with grantMissing",
             is_error and "grantMissing" in text and not os.path.exists(created), text[:200])
 
+    is_error, text = server.call_tool("agent_run", {"op": "steer", "session_id": "00000000-0000-0000-0000-000000000000",
+                                                    "message": "again"})
+    require("5/13 agent_run steer denied with grantMissing", is_error and "grantMissing" in text, text[:200])
+
     rc, out, prompt = policy_grant(binary, env, driver_fingerprint(), repo)
-    require("5/8 policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
+    require("6/13 policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
 
     is_error, text = server.call_tool("file_actions", create)
-    require("6/8 create allowed after grant", not is_error and os.path.isfile(created), text[:200])
+    require("7/13 create allowed after grant", not is_error and os.path.isfile(created), text[:200])
 
     is_error, text = server.call_tool("apply_edits", {"path": hello, "search": "hello linux", "replace": "hello granted"})
     with open(hello) as handle:
         edited = handle.read()
-    require("7/8 apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
+    require("8/13 apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
+
+    is_error, text = server.call_tool("ask_oracle", {"message": "ping", "model": "openaiCompatible:smoke-model"})
+    require("9/13 ask_oracle over openaiCompatible HTTP", not is_error and "HTTP_ORACLE_OK smoke-model" in text, text[:300])
+
+    is_error, text = server.call_tool("ask_oracle", {"message": "ping", "model": "openaiCompatible:redirect-model"})
+    require("10/13 cross-origin redirect refused without forwarding the key",
+            is_error and "HTTP 307" in text and not RedirectTarget.hits, f"hits={RedirectTarget.hits} {text[:300]}")
+
+    claude_error, claude = server.call_tool("agent_run", {"op": "start", "model_id": "claudeCode", "message": "hi"})
+    http_error, http_text = server.call_tool("agent_run", {"op": "start", "model_id": "openaiCompatible", "message": "hi"})
+    require("11/13 agent_run refuses disabled claudeCode and Oracle-only openaiCompatible",
+            claude_error and "Claude Code is disabled" in claude and http_error and "Oracle conversations only" in http_text,
+            f"claude={claude[:200]} http={http_text[:200]}")
+
+    start_error, start = server.call_tool("agent_run", {"op": "start", "model_id": "codexExec", "message": "hi", "timeout": 30})
+    session_id = "" if start_error else json.loads(start).get("session_id", "")
+    is_error, text = server.call_tool("agent_run", {"op": "steer", "session_id": session_id, "message": "again",
+                                                    "timeout_seconds": 30})
+    first_cwd = re.search(r"FIRST_TURN cwd=([^\"\\]+)", start)
+    resumed_cwd = re.search(r"RESUMED cwd=([^\"\\]+)", text)
+    require("12/13 agent_run steer resumes the Codex thread in the same directory",
+            not is_error and '"completed"' in text and first_cwd and resumed_cwd
+            and first_cwd.group(1) == resumed_cwd.group(1) == os.path.realpath(repo),
+            f"start={start[:300]} steer={text[:300]}")
 
     rc = server.close()
-    require("8/8 stdin EOF exits cleanly", rc == 0, f"exit={rc}")
+    stub.shutdown()
+    other_origin.shutdown()
+    require("13/13 stdin EOF exits cleanly", rc == 0, f"exit={rc}")
 
 
 def run_deleted_image_check(binary, base):

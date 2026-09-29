@@ -55,15 +55,18 @@ package actor DirectHeadlessMCPService {
     private let logger: Logger
     private let environment: [String: String]
     private let currentDirectory: URL
+    private let openAICompatibleClient: DirectHeadlessOpenAICompatibleClient
 
     package init(
         logger: Logger = Logger(label: "com.repoprompt.ce.mcp.headless"),
         environment: [String: String] = ProcessInfo.processInfo.environment,
-        currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        currentDirectory: URL = URL(fileURLWithPath: FileManager.default.currentDirectoryPath),
+        openAICompatibleClient: DirectHeadlessOpenAICompatibleClient = .init()
     ) {
         self.logger = logger
         self.environment = environment
         self.currentDirectory = currentDirectory
+        self.openAICompatibleClient = openAICompatibleClient
     }
 
     package func run() async throws {
@@ -210,7 +213,8 @@ package actor DirectHeadlessMCPService {
                 runtime: runtime,
                 context: context,
                 settingsStore: settingsStore,
-                environment: environment
+                environment: environment,
+                openAICompatibleClient: openAICompatibleClient
             )
             let oracleStore = DomainOracleConversationStore(
                 persistence: runtime.persistenceCoordinator,
@@ -632,7 +636,7 @@ package actor DirectHeadlessMCPService {
         let supportedOperations: Set<String>
         switch toolName {
         case "agent_run":
-            supportedOperations = ["start", "poll", "wait", "cancel"]
+            supportedOperations = ["start", "poll", "wait", "cancel", "steer"]
         case "agent_explore":
             supportedOperations = ["start", "poll", "wait", "cancel"]
         default:
@@ -641,7 +645,9 @@ package actor DirectHeadlessMCPService {
         guard let operation = arguments["op"]?.stringValue,
               supportedOperations.contains(operation)
         else {
-            throw MCPError.invalidParams("\(toolName) requires a supported string op")
+            throw MCPError.invalidParams(
+                "\(toolName) op must be one of \(supportedOperations.sorted().joined(separator: ", ")) on the headless backend"
+            )
         }
         return arguments
     }

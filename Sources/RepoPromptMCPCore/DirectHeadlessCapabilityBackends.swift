@@ -717,11 +717,11 @@ actor DirectHeadlessConversationBackend: DomainConversationCapabilityBackend {
         switch try await oracleAdapter.consumePreparedRoute(request: request) {
         case .group:
             return try await .mcp(oracleAdapter.start(arguments: args, request: request))
-        case let .direct(modelID, _):
+        case let .direct(model, _):
             let (id, response) = try await providerCoordinator.createConversation(
-                providerID: args["provider"]?.stringValue,
+                providerID: model.providerID,
                 message: message,
-                model: modelID,
+                model: model.modelID,
                 request: request
             )
             return try .object([
@@ -740,13 +740,13 @@ actor DirectHeadlessConversationBackend: DomainConversationCapabilityBackend {
         switch try await oracleAdapter.consumePreparedRoute(request: request) {
         case .group:
             return try await .mcp(oracleAdapter.continue(arguments: args, request: request))
-        case let .direct(modelID, implicitConversationID):
+        case let .direct(model, implicitConversationID):
             let result: (id: UUID, response: String)
             if args["new_chat"]?.boolValue == true {
                 result = try await providerCoordinator.createConversation(
-                    providerID: nil,
+                    providerID: model.providerID,
                     message: message,
-                    model: modelID,
+                    model: model.modelID,
                     request: request
                 )
             } else if let chatID = args["chat_id"]?.stringValue?
@@ -774,9 +774,9 @@ actor DirectHeadlessConversationBackend: DomainConversationCapabilityBackend {
                 )
             } else {
                 result = try await providerCoordinator.createConversation(
-                    providerID: nil,
+                    providerID: model.providerID,
                     message: message,
-                    model: modelID,
+                    model: model.modelID,
                     request: request
                 )
             }
@@ -809,14 +809,14 @@ actor DirectHeadlessConversationBackend: DomainConversationCapabilityBackend {
         switch try await oracleAdapter.consumePreparedRoute(request: request) {
         case .group:
             return try await .mcp(oracleAdapter.buildContext(arguments: args, request: request))
-        case let .direct(modelID, _):
+        case let .direct(model, _):
             guard let instructions = args["instructions"]?.stringValue, !instructions.isEmpty else {
                 throw MCPError.invalidParams("context_builder requires instructions")
             }
             let (id, response) = try await providerCoordinator.createConversation(
-                providerID: args["provider"]?.stringValue,
+                providerID: model.providerID,
                 message: instructions,
-                model: modelID,
+                model: model.modelID,
                 request: request
             )
             return try .object([
@@ -944,6 +944,8 @@ actor DirectHeadlessAgentBackend: DomainAgentCapabilityBackend {
                 sessionID: sessionID,
                 timeout: args["timeout"]?.doubleValue ?? 120
             ).toValue())
+        case "steer":
+            return try await .mcp(coordinator.steerAgent(sessionID: Self.sessionID(args), args: args, request: request))
         case "cancel":
             let sessionID = try Self.sessionID(args)
             await coordinator.cancelAgent(sessionID: sessionID)
@@ -1087,6 +1089,7 @@ enum DirectProcess {
     /// Child providers need basic process/configuration context and the explicit private
     /// launch carrier, but must not inherit arbitrary parent credentials or loader controls.
     private static let inheritedEnvironmentKeys: Set<String> = [
+        "CLAUDE_CONFIG_DIR",
         "CODEX_HOME",
         "COLORTERM",
         "HOME",
@@ -1233,9 +1236,9 @@ private final class DirectProcessInvocation: @unchecked Sendable {
         process.currentDirectoryURL = currentDirectory
         process.standardOutput = pipe
         process.standardError = pipe
-        if let inputPipe {
-            process.standardInput = inputPipe
-        }
+        // Without input the child must not inherit this process's stdin, which in stdio mode is
+        // the MCP JSON-RPC stream.
+        process.standardInput = inputPipe.map { $0 as Any } ?? FileHandle.nullDevice
     }
 
     func run() async throws -> String {

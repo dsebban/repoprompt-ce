@@ -3,7 +3,7 @@ import MCP
 import RepoPromptDomainRuntime
 
 struct DirectHeadlessOracleRosterResolver: OracleRosterResolver {
-    static let providerID = "codexExec"
+    static let defaultProviderID = DirectHeadlessProviderID.codexExec
 
     private let settingsStore: DomainDirectSettingsStore
 
@@ -35,9 +35,25 @@ struct DirectHeadlessOracleRosterResolver: OracleRosterResolver {
         }
 
         return try OracleRoster(
-            primaryModelID: request.primaryModelOverride ?? configuredPrimary,
-            additionalModelIDs: additional,
-            providerID: Self.providerID
+            primary: Self.modelReference(request.primaryModelOverride ?? configuredPrimary),
+            additional: OracleRosterContract.normalizedAdditionalModelIDs(additional).map(Self.modelReference)
         )
+    }
+
+    /// A roster entry may name its provider as `provider:model` (for example `claudeCode:opus`).
+    /// Without a known provider prefix the whole entry stays a Codex model, so `llama3:8b` keeps
+    /// its meaning. Naming a provider only selects it; the coordinator still refuses a provider
+    /// the operator has not enabled.
+    static func modelReference(_ raw: String) throws -> OracleModelReference {
+        let entry = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let colon = entry.firstIndex(of: ":"),
+           let providerID = DirectHeadlessProviderID.canonical(
+               matching: entry[..<colon].trimmingCharacters(in: .whitespacesAndNewlines)
+           )
+        {
+            let modelID = entry[entry.index(after: colon)...].trimmingCharacters(in: .whitespacesAndNewlines)
+            return try OracleModelReference(providerID: providerID, modelID: modelID)
+        }
+        return try OracleModelReference(providerID: defaultProviderID, modelID: entry)
     }
 }
