@@ -149,6 +149,78 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         XCTAssertTrue(try fixture.calls().isEmpty)
     }
 
+    func testEnabledCursorRosterUsesForceForDirectOracleAndAskModeInGroupedLanes() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "cursor-roster")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(cursor: .init())
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        try await Self.setRoster(prepared, primary: "cursor:gpt-5", additional: [])
+        let direct = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("direct cursor")]
+        )
+        XCTAssertEqual(direct["response"] as? String, "cursor-0-gpt-5")
+        let continued = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "oracle_send",
+            arguments: ["chat_id": .string(XCTUnwrap(direct["chat_id"] as? String)), "message": .string("again")]
+        )
+        XCTAssertEqual(continued["response"] as? String, "cursor-0-gpt-5")
+
+        try await Self.setRoster(prepared, primary: "cursor:gpt-5", additional: ["lane-1"])
+        let grouped = try await invoke(
+            prepared: prepared,
+            backend: backend,
+            toolName: "ask_oracle",
+            arguments: ["message": .string("grouped cursor")]
+        )
+        let lanes = try XCTUnwrap(grouped["oracle_results"] as? [[String: Any]])
+        XCTAssertEqual(lanes.compactMap { $0["response"] as? String }, ["cursor-0-gpt-5", "response-1-lane-1"])
+
+        let calls = try fixture.cursorCalls()
+        XCTAssertEqual(calls.count, 3)
+        let secure = ["-p", "--output-format", "json", "--sandbox", "enabled"]
+        XCTAssertEqual(calls.map(\.flags), [
+            secure + ["--force", "--model", "gpt-5"],
+            secure + ["--force", "--model", "gpt-5"],
+            secure + ["--mode", "ask", "--model", "gpt-5"]
+        ])
+        XCTAssertEqual(calls[1].prompt, "user: direct cursor\n\nassistant: cursor-0-gpt-5\n\nuser: again")
+        XCTAssertTrue(calls.allSatisfy { $0.stdinBytes == 0 && $0.positionalCount == 1 })
+        XCTAssertEqual(try fixture.calls().map(\.model), ["lane-1"])
+    }
+
+    func testRosterNamingDisabledCursorFailsBeforeAnyProviderLaunch() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "cursor-disabled")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(cursor: .init(enabled: false))
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        try await Self.setRoster(prepared, primary: "cursor:gpt-5", additional: ["lane-1"])
+        do {
+            _ = try await invoke(prepared: prepared, backend: backend, toolName: "ask_oracle", arguments: ["message": .string("x")])
+            XCTFail("Expected disabled Cursor to be refused")
+        } catch {
+            XCTAssertTrue(String(describing: error).contains("Cursor CLI is disabled"), "\(error)")
+        }
+        XCTAssertTrue(try fixture.cursorCalls().isEmpty)
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
     func testOpenAICompatibleRosterRunsDirectAndGroupedOracleOverHTTP() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "http-roster")
         defer { fixture.cleanup() }

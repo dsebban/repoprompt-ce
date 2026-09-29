@@ -3,8 +3,8 @@
 
 Usage: python3 Scripts/linux_headless_smoke.py <path-to-repoprompt-mcp>
 
-Creates a throwaway repo and isolated headless profile whose providers.json configures a
-stub Codex CLI and the local HTTP stub, then checks:
+Creates a throwaway repo and isolated headless profile whose providers.json configures
+stub Codex and Cursor CLIs and the local HTTP stub, then checks:
   1. initialize             8. apply_edits is allowed after the grant
   2. tools/list             9. ask_oracle answers through the openaiCompatible HTTP provider
   3. read_file                 (a local stub server; exercises FoundationNetworking)
@@ -12,10 +12,11 @@ stub Codex CLI and the local HTTP stub, then checks:
      grantMissing          11. agent_run refuses disabled claudeCode and Oracle-only
   5. agent_run steer           openaiCompatible
      denied with           12. agent_run start, then steer resumes the stub Codex thread
-     grantMissing              in the same working directory
-  6. `policy grant` for    13. stdin EOF exits cleanly
-     this driver (PTY)
-  7. the same create is allowed after the grant
+     grantMissing              in the same working directory, without the Cursor key
+  6. `policy grant` for    13. the same for the stub Cursor CLI: prompt after `--`,
+     this driver (PTY)         /dev/null stdin, CURSOR_API_KEY, then `--resume`
+  7. the same create is    14. stdin EOF exits cleanly
+     allowed after the grant
 plus: a parent whose image was unlinked is never fingerprinted through a decoy file
 named "<path> (deleted)". Exits non-zero at the first failure. Python stdlib only.
 """
@@ -41,7 +42,13 @@ DELETED_IMAGE_FLAG = "--as-deleted-image"
 CODEX_STUB = """#!/bin/sh
 cat >/dev/null
 case " $* " in *" resume -c sandbox_mode=\\"workspace-write\\" -- smoke-thread "*) text=RESUMED ;; *) text=FIRST_TURN ;; esac
-printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s cwd=%s"}\\n' "$text" "$(pwd -P)"
+printf '{"type":"thread.started","thread_id":"smoke-thread"}\\n{"type":"message","text":"%s cwd=%s key=%s"}\\n' \\
+  "$text" "$(pwd -P)" "${CURSOR_API_KEY:-unset}"
+"""
+# Echoes its argv, stdin, key, and cwd in a Cursor `--output-format json` result.
+CURSOR_STUB = """#!/bin/sh
+printf '{"type":"result","is_error":false,"session_id":"smoke-chat","result":"argv=%s stdin=%s key=%s cwd=%s"}\\n' \\
+  "$*" "$(readlink /proc/self/fd/0)" "${CURSOR_API_KEY:-unset}" "$(pwd -P)"
 """
 
 
@@ -209,19 +216,22 @@ def run_smoke(binary, base):
     ChatCompletionsStub.redirect_port = other_origin.server_address[1]
     for httpd in (stub, other_origin):
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
-    codex = os.path.join(base, "codex-stub")
-    with open(codex, "w") as handle:
-        handle.write(CODEX_STUB)
-    os.chmod(codex, 0o700)
-    # Providers come only from the operator's providers.json; the key stays in the environment.
+    codex, cursor = os.path.join(base, "codex-stub"), os.path.join(base, "cursor-stub")
+    for path, script in ((codex, CODEX_STUB), (cursor, CURSOR_STUB)):
+        with open(path, "w") as handle:
+            handle.write(script)
+        os.chmod(path, 0o700)
+    # Providers come only from the operator's providers.json; the keys stay in the environment.
     providers = {"providers": {
         "codexExec": {"command": codex},
         "openaiCompatible": {"enabled": True, "baseURL": f"http://127.0.0.1:{stub.server_address[1]}/v1",
                              "apiKeyEnv": "SMOKE_OPENAI_API_KEY"},
+        "cursor": {"enabled": True, "command": cursor, "apiKeyEnv": "SMOKE_CURSOR_API_KEY"},
     }}
     with open(os.path.join(env["REPOPROMPT_MCP_HEADLESS_PROFILE_DIR"], "providers.json"), "w") as handle:
         json.dump(providers, handle)
     env["SMOKE_OPENAI_API_KEY"] = "smoke-key"
+    env["SMOKE_CURSOR_API_KEY"] = "cursor-smoke-key"
     repo = env["REPOPROMPT_MCP_WORKING_DIRS"]
     hello, created = os.path.join(repo, "hello.txt"), os.path.join(repo, "new.txt")
     with open(hello, "w") as handle:
@@ -229,63 +239,75 @@ def run_smoke(binary, base):
     server = HeadlessServer(binary, env, os.path.join(base, "server.stderr"))
 
     info = server.initialize().get("result", {}).get("serverInfo", {})
-    require("1/13 initialize", info.get("name") == "RepoPrompt CE", f"serverInfo={info}")
+    require("1/14 initialize", info.get("name") == "RepoPrompt CE", f"serverInfo={info}")
 
     tools = {tool["name"] for tool in server.request("tools/list", {}).get("result", {}).get("tools", [])}
     expected = {"read_file", "get_file_tree", "file_search", "file_actions", "apply_edits"}
-    require("2/13 tools/list", expected <= tools, f"missing {sorted(expected - tools)} from {sorted(tools)}")
+    require("2/14 tools/list", expected <= tools, f"missing {sorted(expected - tools)} from {sorted(tools)}")
 
     is_error, text = server.call_tool("read_file", {"path": hello})
-    require("3/13 read_file", not is_error and "hello linux" in text, text[:200])
+    require("3/14 read_file", not is_error and "hello linux" in text, text[:200])
 
     create = {"action": "create", "path": created, "content": "created\n"}
     is_error, text = server.call_tool("file_actions", create)
-    require("4/13 create denied with grantMissing",
+    require("4/14 create denied with grantMissing",
             is_error and "grantMissing" in text and not os.path.exists(created), text[:200])
 
     is_error, text = server.call_tool("agent_run", {"op": "steer", "session_id": "00000000-0000-0000-0000-000000000000",
                                                     "message": "again"})
-    require("5/13 agent_run steer denied with grantMissing", is_error and "grantMissing" in text, text[:200])
+    require("5/14 agent_run steer denied with grantMissing", is_error and "grantMissing" in text, text[:200])
 
     rc, out, prompt = policy_grant(binary, env, driver_fingerprint(), repo)
-    require("6/13 policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
+    require("6/14 policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
 
     is_error, text = server.call_tool("file_actions", create)
-    require("7/13 create allowed after grant", not is_error and os.path.isfile(created), text[:200])
+    require("7/14 create allowed after grant", not is_error and os.path.isfile(created), text[:200])
 
     is_error, text = server.call_tool("apply_edits", {"path": hello, "search": "hello linux", "replace": "hello granted"})
     with open(hello) as handle:
         edited = handle.read()
-    require("8/13 apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
+    require("8/14 apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
 
     is_error, text = server.call_tool("ask_oracle", {"message": "ping", "model": "openaiCompatible:smoke-model"})
-    require("9/13 ask_oracle over openaiCompatible HTTP", not is_error and "HTTP_ORACLE_OK smoke-model" in text, text[:300])
+    require("9/14 ask_oracle over openaiCompatible HTTP", not is_error and "HTTP_ORACLE_OK smoke-model" in text, text[:300])
 
     is_error, text = server.call_tool("ask_oracle", {"message": "ping", "model": "openaiCompatible:redirect-model"})
-    require("10/13 cross-origin redirect refused without forwarding the key",
+    require("10/14 cross-origin redirect refused without forwarding the key",
             is_error and "HTTP 307" in text and not RedirectTarget.hits, f"hits={RedirectTarget.hits} {text[:300]}")
 
     claude_error, claude = server.call_tool("agent_run", {"op": "start", "model_id": "claudeCode", "message": "hi"})
     http_error, http_text = server.call_tool("agent_run", {"op": "start", "model_id": "openaiCompatible", "message": "hi"})
-    require("11/13 agent_run refuses disabled claudeCode and Oracle-only openaiCompatible",
+    require("11/14 agent_run refuses disabled claudeCode and Oracle-only openaiCompatible",
             claude_error and "Claude Code is disabled" in claude and http_error and "Oracle conversations only" in http_text,
             f"claude={claude[:200]} http={http_text[:200]}")
 
-    start_error, start = server.call_tool("agent_run", {"op": "start", "model_id": "codexExec", "message": "hi", "timeout": 30})
-    session_id = "" if start_error else json.loads(start).get("session_id", "")
-    is_error, text = server.call_tool("agent_run", {"op": "steer", "session_id": session_id, "message": "again",
-                                                    "timeout_seconds": 30})
-    first_cwd = re.search(r"FIRST_TURN cwd=([^\"\\]+)", start)
-    resumed_cwd = re.search(r"RESUMED cwd=([^\"\\]+)", text)
-    require("12/13 agent_run steer resumes the Codex thread in the same directory",
-            not is_error and '"completed"' in text and first_cwd and resumed_cwd
+    start, text = start_and_steer(server, "codexExec")
+    first_cwd = re.search(r"FIRST_TURN cwd=(\S+) key=unset", start)
+    resumed_cwd = re.search(r"RESUMED cwd=(\S+) key=unset", text)
+    require("12/14 agent_run steer resumes the Codex thread in the same directory, without the Cursor key",
+            '"completed"' in text and first_cwd and resumed_cwd
             and first_cwd.group(1) == resumed_cwd.group(1) == os.path.realpath(repo),
             f"start={start[:300]} steer={text[:300]}")
+
+    start, text = start_and_steer(server, "cursor")
+    common = "-p --output-format json --sandbox enabled --force"
+    tail = f"stdin=/dev/null key=cursor-smoke-key cwd={os.path.realpath(repo)}"
+    require("13/14 Cursor gets the prompt after --, /dev/null stdin and its key, then steer resumes its chat",
+            f"argv={common} -- hi {tail}" in start and f"argv={common} --resume smoke-chat -- again {tail}" in text
+            and '"completed"' in text, f"start={start[:400]} steer={text[:400]}")
 
     rc = server.close()
     stub.shutdown()
     other_origin.shutdown()
-    require("13/13 stdin EOF exits cleanly", rc == 0, f"exit={rc}")
+    require("14/14 stdin EOF exits cleanly", rc == 0, f"exit={rc}")
+
+
+def start_and_steer(server, provider):
+    start_error, start = server.call_tool("agent_run", {"op": "start", "model_id": provider, "message": "hi", "timeout": 30})
+    session_id = "" if start_error else json.loads(start).get("session_id", "")
+    _, text = server.call_tool("agent_run", {"op": "steer", "session_id": session_id, "message": "again",
+                                             "timeout_seconds": 30})
+    return start, text
 
 
 def run_deleted_image_check(binary, base):

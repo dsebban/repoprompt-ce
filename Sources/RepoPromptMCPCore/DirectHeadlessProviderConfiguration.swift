@@ -15,7 +15,8 @@ import RepoPromptDomainRuntime
 ///   "providers": {
 ///     "codexExec": { "command": "codex" },
 ///     "claudeCode": { "enabled": true, "command": "claude" },
-///     "openaiCompatible": { "enabled": true, "baseURL": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY" }
+///     "openaiCompatible": { "enabled": true, "baseURL": "https://api.openai.com/v1", "apiKeyEnv": "OPENAI_API_KEY" },
+///     "cursor": { "enabled": true, "command": "agent", "apiKeyEnv": "CURSOR_API_KEY", "sandbox": true, "trustWorkspace": false }
 ///   }
 /// }
 /// ```
@@ -23,6 +24,15 @@ struct DirectHeadlessProviderConfiguration: Equatable {
     struct CLI: Equatable {
         let enabled: Bool
         let command: String
+    }
+
+    /// `sandbox` keeps Cursor's own `--sandbox enabled`; `trustWorkspace` adds `--trust`.
+    struct Cursor: Equatable {
+        let enabled: Bool
+        let command: String
+        let apiKeyEnv: String?
+        let sandbox: Bool
+        let trustWorkspace: Bool
     }
 
     struct OpenAICompatible: Equatable {
@@ -39,12 +49,14 @@ struct DirectHeadlessProviderConfiguration: Equatable {
     let claude: CLI
     /// `nil` when the file has no `openaiCompatible` entry.
     let openAICompatible: OpenAICompatible?
+    let cursor: Cursor
 
     static let builtIn = Self(
         defaultProviderID: DirectHeadlessProviderID.codexExec,
         codex: CLI(enabled: true, command: "codex"),
         claude: CLI(enabled: false, command: "claude"),
-        openAICompatible: nil
+        openAICompatible: nil,
+        cursor: Cursor(enabled: false, command: "agent", apiKeyEnv: nil, sandbox: true, trustWorkspace: false)
     )
 }
 
@@ -193,6 +205,16 @@ enum DirectHeadlessProviderConfigurationLoader {
             let keyName = try entry.apiKeyEnv.map { try apiKeyEnv($0, key: DirectHeadlessProviderID.openAICompatible) }
             return .init(enabled: entry.enabled ?? false, endpoint: endpoint, apiKeyEnv: keyName)
         }
+        let cursor = try providers?.cursor.map { entry -> DirectHeadlessProviderConfiguration.Cursor in
+            let defaults = builtIn.cursor
+            return try .init(
+                enabled: entry.enabled ?? defaults.enabled,
+                command: command(entry.command ?? defaults.command, key: DirectHeadlessProviderID.cursor),
+                apiKeyEnv: entry.apiKeyEnv.map { try apiKeyEnv($0, key: DirectHeadlessProviderID.cursor) },
+                sandbox: entry.sandbox ?? defaults.sandbox,
+                trustWorkspace: entry.trustWorkspace ?? defaults.trustWorkspace
+            )
+        } ?? builtIn.cursor
 
         let requestedDefault = raw.defaultProvider ?? builtIn.defaultProviderID
         guard let defaultProviderID = DirectHeadlessProviderID.canonical(matching: requestedDefault) else {
@@ -203,12 +225,19 @@ enum DirectHeadlessProviderConfigurationLoader {
         let enabled: [String: Bool] = [
             DirectHeadlessProviderID.codexExec: codex.enabled,
             DirectHeadlessProviderID.claudeCode: claude.enabled,
-            DirectHeadlessProviderID.openAICompatible: openAI?.enabled ?? false
+            DirectHeadlessProviderID.openAICompatible: openAI?.enabled ?? false,
+            DirectHeadlessProviderID.cursor: cursor.enabled
         ]
         guard enabled[defaultProviderID] == true else {
             throw SchemaViolation(detail: "defaultProvider '\(defaultProviderID)' is not enabled.")
         }
-        return .init(defaultProviderID: defaultProviderID, codex: codex, claude: claude, openAICompatible: openAI)
+        return .init(
+            defaultProviderID: defaultProviderID,
+            codex: codex,
+            claude: claude,
+            openAICompatible: openAI,
+            cursor: cursor
+        )
     }
 
     private static func cli(
@@ -217,13 +246,16 @@ enum DirectHeadlessProviderConfigurationLoader {
         defaults: DirectHeadlessProviderConfiguration.CLI
     ) throws -> DirectHeadlessProviderConfiguration.CLI {
         guard let entry else { return defaults }
-        let command = entry.command ?? defaults.command
+        return try .init(enabled: entry.enabled ?? defaults.enabled, command: command(entry.command ?? defaults.command, key: key))
+    }
+
+    private static func command(_ command: String, key: String) throws -> String {
         guard !command.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               !command.contains("/") || command.hasPrefix("/")
         else {
             throw SchemaViolation(detail: "providers.\(key).command must be an executable name or an absolute path.")
         }
-        return .init(enabled: entry.enabled ?? defaults.enabled, command: command)
+        return command
     }
 
     /// A variable the child allowlist already forwards would leak the secret to every child.
@@ -329,9 +361,10 @@ private struct RawProviders: Decodable {
     let codexExec: RawCLI?
     let claudeCode: RawCLI?
     let openaiCompatible: RawOpenAICompatible?
+    let cursor: RawCursor?
 
     private enum CodingKeys: String, CodingKey, CaseIterable {
-        case codexExec, claudeCode, openaiCompatible
+        case codexExec, claudeCode, openaiCompatible, cursor
     }
 
     init(from decoder: Decoder) throws {
@@ -339,6 +372,7 @@ private struct RawProviders: Decodable {
         codexExec = try container.decodeIfPresent(RawCLI.self, forKey: .codexExec)
         claudeCode = try container.decodeIfPresent(RawCLI.self, forKey: .claudeCode)
         openaiCompatible = try container.decodeIfPresent(RawOpenAICompatible.self, forKey: .openaiCompatible)
+        cursor = try container.decodeIfPresent(RawCursor.self, forKey: .cursor)
     }
 }
 
@@ -371,5 +405,26 @@ private struct RawOpenAICompatible: Decodable {
         enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
         baseURL = try container.decode(String.self, forKey: .baseURL)
         apiKeyEnv = try container.decodeIfPresent(String.self, forKey: .apiKeyEnv)
+    }
+}
+
+private struct RawCursor: Decodable {
+    let enabled: Bool?
+    let command: String?
+    let apiKeyEnv: String?
+    let sandbox: Bool?
+    let trustWorkspace: Bool?
+
+    private enum CodingKeys: String, CodingKey, CaseIterable {
+        case enabled, command, apiKeyEnv, sandbox, trustWorkspace
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.strictContainer(keyedBy: CodingKeys.self)
+        enabled = try container.decodeIfPresent(Bool.self, forKey: .enabled)
+        command = try container.decodeIfPresent(String.self, forKey: .command)
+        apiKeyEnv = try container.decodeIfPresent(String.self, forKey: .apiKeyEnv)
+        sandbox = try container.decodeIfPresent(Bool.self, forKey: .sandbox)
+        trustWorkspace = try container.decodeIfPresent(Bool.self, forKey: .trustWorkspace)
     }
 }

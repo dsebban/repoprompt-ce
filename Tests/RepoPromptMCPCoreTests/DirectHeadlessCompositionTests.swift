@@ -261,6 +261,117 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         }
     }
 
+    func testCursorArgumentsPinLaneFlagsAndKeepThePromptPositional() throws {
+        typealias Cursor = DirectHeadlessCursorCLI
+        let secure = Cursor.Options(sandbox: true, trustWorkspace: false, apiKeyEnv: nil)
+        for (purpose, laneFlags) in [
+            (DirectHeadlessProviderCoordinator.ExecutionPurpose.agent, ["--force"]),
+            (.directOracle, ["--force"]),
+            (.oracleGroup, ["--mode", "ask"])
+        ] {
+            XCTAssertEqual(
+                try Cursor.arguments(model: "default", purpose: purpose, options: secure, prompt: "-rf --force"),
+                ["-p", "--output-format", "json", "--sandbox", "enabled"] + laneFlags + ["--", "-rf --force"]
+            )
+        }
+        XCTAssertEqual(
+            try Cursor.arguments(
+                model: "gpt-5",
+                purpose: .agent,
+                options: .init(sandbox: false, trustWorkspace: true, apiKeyEnv: "K"),
+                resumeSessionID: "chat-1",
+                prompt: "again"
+            ),
+            ["-p", "--output-format", "json", "--force", "--trust", "--model", "gpt-5", "--resume", "chat-1", "--", "again"]
+        )
+    }
+
+    func testCursorPromptLimitCountsUTF8BytesAndRejectsNUL() throws {
+        let options = DirectHeadlessCursorCLI.Options(sandbox: true, trustWorkspace: false, apiKeyEnv: nil)
+        func arguments(_ prompt: String) throws -> [String] {
+            try DirectHeadlessCursorCLI.arguments(model: nil, purpose: .agent, options: options, prompt: prompt)
+        }
+        XCTAssertEqual(DirectHeadlessCursorCLI.maximumPromptUTF8Bytes, 131_071)
+        for accepted in [String(repeating: "a", count: 131_071), String(repeating: "é", count: 65535) + "a"] {
+            XCTAssertEqual(try arguments(accepted).last, accepted)
+        }
+        for rejected in [String(repeating: "a", count: 131_072), String(repeating: "é", count: 65536)] {
+            XCTAssertThrowsError(try arguments(rejected)) { error in
+                XCTAssertTrue(String(describing: error).contains("131072 bytes; the limit is 131071"), "\(error)")
+            }
+        }
+        XCTAssertThrowsError(try arguments("a\u{0}b")) { error in
+            XCTAssertTrue(String(describing: error).contains("NUL"), "\(error)")
+        }
+    }
+
+    func testCursorParserReadsTerminalResultAndGatesTheSessionID() throws {
+        typealias Cursor = DirectHeadlessCursorCLI
+        XCTAssertEqual(
+            try Cursor.parseTurnOutput("""
+            cursor stderr notice
+            {"type":"result","subtype":"success","is_error":false,"duration_ms":1,"result":"  answer\\n","session_id":"3f2a-b"}
+            """),
+            .init(assistantText: "  answer\n", providerSessionID: "3f2a-b")
+        )
+        for session in [#""session_id":"--continue","#, ""] {
+            XCTAssertNil(try Cursor.parseTurnOutput(#"{"type":"result",\#(session)"is_error":false,"result":"ok"}"#).providerSessionID)
+        }
+        for (output, message) in [
+            (#"{"type":"result","subtype":"error","is_error":true,"result":"stub failure"}"#, "reported an error: stub failure"),
+            (#"{"type":"result","is_error":false,"result":"  "}"#, "result has no text"),
+            (#"{"type":"result","is_error":false,"session_id":"s"}"#, "result has no text"),
+            ("Error: not authenticated\n", "returned no result")
+        ] {
+            XCTAssertThrowsError(try Cursor.parseTurnOutput(output), output) { error in
+                XCTAssertTrue(String(describing: error).contains(message), "\(error)")
+            }
+        }
+    }
+
+    func testCursorCatalogRequiresOptInACommandAndAnyNamedKey() throws {
+        func cursor(_ json: String, _ environment: [String: String] = [:]) throws -> DirectHeadlessProviderCoordinator.ProviderDescriptor {
+            try XCTUnwrap(DirectHeadlessProviderCoordinator.providerCatalog(configuration: Self.providers(json), environment: environment).last)
+        }
+        let absent = try cursor(#"{}"#)
+        XCTAssertEqual(absent.id, "cursor")
+        XCTAssertTrue(absent.supportsAgentRuns)
+        XCTAssertNil(absent.backend)
+        XCTAssertTrue(try XCTUnwrap(absent.unavailableReason).contains("Cursor CLI is disabled"))
+        XCTAssertNil(try cursor(#"{"providers":{"cursor":{"enabled":false,"command":"/bin/sh"}}}"#).backend)
+        XCTAssertEqual(try Self.providers(#"{"providers":{"cursor":{"enabled":true}}}"#).cursor, .init(
+            enabled: true, command: "agent", apiKeyEnv: nil, sandbox: true, trustWorkspace: false
+        ))
+        let missing = try cursor(#"{"providers":{"cursor":{"enabled":true}}}"#, ["PATH": "/nonexistent"])
+        XCTAssertTrue(try XCTUnwrap(missing.unavailableReason).contains("Cursor CLI was not found on PATH (providers.cursor.command)"))
+        XCTAssertEqual(
+            try cursor(#"{"providers":{"cursor":{"enabled":true,"command":"/bin/sh"}}}"#).backend,
+            .cursorCLI(executable: "/bin/sh", options: .init(sandbox: true, trustWorkspace: false, apiKeyEnv: nil))
+        )
+
+        let keyed = #"{"providers":{"cursor":{"enabled":true,"command":"/bin/sh","apiKeyEnv":"MY_CURSOR_KEY","sandbox":false,"trustWorkspace":true}}}"#
+        for unset in [[:], ["MY_CURSOR_KEY": " "]] {
+            let descriptor = try cursor(keyed, unset)
+            XCTAssertNil(descriptor.backend)
+            XCTAssertTrue(try XCTUnwrap(descriptor.unavailableReason).contains("apiKeyEnv 'MY_CURSOR_KEY' is not set"))
+        }
+        let backend = try XCTUnwrap(try cursor(keyed, ["MY_CURSOR_KEY": "secret"]).backend)
+        XCTAssertEqual(backend, .cursorCLI(executable: "/bin/sh", options: .init(sandbox: false, trustWorkspace: true, apiKeyEnv: "MY_CURSOR_KEY")))
+        XCTAssertFalse(String(describing: backend).contains("secret"))
+    }
+
+    func testCursorKeyIsAddedOnlyThroughTheProviderEnvironment() {
+        let inherited = ["HOME": "/home", "PATH": "/usr/bin", "CURSOR_API_KEY": "parent"]
+        XCTAssertNil(DirectProcess.childEnvironment(inherited: inherited)["CURSOR_API_KEY"])
+        let environment = DirectProcess.childEnvironment(
+            inherited: inherited,
+            providerEnvironment: ["CURSOR_API_KEY": "configured", "PATH": "/attacker", "LC_ALL": "x"]
+        )
+        XCTAssertEqual(environment["CURSOR_API_KEY"], "configured")
+        XCTAssertEqual(environment["PATH"], "/usr/bin")
+        XCTAssertEqual(environment["LC_ALL"], "C")
+    }
+
     private static func providers(_ json: String) throws -> DirectHeadlessProviderConfiguration {
         try DirectHeadlessProviderConfigurationLoader.parse(Data(json.utf8), source: "providers.json")
     }
@@ -271,7 +382,7 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             configuration: Self.providers(#"{"providers":{"codexExec":{"command":"/bin/sh"},"claudeCode":{"command":"/bin/sh"}}}"#),
             environment: [:]
         )
-        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode", "openaiCompatible"])
+        XCTAssertEqual(disabled.map(\.id), ["codexExec", "claudeCode", "openaiCompatible", "cursor"])
         XCTAssertEqual(disabled[0].backend, .codexCLI(executable: executable))
         XCTAssertNil(disabled[1].backend)
         XCTAssertTrue(try XCTUnwrap(disabled[1].unavailableReason).contains("Claude Code is disabled"))
@@ -311,14 +422,15 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertEqual(defaultLocation.url.path, storage.appendingPathComponent("providers.json").path)
         XCTAssertEqual(try Loader.load(defaultLocation), .builtIn)
         let catalog = DirectHeadlessProviderCoordinator.providerCatalog(configuration: .builtIn, environment: ["PATH": "/nonexistent"])
-        XCTAssertEqual(catalog.map(\.id), ["codexExec", "claudeCode", "openaiCompatible"])
+        XCTAssertEqual(catalog.map(\.id), ["codexExec", "claudeCode", "openaiCompatible", "cursor"])
         XCTAssertTrue(catalog.allSatisfy { $0.backend == nil })
         XCTAssertEqual(
             catalog.map { $0.unavailableReason?.components(separatedBy: ";").first ?? "" },
             [
                 "Codex CLI was not found on PATH (providers.codexExec.command).",
                 "Claude Code is disabled",
-                "OpenAI-compatible provider is not configured"
+                "OpenAI-compatible provider is not configured",
+                "Cursor CLI is disabled"
             ]
         )
 
@@ -367,7 +479,13 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"HOME"}}}"#, "must not name HOME"),
             (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"LC_KEY"}}}"#, "must not name LC_KEY"),
             (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"1KEY"}}}"#, "environment variable name"),
-            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"MY-KEY"}}}"#, "environment variable name")
+            (#"{"providers":{"openaiCompatible":{"baseURL":"https://h","apiKeyEnv":"MY-KEY"}}}"#, "environment variable name"),
+            (#"{"providers":{"cursor":{"sandbox":"enabled"}}}"#, "providers.cursor.sandbox must be a boolean"),
+            (#"{"providers":{"cursor":{"trustWorkspace":"yes"}}}"#, "providers.cursor.trustWorkspace must be a boolean"),
+            (#"{"providers":{"cursor":{"mode":"ask"}}}"#, "providers.cursor.mode is not a known key"),
+            (#"{"providers":{"cursor":{"command":"bin/agent"}}}"#, "providers.cursor.command must be"),
+            (#"{"providers":{"cursor":{"apiKeyEnv":"PATH"}}}"#, "providers.cursor.apiKeyEnv must not name PATH"),
+            (#"{"defaultProvider":"cursor","providers":{"cursor":{}}}"#, "defaultProvider 'cursor' is not enabled")
         ]
         for (json, message) in cases {
             XCTAssertThrowsError(try Self.providers(json), json) { error in
@@ -385,7 +503,9 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             ("CLAUDECODE:opus", "claudeCode", "opus"),
             ("llama3:8b", "codexExec", "llama3:8b"),
             ("openaiCompatible:llama3:8b", "openaiCompatible", "llama3:8b"),
-            (" claudeCode : opus ", "claudeCode", "opus")
+            (" claudeCode : opus ", "claudeCode", "opus"),
+            ("cursor:gpt-5", "cursor", "gpt-5"),
+            ("Cursor:gpt-5", "cursor", "gpt-5")
         ]
         for (raw, providerID, modelID) in cases {
             XCTAssertEqual(
@@ -396,6 +516,10 @@ final class DirectHeadlessCompositionTests: XCTestCase {
         XCTAssertEqual(
             try DirectHeadlessOracleRosterResolver.modelReference("sonnet", defaultProviderID: "claudeCode"),
             try OracleModelReference(providerID: "claudeCode", modelID: "sonnet")
+        )
+        XCTAssertEqual(
+            try DirectHeadlessOracleRosterResolver.modelReference("gpt-5", defaultProviderID: "cursor"),
+            try OracleModelReference(providerID: "cursor", modelID: "gpt-5")
         )
         XCTAssertThrowsError(try DirectHeadlessOracleRosterResolver.modelReference("claudeCode:", defaultProviderID: "codexExec"))
     }

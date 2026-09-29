@@ -56,6 +56,112 @@ final class DirectHeadlessAgentRunTests: XCTestCase {
         XCTAssertTrue(try fixture.claudeCalls().isEmpty)
     }
 
+    func testCursorAgentRunTakesThePromptAsOneArgumentAndSteerResumesTheSameChat() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "agent-cursor")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(cursor: .init())
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+
+        let first = try await start(prepared, providerID: "cursor", model: "gpt-5")
+        XCTAssertEqual(first["status"] as? String, "completed", "\(first)")
+        XCTAssertEqual(first["assistant_text"] as? String, "cursor-0-gpt-5")
+        let agent = try XCTUnwrap(first["agent"] as? [String: Any])
+        XCTAssertEqual(agent["id"] as? String, "cursor")
+        XCTAssertEqual(agent["name"] as? String, "Cursor CLI")
+        let steered = try await steer(prepared, sessionID: XCTUnwrap(first["session_id"] as? String))
+
+        let calls = try fixture.cursorCalls()
+        guard calls.count == 2 else { return XCTFail("expected two Cursor calls, got \(calls.count); steer: \(steered)") }
+        let chatID = "cursor-chat-\(calls[0].processID)"
+        XCTAssertEqual(calls[0].flags, ["-p", "--output-format", "json", "--sandbox", "enabled", "--force", "--model", "gpt-5"])
+        XCTAssertEqual(calls[1].flags, calls[0].flags + ["--resume", chatID])
+        XCTAssertEqual(calls.map(\.prompt), ["hello", "again"])
+        XCTAssertEqual(calls.map(\.positionalCount), [1, 1])
+        XCTAssertEqual(calls.map(\.stdinBytes), [0, 0])
+        XCTAssertEqual(calls.map(\.workingDirectory), Array(repeating: Self.physicalPath(fixture.root), count: 2))
+        XCTAssertEqual(steered["status"] as? String, "completed")
+        XCTAssertEqual(steered["assistant_text"] as? String, "cursor-resumed-\(chatID)")
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
+    func testCursorAPIKeyReachesOnlyTheCursorChildAsCursorAPIKey() async throws {
+        let sourceKey = DirectHeadlessProviderFixture.cursorSourceKeyEnvironmentKey
+        let parentEnvironment = [sourceKey: "configured-secret", "CURSOR_API_KEY": "parent-secret"]
+        for apiKeyEnv in [sourceKey, nil] {
+            let fixture = try DirectHeadlessProviderFixture(name: "agent-cursor-key")
+            defer { fixture.cleanup() }
+            let service = try fixture.service(cursor: .init(apiKeyEnv: apiKeyEnv), extraEnvironment: parentEnvironment)
+            let prepared = try await service.prepareRuntime()
+
+            let cursor = try await start(prepared, providerID: "cursor", model: "gpt-5")
+            let codex = try await start(prepared, providerID: "codexExec", model: "gpt-test")
+            await service.teardown(prepared)
+
+            XCTAssertEqual([cursor["status"], codex["status"]] as? [String], ["completed", "completed"])
+            let cursorCall = try XCTUnwrap(fixture.cursorCalls().first)
+            XCTAssertEqual(cursorCall.cursorAPIKey, apiKeyEnv == nil ? "" : "configured-secret")
+            XCTAssertEqual(cursorCall.sourceKey, "")
+            XCTAssertEqual(try fixture.calls().map(\.cursorKey), [""])
+        }
+    }
+
+    func testDisabledCursorAgentRunNeverLaunchesTheExecutable() async throws {
+        for options in [nil, DirectHeadlessProviderFixture.CursorOptions(enabled: false)] {
+            let fixture = try DirectHeadlessProviderFixture(name: "agent-cursor-disabled")
+            defer { fixture.cleanup() }
+            let service = try fixture.service(cursor: options)
+            let prepared = try await service.prepareRuntime()
+            do {
+                _ = try await start(prepared, providerID: "cursor", model: "gpt-5")
+                XCTFail("Expected disabled Cursor to be refused")
+            } catch {
+                XCTAssertTrue(String(describing: error).contains("Cursor CLI is disabled"), "\(error)")
+            }
+            await service.teardown(prepared)
+            XCTAssertTrue(try fixture.cursorCalls().isEmpty)
+        }
+    }
+
+    func testCursorRunsThatCannotResumeOrLaunchAreRefusedWithoutASecondLaunch() async throws {
+        let fixture = try DirectHeadlessProviderFixture(name: "agent-cursor-refused")
+        defer { fixture.cleanup() }
+        let service = try fixture.service(cursor: .init())
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+
+        let running = try await start(prepared, providerID: "cursor", model: "slow", detach: true)
+        let runningID = try XCTUnwrap(running["session_id"] as? String)
+        var attempts = 0
+        while try fixture.cursorCalls().isEmpty, attempts < 100 {
+            attempts += 1
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try await assertSteerFails(prepared, sessionID: runningID, containing: "session is running")
+        XCTAssertEqual(try fixture.cursorCalls().count, 1)
+        _ = try await agentRun(prepared, ["op": .string("cancel"), "session_id": .string(runningID)])
+
+        let sessionless = try await start(prepared, providerID: "cursor", model: "no-session")
+        XCTAssertEqual(sessionless["status"] as? String, "completed")
+        try await assertSteerFails(
+            prepared,
+            sessionID: XCTUnwrap(sessionless["session_id"] as? String),
+            containing: "no resumable session id"
+        )
+        let failed = try await start(prepared, providerID: "cursor", model: "error-result")
+        XCTAssertEqual(failed["status"] as? String, "failed")
+
+        let oversized = try await agentRun(prepared, [
+            "op": .string("start"),
+            "model_id": .string("cursor"),
+            "message": .string(String(repeating: "a", count: DirectHeadlessCursorCLI.maximumPromptUTF8Bytes + 1)),
+            "timeout": .double(30)
+        ])
+        XCTAssertEqual(oversized["status"] as? String, "failed", "\(oversized)")
+        XCTAssertEqual(try fixture.cursorCalls().count, 3)
+        XCTAssertTrue(try fixture.cursorCalls().allSatisfy { !$0.flags.contains("--resume") })
+    }
+
     func testOpenAICompatibleProviderIsRefusedForAgentRunsBeforeAnythingStarts() async throws {
         let fixture = try DirectHeadlessProviderFixture(name: "agent-http")
         defer { fixture.cleanup() }
