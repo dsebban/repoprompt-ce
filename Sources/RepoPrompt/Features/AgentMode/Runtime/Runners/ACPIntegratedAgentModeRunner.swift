@@ -43,6 +43,10 @@ final class ACPIntegratedAgentModeRunner {
     private var acpProviderPlaceholderInvocationIDsByTabID: [UUID: Set<UUID>] = [:]
 
     private func log(_ message: String, runID: UUID) {
+        Self.log(message, runID: runID)
+    }
+
+    private static func log(_ message: String, runID: UUID) {
         guard AgentRuntimeProviderService.enableDebugLogging else { return }
         print("[ACP-Runner] run=\(runID) \(message)")
     }
@@ -904,29 +908,40 @@ final class ACPIntegratedAgentModeRunner {
         }
         return try await Self.performConfigurationSequenceIfCurrent(
             isCurrent: isCurrent,
-            operations: [
-                { [self] in
-                    try await applyExplicitSelectedModelIfNeeded(runRequest, controller: controller, runID: runID)
-                },
-                {
-                    let report = try await controller.applySessionModelParameterSelections(
-                        runRequest.modelParameterSelections
-                    )
-                    try report.validateNoSkippedSelections()
-                },
-                {
-                    await controller.setAutoApproveAllToolPermissions(
-                        runRequest.autoApproveAllToolPermissions
-                    )
-                },
-                { [self] in
-                    try await applyRequestedSessionModeIfNeeded(
-                        runRequest.sessionModeID,
-                        controller: controller
-                    )
-                }
-            ]
+            operations: Self.configurationOperations(runRequest: runRequest, controller: controller, runID: runID)
         )
+    }
+
+    /// Mode is last: model mutations verify with no required mode, so a later step could
+    /// otherwise accept a response carrying a different mode.
+    private static func configurationOperations(
+        runRequest: ACPRunRequest,
+        controller: ACPAgentSessionController,
+        runID: UUID
+    ) -> [() async throws -> Void] {
+        [
+            {
+                try await applyExplicitSelectedModelIfNeeded(runRequest, controller: controller, runID: runID)
+            },
+            {
+                let report = try await controller.applySessionModelParameterSelections(
+                    runRequest.modelParameterSelections
+                )
+                try report.validateNoSkippedSelections()
+            },
+            {
+                await controller.setAutoApproveAllToolPermissions(
+                    runRequest.autoApproveAllToolPermissions
+                )
+            },
+            {
+                try await applyRequestedSessionModeIfNeeded(
+                    runRequest.sessionModeID,
+                    agentKind: runRequest.agentKind,
+                    controller: controller
+                )
+            }
+        ]
     }
 
     /// Configuration calls can suspend on provider RPCs. Re-check ownership before and after
@@ -943,21 +958,24 @@ final class ACPIntegratedAgentModeRunner {
         return true
     }
 
-    private func applyRequestedSessionModeIfNeeded(
+    private static func applyRequestedSessionModeIfNeeded(
         _ requestedMode: String?,
+        agentKind: AgentProviderKind,
         controller: ACPAgentSessionController
     ) async throws {
-        if let requestedMode = requestedMode?.trimmingCharacters(in: .whitespacesAndNewlines), !requestedMode.isEmpty {
+        if agentKind == .devin {
+            try await controller.applyDevinPermissionSessionMode(requestedMode)
+        } else if let requestedMode = requestedMode?.trimmingCharacters(in: .whitespacesAndNewlines), !requestedMode.isEmpty {
             try await controller.setSessionMode(requestedMode)
         }
     }
 
-    private func applyExplicitSelectedModelIfNeeded(
+    private static func applyExplicitSelectedModelIfNeeded(
         _ runRequest: ACPRunRequest,
         controller: ACPAgentSessionController,
         runID: UUID
     ) async throws {
-        guard let model = try Self.explicitSelectedModel(
+        guard let model = try explicitSelectedModel(
             agentKind: runRequest.agentKind,
             modelString: runRequest.modelString
         ) else {
@@ -979,7 +997,7 @@ final class ACPIntegratedAgentModeRunner {
         agentKind: AgentProviderKind,
         modelString: String?
     ) throws -> String? {
-        guard agentKind == .openCode || agentKind == .cursor || agentKind == .grokBuild || agentKind == .antigravity else { return nil }
+        guard agentKind == .openCode || agentKind == .cursor || agentKind == .grokBuild || agentKind == .antigravity || agentKind == .devin else { return nil }
         guard let model = modelString?.trimmingCharacters(in: .whitespacesAndNewlines),
               !model.isEmpty,
               model.caseInsensitiveCompare(AgentModel.defaultModel.rawValue) != .orderedSame
@@ -1871,6 +1889,17 @@ final class ACPIntegratedAgentModeRunner {
             try await performConfigurationSequenceIfCurrent(
                 isCurrent: isCurrent,
                 operations: operations
+            )
+        }
+
+        /// Runs the production pre-prompt configuration sequence against a bootstrapped controller.
+        static func testConfigureControllerForRun(
+            _ controller: ACPAgentSessionController,
+            runRequest: ACPRunRequest
+        ) async throws {
+            _ = try await performConfigurationSequenceIfCurrent(
+                isCurrent: { true },
+                operations: configurationOperations(runRequest: runRequest, controller: controller, runID: UUID())
             )
         }
 

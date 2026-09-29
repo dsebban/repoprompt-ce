@@ -206,6 +206,12 @@ final class AgentModeProviderBindingService {
                 // Claude launch settings are revalidated immediately before dispatch.
                 // Avoid an eager untracked shutdown that could race a newly started run.
                 break
+            case .devin:
+                settlePendingDevinApprovalOnEscalation(
+                    session: session,
+                    currentTabID: currentTabID,
+                    updateActiveBindings: updateActiveBindings
+                )
             case .openCode, .antigravity:
                 let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
                 guard let sessionModeID = runtime.acpSessionModeID,
@@ -239,11 +245,8 @@ final class AgentModeProviderBindingService {
                         updateActiveBindings(session)
                     }
                 }
-            case .grokBuild, .devin:
-                // These providers take their permission level as a launch-time CLI flag
-                // (`--always-approve` / `--permission-mode`); it applies to newly launched
-                // processes and never mutates a running controller. The next run builds a
-                // fresh controller because `isCompatibleWith` keys on that flag.
+            case .grokBuild:
+                // Grok full access is a launch-time CLI flag.
                 break
             }
         }
@@ -253,6 +256,47 @@ final class AgentModeProviderBindingService {
         } else if shouldRefreshGuidance {
             refreshGuidance()
         }
+    }
+
+    /// Escalating Devin to Full Approval settles a pending prompt with the exact session-scoped
+    /// allow (`allow_session`), never a mode-switch option, and never touches the running
+    /// process's launch. The response is deferred, so it is fenced: it is sent only if the level
+    /// is still Full Approval and the same run, controller, and request are still pending.
+    @discardableResult
+    func settlePendingDevinApprovalOnEscalation(
+        session: AgentTabSession,
+        currentTabID: UUID?,
+        updateActiveBindings: @escaping (AgentTabSession) -> Void
+    ) -> Task<Void, Never>? {
+        guard isEligibleForDevinEscalationSettlement(session),
+              let controller = session.acpController,
+              let pendingApproval = session.pendingApproval else { return nil }
+        let runID = session.runID
+        let isSameRequest = { [weak self] () -> Bool in
+            guard let self else { return false }
+            return isEligibleForDevinEscalationSettlement(session)
+                && session.runID == runID
+                && session.acpController === controller
+                && session.pendingApproval?.id == pendingApproval.id
+        }
+        return Task { @MainActor in
+            guard isSameRequest() else { return }
+            await controller.respondToPermissionRequest(
+                id: pendingApproval.requestID.displayValue,
+                decision: .acceptForSession
+            )
+            guard session.runID == runID, session.acpController === controller else { return }
+            if session.tabID == currentTabID {
+                updateActiveBindings(session)
+            }
+        }
+    }
+
+    private func isEligibleForDevinEscalationSettlement(_ session: AgentTabSession) -> Bool {
+        session.selectedAgent.providerBindingID == .devin
+            && session.runState.isActive
+            && runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
+            .acceptsPendingACPApprovalWhenActivated
     }
 
     @discardableResult

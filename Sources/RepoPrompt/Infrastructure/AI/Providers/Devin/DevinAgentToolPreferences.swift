@@ -1,13 +1,6 @@
 import Foundation
 
 enum DevinAgentToolPreferences {
-    /// Top-level `devin --permission-mode` option, verified against devin 3000.10.21:
-    /// "auto" auto-approves read-only tools, "accept-edits" also auto-approves workspace
-    /// edits, "smart" additionally auto-runs actions a fast model judges safe, and
-    /// "dangerous" auto-approves all tools. `autonomous` is intentionally excluded: it
-    /// requires `--sandbox`, which this integration does not launch with.
-    static let permissionModeArgumentName = "--permission-mode"
-
     /// Picker order is `allCases` order.
     enum PermissionLevel: String, CaseIterable {
         case providerDefault
@@ -34,15 +27,16 @@ enum DevinAgentToolPreferences {
         var detailText: String {
             switch self {
             case .providerDefault:
-                "No permission flag is passed; Devin uses its own configured default and decides when to ask. Applies to newly started Devin processes."
+                "Restore the mode advertised when this Devin session opened."
             case .normal:
-                "Starts Devin with `--permission-mode auto`; Devin auto-approves read-only tools and asks before actions that need approval. Applies to newly started Devin processes."
+                "Use Devin's Code mode. Devin ACP has no separate prompt-for-edits mode."
             case .acceptEdits:
-                "Starts Devin with `--permission-mode accept-edits`; workspace edits are accepted automatically, other actions still ask. Applies to newly started Devin processes."
+                "Use Devin's Code mode; other actions can still ask for approval."
             case .smart:
-                "Starts Devin with `--permission-mode smart`; Devin additionally auto-runs actions a fast model judges safe. Applies to newly started Devin processes."
+                "Use Devin's Smart session mode. Runs stop before prompting if this account does not offer it."
             case .fullApproval:
-                "Starts Devin with `--permission-mode dangerous`; Devin runs tools without approval prompts. Applies to newly started Devin processes."
+                "Use Devin's Bypass session mode; Oracle one-shot runs use `--permission-mode dangerous`. "
+                    + "Runs stop before prompting if this account does not offer it."
             }
         }
 
@@ -66,25 +60,56 @@ enum DevinAgentToolPreferences {
             self == .fullApproval
         }
 
-        /// Value passed to `devin --permission-mode`; `nil` means "pass no flag".
-        var cliPermissionMode: String? {
+        /// ACP session mode; nil restores the mode advertised when this session opened.
+        var sessionModeID: String? {
             switch self {
             case .providerDefault:
                 nil
-            case .normal:
-                "auto"
-            case .acceptEdits:
+            case .normal, .acceptEdits:
                 "accept-edits"
             case .smart:
                 "smart"
             case .fullApproval:
-                "dangerous"
+                "bypass"
             }
         }
 
-        var launchArguments: [String] {
-            guard let mode = cliPermissionMode else { return [] }
-            return [DevinAgentToolPreferences.permissionModeArgumentName, mode]
+        /// `--permission-mode` for the one-shot CLI (Oracle), which cannot surface prompts: only an
+        /// explicit Full Approval escalates past the managed `auto` floor.
+        var unattendedCLIPermissionMode: String {
+            switch self {
+            case .fullApproval:
+                "dangerous"
+            case .providerDefault, .normal, .acceptEdits, .smart:
+                "auto"
+            }
+        }
+
+        /// Fail-closed copy when the live Devin session does not advertise the mode a level needs.
+        static func unavailableSessionModeDetail(
+            requestedModeID: String,
+            advertisedModeIDs: [String]
+        ) -> String {
+            func isAdvertised(_ modeID: String) -> Bool {
+                advertisedModeIDs.contains { $0.caseInsensitiveCompare(modeID) == .orderedSame }
+            }
+            let requestedLevels = allCases
+                .filter { $0.sessionModeID?.caseInsensitiveCompare(requestedModeID) == .orderedSame }
+                .map(\.displayName)
+            let subject = requestedLevels.isEmpty
+                ? "Devin session mode '\(requestedModeID)'"
+                : requestedLevels.joined(separator: " / ")
+            let alternatives = allCases
+                .filter { level in level.sessionModeID.map(isAdvertised) ?? true }
+                .map(\.displayName)
+            let advertised = advertisedModeIDs.isEmpty ? "none" : advertisedModeIDs.joined(separator: ", ")
+            return "\(subject) is not available for this Devin account or CLI (advertised modes: \(advertised)). "
+                + "Choose \(orList(alternatives)) in Devin permission settings."
+        }
+
+        private static func orList(_ items: [String]) -> String {
+            guard let last = items.last, items.count > 1 else { return items.first ?? "" }
+            return items.dropLast().joined(separator: ", ") + ", or " + last
         }
 
         /// Missing/blank values mean the explicit provider default. Unknown stored values
@@ -96,26 +121,6 @@ enum DevinAgentToolPreferences {
                 return .providerDefault
             }
             return allCases.first(where: { $0.rawValue.lowercased() == raw.lowercased() }) ?? .normal
-        }
-
-        /// Reverse mapping used by the provider and controller. Missing/blank means the
-        /// explicit provider default; unrecognized non-empty values remain distinguishable
-        /// because callers must reject them before launch/reuse.
-        static func from(cliPermissionMode: String?) -> PermissionLevel {
-            guard let raw = cliPermissionMode?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !raw.isEmpty,
-                  let level = allCases.first(where: { $0.cliPermissionMode?.lowercased() == raw.lowercased() })
-            else {
-                return .providerDefault
-            }
-            return level
-        }
-
-        static func isRecognizedCLIPermissionMode(_ mode: String?) -> Bool {
-            guard let raw = mode?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
-                return true
-            }
-            return allCases.contains { $0.cliPermissionMode?.caseInsensitiveCompare(raw) == .orderedSame }
         }
     }
 
@@ -133,6 +138,13 @@ enum DevinAgentToolPreferences {
             return document.permissionLevel()
         }
         return PermissionLevel.from(rawValue: defaults.string(forKey: permissionLevelKey))
+    }
+
+    static func unattendedLaunchPermissionMode(
+        defaults: UserDefaults = .standard,
+        secureStore: AgentPermissionSecureStore? = nil
+    ) -> String {
+        permissionLevel(defaults: defaults, secureStore: secureStore).unattendedCLIPermissionMode
     }
 
     static func setPermissionLevel(

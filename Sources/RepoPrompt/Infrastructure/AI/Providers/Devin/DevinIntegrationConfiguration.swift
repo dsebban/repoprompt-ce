@@ -6,6 +6,12 @@ enum DevinIntegrationConfiguration {
     private static let directoryPrefix = "RepoPromptDevinACP-"
     private static let sourceDevinPathMarkerName = ".repoprompt-source-devin-path"
     private static let sourceDevinSnapshotMarkerName = ".repoprompt-source-devin-snapshot.json"
+    private static let settingsFileName = "config.json"
+    private static let readConfigFromKey = "read_config_from"
+    /// Devin imports MCP servers from these tools' configs, and a same-named project entry
+    /// (for example `RepoPromptCE` in `~/.claude.json`) replaces the injected server. The
+    /// replacement then connects under another client identity and the run never routes.
+    private static let foreignMCPImportSources = ["claude", "cursor"]
 
     private struct SourceEntryFingerprint: Codable, Equatable {
         let deviceID: UInt64
@@ -81,10 +87,16 @@ enum DevinIntegrationConfiguration {
                 to: root,
                 excluding: ["devin"]
             )
+            // Both policies own the settings: linking the native file would let Devin import
+            // Claude or Cursor MCP servers, so failing to isolate it aborts the launch.
+            try writeImportIsolatedSettings(
+                from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
+                to: devinDirectory.appendingPathComponent(settingsFileName)
+            )
             try linkExistingConfiguration(
                 from: sourceDevinDirectory,
                 to: devinDirectory,
-                excluding: ["mcp_config.json"]
+                excluding: ["mcp_config.json", settingsFileName]
             )
             try sourceDevinDirectory.path.write(
                 to: root.appendingPathComponent(sourceDevinPathMarkerName),
@@ -248,6 +260,11 @@ enum DevinIntegrationConfiguration {
             {
                 continue
             }
+            if entry.lastPathComponent == settingsFileName,
+               try !restoreNativeImportSettings(overlay: entry, native: sourceEntry)
+            {
+                continue
+            }
             let originalFingerprint = snapshots[entry.lastPathComponent]
             let currentFingerprint = try sourceEntryFingerprint(at: sourceEntry)
             guard currentFingerprint == originalFingerprint,
@@ -383,6 +400,76 @@ enum DevinIntegrationConfiguration {
             )
         }
         try? FileManager.default.removeItem(at: replacement)
+    }
+
+    /// A missing native file isolates from an empty object; one that cannot be read or is not a
+    /// JSON object throws rather than fall back to the native file.
+    private static func writeImportIsolatedSettings(from source: URL, to destination: URL) throws {
+        guard var settings = settingsObject(at: source) else {
+            throw AIProviderError.invalidConfiguration(
+                detail: "Devin settings at \(source.path) could not be read as a JSON object, so RepoPrompt cannot "
+                    + "turn off Devin's Claude and Cursor MCP imports for this launch. Please fix or remove that file."
+            )
+        }
+        var readConfigFrom = settings[readConfigFromKey] as? [String: Any] ?? [:]
+        for importSource in foreignMCPImportSources {
+            readConfigFrom[importSource] = false
+        }
+        settings[readConfigFromKey] = readConfigFrom
+        try writeSettings(settings, to: destination, permissions: posixPermissions(at: source) ?? 0o600)
+    }
+
+    /// Keeps the launch-only import switches out of native config. Returns false when the
+    /// overlay holds no Devin write to publish.
+    private static func restoreNativeImportSettings(overlay: URL, native: URL) throws -> Bool {
+        guard var settings = settingsObject(at: overlay),
+              let nativeSettings = settingsObject(at: native)
+        else {
+            return true
+        }
+        settings[readConfigFromKey] = restoredReadConfigFrom(
+            overlay: settings[readConfigFromKey],
+            native: nativeSettings[readConfigFromKey]
+        )
+        guard !NSDictionary(dictionary: settings).isEqual(to: nativeSettings) else { return false }
+        try writeSettings(settings, to: overlay, permissions: posixPermissions(at: overlay) ?? 0o600)
+        return true
+    }
+
+    /// Undoes only the import toggles RepoPrompt set, keeping every other key's current value.
+    /// A toggle present natively gets its native value back; one RepoPrompt added is removed.
+    private static func restoredReadConfigFrom(overlay: Any?, native: Any?) -> Any? {
+        guard var restored = overlay as? [String: Any] else { return overlay }
+        let nativeReadConfigFrom = native as? [String: Any]
+        for importSource in foreignMCPImportSources {
+            restored[importSource] = nativeReadConfigFrom?[importSource]
+        }
+        // Prepare replaces an absent or non-object value with an object; with nothing else
+        // written into it, the native value is restored as it was.
+        if restored.isEmpty, nativeReadConfigFrom == nil {
+            return native
+        }
+        return restored
+    }
+
+    /// Returns an empty object for a missing file and nil for anything that is not a JSON object.
+    private static func settingsObject(at url: URL) -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data, options: .json5Allowed)) as? [String: Any]
+    }
+
+    private static func writeSettings(_ settings: [String: Any], to url: URL, permissions: Int) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: settings,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+    }
+
+    private static func posixPermissions(at url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
     }
 
     private static func usesStdioTransport(_ child: [String: Any]) -> Bool {
