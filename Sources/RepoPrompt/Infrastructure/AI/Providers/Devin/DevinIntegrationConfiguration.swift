@@ -87,14 +87,16 @@ enum DevinIntegrationConfiguration {
                 to: root,
                 excluding: ["devin"]
             )
-            let ownsSettings = repoPromptMCPConfiguration != nil && writeImportIsolatedSettings(
+            // Both policies own the settings: linking the native file would let Devin import
+            // Claude or Cursor MCP servers, so failing to isolate it aborts the launch.
+            try writeImportIsolatedSettings(
                 from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
                 to: devinDirectory.appendingPathComponent(settingsFileName)
             )
             try linkExistingConfiguration(
                 from: sourceDevinDirectory,
                 to: devinDirectory,
-                excluding: ownsSettings ? ["mcp_config.json", settingsFileName] : ["mcp_config.json"]
+                excluding: ["mcp_config.json", settingsFileName]
             )
             try sourceDevinDirectory.path.write(
                 to: root.appendingPathComponent(sourceDevinPathMarkerName),
@@ -400,21 +402,21 @@ enum DevinIntegrationConfiguration {
         try? FileManager.default.removeItem(at: replacement)
     }
 
-    /// Returns false, leaving the native file to be linked, when it is not a JSON object.
-    private static func writeImportIsolatedSettings(from source: URL, to destination: URL) -> Bool {
-        guard var settings = settingsObject(at: source) else { return false }
+    /// A missing native file isolates from an empty object; one that cannot be read or is not a
+    /// JSON object throws rather than fall back to the native file.
+    private static func writeImportIsolatedSettings(from source: URL, to destination: URL) throws {
+        guard var settings = settingsObject(at: source) else {
+            throw AIProviderError.invalidConfiguration(
+                detail: "Devin settings at \(source.path) could not be read as a JSON object, so RepoPrompt cannot "
+                    + "turn off Devin's Claude and Cursor MCP imports for this launch. Please fix or remove that file."
+            )
+        }
         var readConfigFrom = settings[readConfigFromKey] as? [String: Any] ?? [:]
         for importSource in foreignMCPImportSources {
             readConfigFrom[importSource] = false
         }
         settings[readConfigFromKey] = readConfigFrom
-        do {
-            try writeSettings(settings, to: destination, permissions: posixPermissions(at: source) ?? 0o600)
-            return true
-        } catch {
-            try? FileManager.default.removeItem(at: destination)
-            return false
-        }
+        try writeSettings(settings, to: destination, permissions: posixPermissions(at: source) ?? 0o600)
     }
 
     /// Keeps the launch-only import switches out of native config. Returns false when the
