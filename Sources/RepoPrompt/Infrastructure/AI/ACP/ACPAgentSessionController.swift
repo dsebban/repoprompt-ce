@@ -1977,12 +1977,12 @@ actor ACPAgentSessionController {
                 {
                     recentDevinToolCalls.removeValue(forKey: toolCallID)
                     recentDevinToolCallIDs.removeAll { $0 == toolCallID }
-                } else if update["title"] != nil || update["kind"] != nil
-                    || update["rawInput"] != nil || update["_meta"] != nil
-                {
+                } else if update["title"] != nil || update["kind"] != nil || update["_meta"] != nil {
                     if recentDevinToolCalls[toolCallID] != nil {
                         recentDevinToolCalls[toolCallID] = update
                     }
+                } else if let rawInput = update["rawInput"] {
+                    recentDevinToolCalls[toolCallID]?["rawInput"] = rawInput
                 }
             default:
                 break

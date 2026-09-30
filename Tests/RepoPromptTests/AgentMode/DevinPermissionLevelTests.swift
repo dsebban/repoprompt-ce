@@ -584,7 +584,7 @@ final class DevinPermissionLevelTests: XCTestCase {
     }
 
     func testHeadlessSparseRepoPromptPermissionsAreScopedAndFailClosed() async throws {
-        for scenario in ["git", "manage_selection", "foreign", "superseded", "completed", "broad-only", "alias-only"] {
+        for scenario in ["git", "git-input-update", "manage_selection", "foreign", "superseded", "completed", "broad-only", "alias-only"] {
             let directory = try makeTestDirectory(name: "DevinHeadlessPermission")
             let executable = directory.appendingPathComponent("devin")
             let record = directory.appendingPathComponent("permission.json")
@@ -615,6 +615,9 @@ final class DevinPermissionLevelTests: XCTestCase {
                     update({"sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Calling " + tool,
                             "kind": "read", "rawInput": {"op": "diff", "artifacts": False},
                             "_meta": {"cognition.ai/toolName": "mcp__" + server + "__" + tool}})
+                    if scenario == "git-input-update":
+                        update({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1",
+                                "rawInput": {"op": "diff", "artifacts": False, "detail": "patches"}})
                     if scenario == "superseded":
                         update({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1", "title": "Shell",
                                 "kind": "execute", "rawInput": {"command": "printf changed"},
@@ -647,7 +650,7 @@ final class DevinPermissionLevelTests: XCTestCase {
                     ))
                 }
             )
-            let shouldApprove = ["git", "manage_selection"].contains(scenario)
+            let shouldApprove = ["git", "git-input-update", "manage_selection"].contains(scenario)
             do {
                 let stream = try await provider.streamAgentMessage(AgentMessage(userMessage: "Discover"))
                 for try await _ in stream {}
