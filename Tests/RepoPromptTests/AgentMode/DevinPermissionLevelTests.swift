@@ -412,6 +412,29 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Do not use any tools"))
     }
 
+    func testOracleImageRequestCarriesImagesThroughToolLessACPMessage() {
+        let image = AITransientImage(bytes: Data([1, 2, 3]), mediaType: .png, title: "Diagram")
+        let message = DevinCLIProvider.test_makeImageAgentMessage(from: AIMessage(
+            systemPrompt: "Return Markdown.",
+            conversationMessages: [.init(role: .user, content: "Describe the image.")],
+            transientImages: [image],
+            temperature: nil,
+            promptSectionsOrder: PromptAssemblyBuilder.defaultSectionOrder,
+            disabledPromptSections: []
+        ))
+
+        XCTAssertEqual(message.transientImages, [image])
+        XCTAssertTrue(message.systemPrompt.contains("Return Markdown."))
+        XCTAssertTrue(message.systemPrompt.contains("Do not use any tools"))
+        XCTAssertTrue(message.userMessage.contains("Describe the image."))
+        XCTAssertFalse(message.userMessage.contains("Do not use any tools"))
+        XCTAssertNil(message.resumeSessionID)
+
+        let config = DevinCLIProvider().test_makeImageHeadlessConfig(modelName: "claude-opus-4-6")
+        XCTAssertEqual(config.modelString, "claude-opus-4-6")
+        XCTAssertFalse(config.includeRepoPromptMCPServer)
+    }
+
     func testOracleModelIdentityPreservesRawDevinModelID() {
         let model = AIModel.devinCustom(name: "anthropic/claude-opus-4.6")
 
