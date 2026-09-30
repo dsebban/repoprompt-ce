@@ -63,7 +63,8 @@ enum DevinIntegrationConfiguration {
     static func prepare(
         workingDirectory: String,
         mcpServers policy: MCPServersPolicy,
-        sourceEnvironment: [String: String]
+        sourceEnvironment: [String: String],
+        isolateForeignMCPImports: Bool = true
     ) throws -> PreparedConfiguration {
         let repoPromptMCPConfiguration: RepoPromptMCPServerConfiguration? = switch policy {
         case let .mergeRepoPrompt(configuration):
@@ -72,6 +73,9 @@ enum DevinIntegrationConfiguration {
             nil
         }
         try repoPromptMCPConfiguration?.validateACPLaunchCommand(workingDirectory: workingDirectory)
+        if isolateForeignMCPImports {
+            try validateProjectImportIsolation(workingDirectory: workingDirectory)
+        }
 
         let id = UUID()
         let root = configurationRoot(id: id)
@@ -90,20 +94,22 @@ enum DevinIntegrationConfiguration {
                 to: root,
                 excluding: ["devin"]
             )
-            // Both policies own the settings: linking the native file would let Devin import
-            // Claude or Cursor MCP servers, so failing to isolate it aborts the launch.
-            try writeImportIsolatedSettings(
-                from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
-                to: devinDirectory.appendingPathComponent(settingsFileName)
-            )
-            let preparedSettingsMarker = root.appendingPathComponent(preparedSettingsMarkerName)
-            try Data(contentsOf: devinDirectory.appendingPathComponent(settingsFileName))
-                .write(to: preparedSettingsMarker, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: preparedSettingsMarker.path)
+            // Import switches also suppress rules/skills. Headless runs isolate them;
+            // ordinary Agent Mode keeps its native settings and import behavior.
+            if isolateForeignMCPImports {
+                try writeImportIsolatedSettings(
+                    from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
+                    to: devinDirectory.appendingPathComponent(settingsFileName)
+                )
+                let preparedSettingsMarker = root.appendingPathComponent(preparedSettingsMarkerName)
+                try Data(contentsOf: devinDirectory.appendingPathComponent(settingsFileName))
+                    .write(to: preparedSettingsMarker, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: preparedSettingsMarker.path)
+            }
             try linkExistingConfiguration(
                 from: sourceDevinDirectory,
                 to: devinDirectory,
-                excluding: ["mcp_config.json", settingsFileName]
+                excluding: isolateForeignMCPImports ? ["mcp_config.json", settingsFileName] : ["mcp_config.json"]
             )
             try sourceDevinDirectory.path.write(
                 to: root.appendingPathComponent(sourceDevinPathMarkerName),
@@ -276,6 +282,7 @@ enum DevinIntegrationConfiguration {
                 continue
             }
             if entry.lastPathComponent == settingsFileName,
+               preparedSettings != nil,
                try !restoreNativeImportSettings(overlay: entry, native: sourceEntry)
             {
                 continue
@@ -415,6 +422,47 @@ enum DevinIntegrationConfiguration {
             )
         }
         try? FileManager.default.removeItem(at: replacement)
+    }
+
+    /// Project/local settings override the user overlay. Resolve nearest-directory and local
+    /// overrides first, stopping at the checkout root (including Git worktrees), without writes.
+    private static func validateProjectImportIsolation(workingDirectory: String) throws {
+        var directory = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        var resolvedSources = Set<String>()
+        while true {
+            for fileName in ["config.local.json", "config.json"] {
+                let file = directory.appendingPathComponent(".devin").appendingPathComponent(fileName)
+                guard let settings = settingsObject(at: file) else {
+                    throw AIProviderError.invalidConfiguration(
+                        detail: "Cannot verify Devin import isolation: \(file.path) is not a readable JSON object. Please fix or remove that file."
+                    )
+                }
+                guard let value = settings[readConfigFromKey] else { continue }
+                guard let imports = value as? [String: Any] else {
+                    throw AIProviderError.invalidConfiguration(
+                        detail: "Cannot verify Devin import isolation: read_config_from in \(file.path) must be an object."
+                    )
+                }
+                for source in foreignMCPImportSources where !resolvedSources.contains(source) {
+                    guard let value = imports[source] else { continue }
+                    guard let enabled = value as? Bool, !enabled else {
+                        throw AIProviderError.invalidConfiguration(
+                            detail: "Devin import isolation is overridden by \(file.path): set read_config_from.\(source) to false "
+                                + "or remove that override before running Context Builder discovery. RepoPrompt has not changed the file."
+                        )
+                    }
+                    resolvedSources.insert(source)
+                }
+            }
+            if directory.path == "/"
+                || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git").path)
+                || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".jj").path)
+            {
+                return
+            }
+            directory.deleteLastPathComponent()
+        }
     }
 
     /// A missing native file isolates from an empty object; one that cannot be read or is not a

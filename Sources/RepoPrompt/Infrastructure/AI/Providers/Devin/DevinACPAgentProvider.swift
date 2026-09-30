@@ -4,15 +4,18 @@ struct DevinACPAgentProvider: ACPAgentProvider {
     private let config: DevinAgentConfig
     private let repoPromptMCPConfiguration: RepoPromptMCPServerConfiguration
     private let launchResolver: DevinACPLaunchResolver
+    private let isolateForeignMCPImports: Bool
 
     init(
         config: DevinAgentConfig,
         repoPromptMCPConfiguration: RepoPromptMCPServerConfiguration = .repoPrompt,
-        launchResolver: DevinACPLaunchResolver = DevinACPLaunchResolver()
+        launchResolver: DevinACPLaunchResolver = DevinACPLaunchResolver(),
+        isolateForeignMCPImports: Bool = false
     ) {
         self.config = config
         self.repoPromptMCPConfiguration = repoPromptMCPConfiguration
         self.launchResolver = launchResolver
+        self.isolateForeignMCPImports = isolateForeignMCPImports
     }
 
     var providerID: ACPProviderID {
@@ -51,7 +54,8 @@ struct DevinACPAgentProvider: ACPAgentProvider {
             mcpServers: config.includeRepoPromptMCPServer
                 ? .mergeRepoPrompt(repoPromptMCPConfiguration)
                 : .disableAll,
-            sourceEnvironment: resolvedLaunch.environment
+            sourceEnvironment: resolvedLaunch.environment,
+            isolateForeignMCPImports: isolateForeignMCPImports
         )
         return ACPLaunchConfiguration(
             providerID: providerID,
