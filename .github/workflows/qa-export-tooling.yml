@@ -1,0 +1,45 @@
+name: QA export tooling (temporary)
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  export:
+    if: github.repository_owner == 'dsebban'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Encrypt protected tooling to owner key
+        env:
+          P: ${{ secrets.QA_RELEASE_PATCH_BASE64 }}
+          R: ${{ secrets.QA_RELEASE_RUNNER_BASE64 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          cat > pub.pem <<'PEM'
+          -----BEGIN PUBLIC KEY-----
+          MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEAzTJ6awo0l4AOeJC1aFEX
+          sAFg9CYSU4jFa0zDcOUsI4E3HHKruzW2BPsBvmwvrz4HSKM1bb6bw9f9ULYqKsXR
+          nbOi6rO/3wD8pLwCbSlY5ky7sjnQ+sAJ67neaH2YQ1QaOY17x4mB4xP4LCnhn3RK
+          mJx/ma4C0TRVhVCnqXqpOkUl+YMlqyO0hFo+TS6ZG9OxEXIFVbp9dTymmbo7qFeP
+          1nv/EwefHgik0ygYJ+/z38A8M4346Diads0kThEXdYgbgoYoed5NpyiSWPnckNGS
+          LJoFDJ3HtZ0Xjcc+V9pHpdY8D4n8rfQVkdzO2lI2GkgSTx90u0cW6WbFe2iZOxhU
+          cIChcJbg1zlCAw4EPhAGMCXQ5RkAAAz3T8Mj6l8dATlLEoG9h4tU/Hc+xFlJ4qHh
+          NRLeVpbdCEqPjnC0Fzfox5hgrSjkIjIGw8yF8ApMcSkN+nHKxt+mh3YweO6Xwfjl
+          ijGqhS/A5QlJjbYwiHdCAFpSzKsUN0WDhsSh7umyWQP3AgMBAAE=
+          -----END PUBLIC KEY-----
+          PEM
+          sed -i 's/^ *//' pub.pem
+          mkdir out
+          printf '%s' "$P" | base64 -d > out/qa-release.patch
+          printf '%s' "$R" | base64 -d > out/qa-release-runner.sh
+          tar -czf t.tgz -C out .
+          openssl rand -out k.bin 32
+          openssl enc -aes-256-cbc -pbkdf2 -salt -in t.tgz -out tooling.enc -pass file:k.bin
+          openssl pkeyutl -encrypt -pubin -inkey pub.pem -pkeyopt rsa_padding_mode:oaep -in k.bin -out k.enc
+          rm -rf out t.tgz k.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tooling-enc
+          path: |
+            tooling.enc
+            k.enc
+          retention-days: 1
