@@ -427,10 +427,29 @@ enum DevinIntegrationConfiguration {
         else {
             return true
         }
-        settings[readConfigFromKey] = nativeSettings[readConfigFromKey]
+        settings[readConfigFromKey] = restoredReadConfigFrom(
+            overlay: settings[readConfigFromKey],
+            native: nativeSettings[readConfigFromKey]
+        )
         guard !NSDictionary(dictionary: settings).isEqual(to: nativeSettings) else { return false }
         try writeSettings(settings, to: overlay, permissions: posixPermissions(at: overlay) ?? 0o600)
         return true
+    }
+
+    /// Undoes only the import toggles RepoPrompt set, keeping every other key's current value.
+    /// A toggle present natively gets its native value back; one RepoPrompt added is removed.
+    private static func restoredReadConfigFrom(overlay: Any?, native: Any?) -> Any? {
+        guard var restored = overlay as? [String: Any] else { return overlay }
+        let nativeReadConfigFrom = native as? [String: Any]
+        for importSource in foreignMCPImportSources {
+            restored[importSource] = nativeReadConfigFrom?[importSource]
+        }
+        // Prepare replaces an absent or non-object value with an object; with nothing else
+        // written into it, the native value is restored as it was.
+        if restored.isEmpty, nativeReadConfigFrom == nil {
+            return native
+        }
+        return restored
     }
 
     /// Returns an empty object for a missing file and nil for anything that is not a JSON object.
