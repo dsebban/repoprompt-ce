@@ -4994,6 +4994,7 @@ extension MCPServerViewModel {
                 fileToolLookupContextCacheByConnectionID.removeValue(forKey: connectionID)
                 pendingFileToolLookupContextResolutionByConnectionID.removeValue(forKey: connectionID)?.task.cancel()
                 tabContextByConnectionID.removeValue(forKey: connectionID)
+                publishDomainRoutingRelease(connectionID: connectionID)
                 presentationWindowByConnection.removeValue(forKey: connectionID)
 
                 if let boundRunID = context.runID,

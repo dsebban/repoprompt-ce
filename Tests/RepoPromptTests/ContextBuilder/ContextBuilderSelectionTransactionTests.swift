@@ -1,5 +1,6 @@
 import Foundation
 @testable import RepoPromptApp
+import RepoPromptDomainRuntime
 import XCTest
 
 @MainActor
@@ -61,7 +62,19 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
     }
 
     func testRolledBackPendingPolicyReplacementKeepsDisplacedDiscoveryContext() async throws {
-        let fixture = try await makeFixture(name: "replacement-rollback")
+        let storageRoot = try makeTestDirectory(name: "DiscoveryHandoffRollback")
+        let runtime = MCPDomainRuntime(configuration: .init(
+            mode: .app,
+            profileIdentifier: "discovery-handoff-\(UUID().uuidString)",
+            storageDirectory: storageRoot.appendingPathComponent("runtime-state"),
+            workspaceStorageDirectory: storageRoot,
+            eventDirectory: storageRoot.appendingPathComponent("events"),
+            temporaryDirectory: storageRoot.appendingPathComponent("tmp"),
+            externalReloadInterval: nil
+        ))
+        try await runtime.start()
+        addTeardownBlock { _ = await runtime.shutdown() }
+        let fixture = try await makeFixture(name: "replacement-rollback", domainRuntime: runtime)
         defer { fixture.cleanup() }
         let selection = StoredSelection(selectedPaths: [fixture.fileA.path])
         let server = fixture.window.mcpServer
@@ -80,6 +93,12 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
             clientName: "devin"
         ))
 
+        await server.domainRoutingPublishTask?.value
+        XCTAssertNotNil(server.tabContextCancellablesByConnectionID[successorID])
+        let coordinator = try XCTUnwrap(server.domainRoutingCoordinator)
+        let beforeRollback = await coordinator.snapshot()
+        XCTAssertTrue(beforeRollback.connections.contains { $0.registration.connectionID == successorID })
+
         XCTAssertEqual(
             server.rollbackPendingPolicyRunIDMapping(
                 token,
@@ -91,6 +110,11 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         )
 
         // Rollback drops only the successor's inherited copy; the displaced snapshot is untouched.
+        await server.domainRoutingPublishTask?.value
+        let afterRollback = await coordinator.snapshot()
+        XCTAssertFalse(afterRollback.connections.contains { $0.registration.connectionID == successorID })
+        XCTAssertTrue(afterRollback.connections.contains { $0.registration.connectionID == fixture.connectionID })
+        XCTAssertNil(server.tabContextCancellablesByConnectionID[successorID])
         XCTAssertNil(server.tabContextByConnectionID[successorID])
         XCTAssertEqual(fixture.boundContext?.runID, fixture.runID)
         XCTAssertEqual(fixture.boundContext?.selection, selection)
@@ -267,10 +291,10 @@ final class ContextBuilderSelectionTransactionTests: XCTestCase {
         XCTAssertEqual(fixture.canonicalSelection, newer)
     }
 
-    private func makeFixture(name: String) async throws -> Fixture {
+    private func makeFixture(name: String, domainRuntime: MCPDomainRuntime? = nil) async throws -> Fixture {
         let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
         GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
-        let window = WindowState()
+        let window = if let domainRuntime { WindowState(domainRuntime: domainRuntime) } else { WindowState() }
         GlobalSettingsStore.shared.setMCPAutoStart(previousAutoStart, commit: false)
         WindowStatesManager.shared.registerWindowState(window)
         await window.workspaceManager.awaitInitialized()
