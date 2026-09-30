@@ -584,7 +584,10 @@ final class DevinPermissionLevelTests: XCTestCase {
     }
 
     func testHeadlessSparseRepoPromptPermissionsAreScopedAndFailClosed() async throws {
-        for scenario in ["git", "git-input-update", "manage_selection", "foreign", "superseded", "completed", "broad-only", "alias-only"] {
+        for scenario in [
+            "git", "git-input-update", "manage_selection", "corroborated", "foreign", "superseded", "completed",
+            "broad-only", "alias-only", "contradicted", "input-update-contradicted", "meta-contradicted"
+        ] {
             let directory = try makeTestDirectory(name: "DevinHeadlessPermission")
             let executable = directory.appendingPathComponent("devin")
             let record = directory.appendingPathComponent("permission.json")
@@ -615,7 +618,7 @@ final class DevinPermissionLevelTests: XCTestCase {
                     update({"sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Calling " + tool,
                             "kind": "read", "rawInput": {"op": "diff", "artifacts": False},
                             "_meta": {"cognition.ai/toolName": "mcp__" + server + "__" + tool}})
-                    if scenario == "git-input-update":
+                    if scenario in ["git-input-update", "input-update-contradicted"]:
                         update({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1",
                                 "rawInput": {"op": "diff", "artifacts": False, "detail": "patches"}})
                     if scenario == "superseded":
@@ -629,8 +632,16 @@ final class DevinPermissionLevelTests: XCTestCase {
                     if scenario not in ["broad-only", "alias-only"]:
                         options.append({"optionId": "allow_once", "kind": "allow_once", "name": "Allow"})
                     options.append({"optionId": "reject_once", "kind": "reject_once", "name": "Decline"})
+                    permission_tool = {"toolCallId": "tool-1"}
+                    if scenario == "corroborated":
+                        permission_tool.update({"title": "Calling git", "kind": "read",
+                                                "_meta": {"cognition.ai/toolName": "mcp__RepoPromptCE__git"}})
+                    if scenario in ["contradicted", "input-update-contradicted"]:
+                        permission_tool.update({"title": "Shell command", "kind": "execute"})
+                    if scenario == "meta-contradicted":
+                        permission_tool["_meta"] = {"cognition.ai/toolName": "shell"}
                     send({"id": "permission-1", "method": "session/request_permission", "params": {
-                        "sessionId": "test-session", "toolCall": {"toolCallId": "tool-1"}, "options": options}})
+                        "sessionId": "test-session", "toolCall": permission_tool, "options": options}})
                 elif request.get("id") == "permission-1":
                     with open(r"\#(record.path)", "w", encoding="utf-8") as output:
                         json.dump(request["result"]["outcome"], output)
@@ -650,7 +661,7 @@ final class DevinPermissionLevelTests: XCTestCase {
                     ))
                 }
             )
-            let shouldApprove = ["git", "git-input-update", "manage_selection"].contains(scenario)
+            let shouldApprove = ["git", "git-input-update", "manage_selection", "corroborated"].contains(scenario)
             do {
                 let stream = try await provider.streamAgentMessage(AgentMessage(userMessage: "Discover"))
                 for try await _ in stream {}
