@@ -51,6 +51,22 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertEqual(Level.fullApproval.launchArguments, ["--permission-mode", "dangerous"])
     }
 
+    func testDevinClassifiesOnlyThoughtLevel() {
+        let provider = DevinACPAgentProvider(config: DevinAgentConfig())
+        XCTAssertTrue(provider.supportsParameterizedModelPicker)
+        let cases: [(configID: String, category: String?, kind: ACPModelParameterKind?)] = [
+            ("arbitrary_effort_id", " ThOuGhT_LeVeL ", .thinking),
+            ("thought_level", "model_config", nil),
+            ("speed", "model_config", nil),
+            ("speed", "speed", nil)
+        ]
+        for (configID, category, expectedKind) in cases {
+            XCTAssertEqual(provider.modelParameterKind(for: .init(
+                configID: configID, category: category, displayName: configID, choices: []
+            )), expectedKind)
+        }
+    }
+
     func testOnlyFullApprovalIsAWarningLevel() {
         for level in Level.allCases {
             XCTAssertEqual(level.isWarning, level == .fullApproval, "unexpected warning flag for \(level)")

@@ -19,6 +19,15 @@ struct DevinACPAgentProvider: ACPAgentProvider {
         .devin
     }
 
+    var supportsParameterizedModelPicker: Bool {
+        true
+    }
+
+    func modelParameterKind(for input: ACPModelParameterClassificationInput) -> ACPModelParameterKind? {
+        input.category?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "thought_level"
+            ? .thinking : nil
+    }
+
     func support(for _: ACPRunRequest) async throws -> ACPSupportResult {
         try await launchResolver.probeSupport(for: config)
     }
