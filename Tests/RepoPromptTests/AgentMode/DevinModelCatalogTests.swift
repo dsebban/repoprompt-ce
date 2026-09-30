@@ -1,4 +1,5 @@
 import Foundation
+import MCP
 @_spi(TestSupport) @testable import RepoPromptApp
 import XCTest
 
@@ -101,6 +102,35 @@ final class DevinModelCatalogTests: XCTestCase {
             selectedModelRaw: "gpt-6-sol-medium",
             persistedSelections: [pin]
         ).isEmpty)
+    }
+
+    func testListAgentsGroupsDevinEffortsByCatalogFamily() {
+        AgentACPModelRegistry.shared.updateDiscoveredModels(Self.snapshot, for: .devin)
+        let models: [Value] = DevinModelCatalog.current.entries.map {
+            .object(["model_id": .string("devin:\($0.option.rawValue)"), "name": .string($0.option.displayName)])
+        }
+        let content = ToolOutputFormatter.formatAgentManage(
+            args: ["op": .string("list_agents")],
+            value: .object(["agents": .array([.object([
+                "name": .string("Devin CLI"),
+                "available": .bool(true),
+                "models": .array(models)
+            ])])])
+        )
+        let text = content.compactMap { item -> String? in
+            if case let .text(text, _, _) = item { return text }
+            return nil
+        }.joined()
+        let lines = Set(text.split(separator: "\n").map(String.init))
+
+        for expected in [
+            "  `devin:gpt-6-sol-{none|low|medium|high}` — GPT-6 Sol",
+            "  `devin:swe-2-{medium|high|max}` — SWE-2",
+            "  `devin:swe-1-7-medium` — SWE-1.7",
+            "  `devin:fusion-a-high-sidekick-b-medium` — Fusion"
+        ] {
+            XCTAssertTrue(lines.contains(expected), "missing \(expected) in\n\(text)")
+        }
     }
 
     // MARK: - ACP boundary
