@@ -6,6 +6,12 @@ enum DevinIntegrationConfiguration {
     private static let directoryPrefix = "RepoPromptDevinACP-"
     private static let sourceDevinPathMarkerName = ".repoprompt-source-devin-path"
     private static let sourceDevinSnapshotMarkerName = ".repoprompt-source-devin-snapshot.json"
+    private static let settingsFileName = "config.json"
+    private static let readConfigFromKey = "read_config_from"
+    /// Devin imports MCP servers from these tools' configs, and a same-named project entry
+    /// (for example `RepoPromptCE` in `~/.claude.json`) replaces the injected server. The
+    /// replacement then connects under another client identity and the run never routes.
+    private static let foreignMCPImportSources = ["claude", "cursor"]
 
     private struct SourceEntryFingerprint: Codable, Equatable {
         let deviceID: UInt64
@@ -81,10 +87,14 @@ enum DevinIntegrationConfiguration {
                 to: root,
                 excluding: ["devin"]
             )
+            let ownsSettings = repoPromptMCPConfiguration != nil && writeImportIsolatedSettings(
+                from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
+                to: devinDirectory.appendingPathComponent(settingsFileName)
+            )
             try linkExistingConfiguration(
                 from: sourceDevinDirectory,
                 to: devinDirectory,
-                excluding: ["mcp_config.json"]
+                excluding: ownsSettings ? ["mcp_config.json", settingsFileName] : ["mcp_config.json"]
             )
             try sourceDevinDirectory.path.write(
                 to: root.appendingPathComponent(sourceDevinPathMarkerName),
@@ -248,6 +258,11 @@ enum DevinIntegrationConfiguration {
             {
                 continue
             }
+            if entry.lastPathComponent == settingsFileName,
+               try !restoreNativeImportSettings(overlay: entry, native: sourceEntry)
+            {
+                continue
+            }
             let originalFingerprint = snapshots[entry.lastPathComponent]
             let currentFingerprint = try sourceEntryFingerprint(at: sourceEntry)
             guard currentFingerprint == originalFingerprint,
@@ -383,6 +398,57 @@ enum DevinIntegrationConfiguration {
             )
         }
         try? FileManager.default.removeItem(at: replacement)
+    }
+
+    /// Returns false, leaving the native file to be linked, when it is not a JSON object.
+    private static func writeImportIsolatedSettings(from source: URL, to destination: URL) -> Bool {
+        guard var settings = settingsObject(at: source) else { return false }
+        var readConfigFrom = settings[readConfigFromKey] as? [String: Any] ?? [:]
+        for importSource in foreignMCPImportSources {
+            readConfigFrom[importSource] = false
+        }
+        settings[readConfigFromKey] = readConfigFrom
+        do {
+            try writeSettings(settings, to: destination, permissions: posixPermissions(at: source) ?? 0o600)
+            return true
+        } catch {
+            try? FileManager.default.removeItem(at: destination)
+            return false
+        }
+    }
+
+    /// Keeps the launch-only import switches out of native config. Returns false when the
+    /// overlay holds no Devin write to publish.
+    private static func restoreNativeImportSettings(overlay: URL, native: URL) throws -> Bool {
+        guard var settings = settingsObject(at: overlay),
+              let nativeSettings = settingsObject(at: native)
+        else {
+            return true
+        }
+        settings[readConfigFromKey] = nativeSettings[readConfigFromKey]
+        guard !NSDictionary(dictionary: settings).isEqual(to: nativeSettings) else { return false }
+        try writeSettings(settings, to: overlay, permissions: posixPermissions(at: overlay) ?? 0o600)
+        return true
+    }
+
+    /// Returns an empty object for a missing file and nil for anything that is not a JSON object.
+    private static func settingsObject(at url: URL) -> [String: Any]? {
+        guard FileManager.default.fileExists(atPath: url.path) else { return [:] }
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data, options: .json5Allowed)) as? [String: Any]
+    }
+
+    private static func writeSettings(_ settings: [String: Any], to url: URL, permissions: Int) throws {
+        let data = try JSONSerialization.data(
+            withJSONObject: settings,
+            options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        )
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: permissions], ofItemAtPath: url.path)
+    }
+
+    private static func posixPermissions(at url: URL) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: url.path))?[.posixPermissions] as? Int
     }
 
     private static func usesStdioTransport(_ child: [String: Any]) -> Bool {
