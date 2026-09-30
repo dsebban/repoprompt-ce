@@ -102,13 +102,53 @@ final class DevinDiscoveryImportIsolationTests: XCTestCase {
             return XCTFail("Scripted Devin launch should be supported")
         }
         let launch = try provider.makeLaunchConfiguration(for: request)
-        let overlay = URL(fileURLWithPath: try XCTUnwrap(launch.environment["XDG_CONFIG_HOME"]))
+        let overlay = try URL(fileURLWithPath: XCTUnwrap(launch.environment["XDG_CONFIG_HOME"]))
             .appendingPathComponent("devin/config.json")
         XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: overlay.path))
         XCTAssertEqual(try String(contentsOf: overlay, encoding: .utf8), nativeText)
         await provider.cleanupLaunchArtifacts(for: launch)
         XCTAssertEqual(try String(contentsOf: fixture.nativeConfig, encoding: .utf8), nativeText)
         XCTAssertEqual(try String(contentsOf: project, encoding: .utf8), projectText)
+    }
+
+    /// An imported Claude or Cursor server named like RepoPrompt's replaces the injected one, so
+    /// ordinary Agent Mode isolates imports exactly then; other imports are left alone.
+    func testAgentModeIsolatesImportsOnlyWhenAnImportShadowsRepoPromptServer() throws {
+        let cases: [(file: String, contents: (URL) -> String, shadows: Bool)] = [
+            (".claude.json", { workspace in #"{"projects":{"\#(workspace.path)":{"mcpServers":{"RepoPromptCE":{"command":"proxy"}}}}}"# }, true),
+            (".claude.json", { _ in #"{"mcpServers":{"repopromptce":{"command":"proxy"}}}"# }, true),
+            (".cursor/mcp.json", { _ in #"{"mcpServers":{"RepoPromptCE":{"command":"proxy"}}}"# }, true),
+            ("workspace/.mcp.json", { _ in #"{"mcpServers":{"RepoPromptCE":{"command":"proxy"}}}"# }, true),
+            ("workspace/.cursor/mcp.json", { _ in "{broken" }, true),
+            (".claude.json", { workspace in #"{"projects":{"\#(workspace.path)":{"mcpServers":{"Other":{"command":"x"}}}}}"# }, false),
+            (".claude.json", { workspace in #"{"projects":{"\#(workspace.path)-sibling":{"mcpServers":{"RepoPromptCE":{}}}}}"# }, false)
+        ]
+        for testCase in cases {
+            let fixture = try makeFixture()
+            let home = try URL(fileURLWithPath: XCTUnwrap(fixture.environment["HOME"]), isDirectory: true)
+            try write(testCase.contents(fixture.workspace), to: home.appendingPathComponent(testCase.file))
+            let mcpExecutable = fixture.workspace.appendingPathComponent("repoprompt-mcp")
+            try write("#!/bin/sh\nexit 0\n", to: mcpExecutable)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: mcpExecutable.path)
+
+            let prepared = try DevinIntegrationConfiguration.prepare(
+                workingDirectory: fixture.workspace.path,
+                mcpServers: .mergeRepoPrompt(RepoPromptMCPServerConfiguration(command: mcpExecutable.path)),
+                sourceEnvironment: fixture.environment,
+                isolateForeignMCPImports: false
+            )
+            let root = try URL(fileURLWithPath: XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]))
+            addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+            let overlay = try overlayConfig(prepared)
+            let isLinked = (try? FileManager.default.destinationOfSymbolicLink(atPath: overlay.path)) != nil
+            XCTAssertEqual(!isLinked, testCase.shadows, "\(testCase.file): \(testCase.contents(fixture.workspace))")
+            if testCase.shadows {
+                let settings = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: overlay)) as? [String: Any])
+                XCTAssertEqual(settings["read_config_from"] as? [String: Bool], ["claude": false, "cursor": false])
+            }
+            try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
+            XCTAssertEqual(try String(contentsOf: fixture.nativeConfig, encoding: .utf8), "{}")
+        }
     }
 
     func testUnisolatedCleanupDoesNotUndoDevinImportWrites() throws {
@@ -123,7 +163,7 @@ final class DevinDiscoveryImportIsolationTests: XCTestCase {
         XCTAssertEqual(try String(contentsOf: fixture.nativeConfig, encoding: .utf8), changed)
     }
 
-    private struct Fixture: Sendable {
+    private struct Fixture {
         let workspace: URL
         let nativeConfig: URL
         let environment: [String: String]
@@ -154,13 +194,13 @@ final class DevinDiscoveryImportIsolationTests: XCTestCase {
             sourceEnvironment: fixture.environment,
             isolateForeignMCPImports: isolateForeignMCPImports
         )
-        let root = URL(fileURLWithPath: try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]))
+        let root = try URL(fileURLWithPath: XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]))
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         return prepared
     }
 
     private func overlayConfig(_ prepared: DevinIntegrationConfiguration.PreparedConfiguration) throws -> URL {
-        URL(fileURLWithPath: try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]))
+        try URL(fileURLWithPath: XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]))
             .appendingPathComponent("devin/config.json")
     }
 

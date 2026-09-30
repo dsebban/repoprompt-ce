@@ -73,6 +73,15 @@ enum DevinIntegrationConfiguration {
             nil
         }
         try repoPromptMCPConfiguration?.validateACPLaunchCommand(workingDirectory: workingDirectory)
+        // Ordinary Agent Mode keeps Devin's imports (they also carry rules and skills) unless an
+        // imported server would replace the injected RepoPrompt one and leave the run unrouted.
+        let isolateForeignMCPImports = isolateForeignMCPImports || repoPromptMCPConfiguration.map {
+            foreignImportsShadowServer(
+                named: $0.name,
+                workingDirectory: workingDirectory,
+                environment: sourceEnvironment
+            )
+        } == true
         if isolateForeignMCPImports {
             try validateProjectImportIsolation(workingDirectory: workingDirectory)
         }
@@ -94,8 +103,8 @@ enum DevinIntegrationConfiguration {
                 to: root,
                 excluding: ["devin"]
             )
-            // Import switches also suppress rules/skills. Headless runs isolate them;
-            // ordinary Agent Mode keeps its native settings and import behavior.
+            // Import switches also suppress rules/skills. Headless runs isolate them; ordinary
+            // Agent Mode keeps native settings unless an import would replace RepoPrompt's server.
             if isolateForeignMCPImports {
                 try writeImportIsolatedSettings(
                     from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
@@ -449,7 +458,7 @@ enum DevinIntegrationConfiguration {
                     guard let enabled = value as? Bool, !enabled else {
                         throw AIProviderError.invalidConfiguration(
                             detail: "Devin import isolation is overridden by \(file.path): set read_config_from.\(source) to false "
-                                + "or remove that override before running Context Builder discovery. RepoPrompt has not changed the file."
+                                + "or remove that override before running Devin through RepoPrompt. RepoPrompt has not changed the file."
                         )
                     }
                     resolvedSources.insert(source)
@@ -460,6 +469,60 @@ enum DevinIntegrationConfiguration {
                 || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".jj").path)
             {
                 return
+            }
+            directory.deleteLastPathComponent()
+        }
+    }
+
+    /// Whether a Claude or Cursor config Devin imports MCP servers from defines a server named like
+    /// the injected RepoPrompt one, which the import would replace. Checks `~/.claude.json` (global
+    /// and per-project entries for the working directory or an ancestor), `~/.cursor/mcp.json`,
+    /// and project `.mcp.json` / `.cursor/mcp.json` up to the checkout root. A config that exists
+    /// but cannot be parsed counts as shadowing, so the launch isolates instead of risking it.
+    private static func foreignImportsShadowServer(
+        named serverName: String,
+        workingDirectory: String,
+        environment: [String: String]
+    ) -> Bool {
+        let name = serverName.lowercased()
+        func shadows(configAt url: URL, serverTables: ([String: Any]) -> [Any?]) -> Bool {
+            guard FileManager.default.fileExists(atPath: url.path) else { return false }
+            guard let data = try? Data(contentsOf: url),
+                  let object = (try? JSONSerialization.jsonObject(with: data, options: .json5Allowed)) as? [String: Any]
+            else { return true }
+            return serverTables(object).contains { table in
+                (table as? [String: Any])?.keys.contains { $0.lowercased() == name } ?? false
+            }
+        }
+        let homePath = environment["HOME"].flatMap { $0.isEmpty ? nil : $0 }
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        let home = URL(fileURLWithPath: homePath, isDirectory: true)
+        var directory = URL(fileURLWithPath: workingDirectory, isDirectory: true)
+            .resolvingSymlinksInPath().standardizedFileURL
+        let workingPath = directory.path
+        let claudeShadows = shadows(configAt: home.appendingPathComponent(".claude.json")) { object in
+            var tables: [Any?] = [object["mcpServers"]]
+            for (path, project) in object["projects"] as? [String: Any] ?? [:] {
+                let root = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
+                guard workingPath == root || workingPath.hasPrefix(root == "/" ? root : root + "/") else { continue }
+                tables.append((project as? [String: Any])?["mcpServers"])
+            }
+            return tables
+        }
+        if claudeShadows || shadows(configAt: home.appendingPathComponent(".cursor/mcp.json"), serverTables: { [$0["mcpServers"]] }) {
+            return true
+        }
+        while true {
+            for file in [".mcp.json", ".cursor/mcp.json"]
+                where shadows(configAt: directory.appendingPathComponent(file), serverTables: { [$0["mcpServers"]] })
+            {
+                return true
+            }
+            if directory.path == "/"
+                || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git").path)
+                || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".jj").path)
+            {
+                return false
             }
             directory.deleteLastPathComponent()
         }
