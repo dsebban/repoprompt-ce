@@ -1022,6 +1022,42 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         try? FileManager.default.removeItem(at: overlayRoot)
     }
 
+    /// A foreign writer (for example the user's own `devin` CLI) changing native settings during
+    /// the run must not be mistaken for a Devin write while the overlay still holds what
+    /// `prepare` wrote, including when Devin rewrote it byte-identically.
+    func testCleanupSkipsUnchangedOverlaySettingsWhenNativeConfigChanges() throws {
+        for devinRewritesIdenticalBytes in [false, true] {
+            let sourceRoot = try makeTestDirectory(name: "DevinIntegrationForeignNativeWrite")
+            let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
+            try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
+            let nativeConfig = devinSource.appendingPathComponent("config.json")
+            try #"{"agent": {"model": "before"}}"#.write(to: nativeConfig, atomically: true, encoding: .utf8)
+
+            let prepared = try DevinIntegrationConfiguration.prepare(
+                workingDirectory: sourceRoot.path,
+                mcpServers: .disableAll,
+                sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path, "HOME": sourceRoot.path]
+            )
+            let overlayRoot = try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]).asFileURL
+            addTeardownBlock { try? FileManager.default.removeItem(at: overlayRoot) }
+            let overlayConfig = overlayRoot
+                .appendingPathComponent("devin", isDirectory: true)
+                .appendingPathComponent("config.json")
+            if devinRewritesIdenticalBytes {
+                try Data(contentsOf: overlayConfig).write(to: overlayConfig, options: .atomic)
+            }
+            let nativeAfter = #"{"agent": {"model": "native-after"}, "preferred_family_models": {"f": "native-after"}}"#
+            try nativeAfter.write(to: nativeConfig, atomically: true, encoding: .utf8)
+
+            var replacements = 0
+            try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact) { _ in replacements += 1 }
+
+            XCTAssertEqual(replacements, 0, "rewrite=\(devinRewritesIdenticalBytes)")
+            XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), nativeAfter, "rewrite=\(devinRewritesIdenticalBytes)")
+            XCTAssertFalse(FileManager.default.fileExists(atPath: overlayRoot.path), "rewrite=\(devinRewritesIdenticalBytes)")
+        }
+    }
+
     func testCleanupRestoresNativeConfigWhenItChangesDuringPublication() throws {
         let sourceRoot = try makeTestDirectory(name: "DevinIntegrationPublicationRace")
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)

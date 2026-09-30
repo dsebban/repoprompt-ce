@@ -6,6 +6,9 @@ enum DevinIntegrationConfiguration {
     private static let directoryPrefix = "RepoPromptDevinACP-"
     private static let sourceDevinPathMarkerName = ".repoprompt-source-devin-path"
     private static let sourceDevinSnapshotMarkerName = ".repoprompt-source-devin-snapshot.json"
+    /// Bytes of the overlay settings as `prepare` wrote them, so cleanup can tell an untouched
+    /// overlay apart from a Devin write even after native settings changed during the run.
+    private static let preparedSettingsMarkerName = ".repoprompt-prepared-devin-settings.json"
     private static let settingsFileName = "config.json"
     private static let readConfigFromKey = "read_config_from"
     /// Devin imports MCP servers from these tools' configs, and a same-named project entry
@@ -93,6 +96,10 @@ enum DevinIntegrationConfiguration {
                 from: sourceDevinDirectory.appendingPathComponent(settingsFileName),
                 to: devinDirectory.appendingPathComponent(settingsFileName)
             )
+            let preparedSettingsMarker = root.appendingPathComponent(preparedSettingsMarkerName)
+            try Data(contentsOf: devinDirectory.appendingPathComponent(settingsFileName))
+                .write(to: preparedSettingsMarker, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: preparedSettingsMarker.path)
             try linkExistingConfiguration(
                 from: sourceDevinDirectory,
                 to: devinDirectory,
@@ -245,6 +252,7 @@ enum DevinIntegrationConfiguration {
             [String: SourceEntryFingerprint].self,
             from: Data(contentsOf: root.appendingPathComponent(sourceDevinSnapshotMarkerName))
         )
+        let preparedSettings = try? Data(contentsOf: root.appendingPathComponent(preparedSettingsMarkerName))
         try FileManager.default.createDirectory(
             at: sourceDirectory,
             withIntermediateDirectories: true,
@@ -258,6 +266,13 @@ enum DevinIntegrationConfiguration {
             if let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: entry.path),
                URL(fileURLWithPath: destination).standardizedFileURL == sourceEntry.standardizedFileURL
             {
+                continue
+            }
+            if entry.lastPathComponent == settingsFileName,
+               let preparedSettings,
+               (try? Data(contentsOf: entry)) == preparedSettings
+            {
+                // Devin wrote nothing; a foreign native change is not ours to publish over.
                 continue
             }
             if entry.lastPathComponent == settingsFileName,
