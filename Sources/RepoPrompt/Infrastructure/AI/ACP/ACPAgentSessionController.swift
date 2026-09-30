@@ -304,6 +304,8 @@ actor ACPAgentSessionController {
     private var inboundMessageSequence: UInt64 = 0
     private var pendingRequests: [String: PendingRequest] = [:]
     private var pendingPermissionRequests: [String: PendingPermissionRequest] = [:]
+    private var recentDevinToolCalls: [String: [String: Any]] = [:]
+    private var recentDevinToolCallIDs: [String] = []
     private var activePromptTurnID: UUID?
     private var activePromptOpenCodeStderrError: String?
     #if DEBUG
@@ -782,6 +784,8 @@ actor ACPAgentSessionController {
         overrideRunRequest: ACPRunRequest?
     ) async throws {
         suppressSessionLoadReplayUpdates = false
+        recentDevinToolCalls.removeAll()
+        recentDevinToolCallIDs.removeAll()
         let promptTurnID = UUID()
         activePromptTurnID = promptTurnID
         resetActivePromptTrace()
@@ -1663,6 +1667,8 @@ actor ACPAgentSessionController {
         #endif
         guard state != .closed, state != .closing else { return }
         state = .closing
+        recentDevinToolCalls.removeAll()
+        recentDevinToolCallIDs.removeAll()
         log("Shutting down ACP controller")
 
         await cancelPrompt()
@@ -1955,6 +1961,34 @@ actor ACPAgentSessionController {
             return
         }
 
+        if provider.providerID == .devin, let toolCallID = update["toolCallId"] as? String {
+            switch update["sessionUpdate"] as? String {
+            case "tool_call":
+                if recentDevinToolCalls[toolCallID] == nil {
+                    recentDevinToolCallIDs.append(toolCallID)
+                }
+                recentDevinToolCalls[toolCallID] = update
+                if recentDevinToolCallIDs.count > 64 {
+                    recentDevinToolCalls.removeValue(forKey: recentDevinToolCallIDs.removeFirst())
+                }
+            case "tool_call_update":
+                if let status = update["status"] as? String,
+                   ["completed", "failed", "cancelled"].contains(status)
+                {
+                    recentDevinToolCalls.removeValue(forKey: toolCallID)
+                    recentDevinToolCallIDs.removeAll { $0 == toolCallID }
+                } else if update["title"] != nil || update["kind"] != nil
+                    || update["rawInput"] != nil || update["_meta"] != nil
+                {
+                    if recentDevinToolCalls[toolCallID] != nil {
+                        recentDevinToolCalls[toolCallID] = update
+                    }
+                }
+            default:
+                break
+            }
+        }
+
         let normalizedEvents = provider.normalizeSessionUpdate(update, sessionID: sessionID)
         #if DEBUG
             captureNormalizedACPEvents(normalizedEvents, sessionID: sessionID, sourceUpdate: update)
@@ -2032,9 +2066,11 @@ actor ACPAgentSessionController {
         }
 
         let toolCallID = (toolCall["toolCallId"] as? String) ?? UUID().uuidString
-        let toolTitle = (toolCall["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let toolKind = (toolCall["kind"] as? String)?.lowercased()
-        let rawInputJSON = serializeJSON(toolCall["rawInput"])
+        var resolvedToolCall = recentDevinToolCalls[toolCallID] ?? [:]
+        resolvedToolCall.merge(toolCall) { _, requestValue in requestValue }
+        let toolTitle = (resolvedToolCall["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let toolKind = (resolvedToolCall["kind"] as? String)?.lowercased()
+        let rawInputJSON = serializeJSON(resolvedToolCall["rawInput"])
         let optionDictionaries = params["options"] as? [[String: Any]] ?? []
         let options = optionDictionaries.compactMap { optionDictionary -> PermissionOption? in
             guard
@@ -2044,11 +2080,11 @@ actor ACPAgentSessionController {
             return PermissionOption(optionID: optionID, kind: kind)
         }
 
-        let rawInput = toolCall["rawInput"] as? [String: Any]
+        let rawInput = resolvedToolCall["rawInput"] as? [String: Any]
         let autoApprovalPayload = repoPromptPermissionAutoApprovalPayload(
             toolTitle: toolTitle,
             toolKind: toolKind,
-            toolCall: toolCall,
+            toolCall: resolvedToolCall,
             rawInput: rawInput,
             options: optionDictionaries
         )
@@ -2075,7 +2111,9 @@ actor ACPAgentSessionController {
         )
 
         if let autoApproval = autoApprovalSelection(
-            requestToolName: toolTitle,
+            requestToolName: provider.providerID == .devin
+                ? ((resolvedToolCall["_meta"] as? [String: Any])?["cognition.ai/toolName"] as? String ?? toolTitle)
+                : toolTitle,
             requestPayload: autoApprovalPayload,
             options: options
         ) {
@@ -3776,15 +3814,14 @@ actor ACPAgentSessionController {
         requestPayload: [String: Any],
         options: [PermissionOption]
     ) -> AutoApprovalSelection? {
-        guard provider.providerID != .devin,
-              let match = MCPIntegrationHelper.repoPromptPermissionAutoApprovalMatch(
-                  requestToolName: requestToolName,
-                  requestPayload: requestPayload
-              ), isStrictACPRepoPromptPermissionMatch(
-                  match,
-                  requestToolName: requestToolName,
-                  requestPayload: requestPayload
-              )
+        guard let match = MCPIntegrationHelper.repoPromptPermissionAutoApprovalMatch(
+            requestToolName: requestToolName,
+            requestPayload: requestPayload
+        ), isStrictACPRepoPromptPermissionMatch(
+            match,
+            requestToolName: requestToolName,
+            requestPayload: requestPayload
+        )
         else {
             return nil
         }
@@ -3812,8 +3849,14 @@ actor ACPAgentSessionController {
             ]
         }
 
-        guard let optionID = optionID(for: safePermissionOptionsForAutoSelection(options), preferences: preferences) else { return nil }
-        return AutoApprovalSelection(optionID: optionID, match: match)
+        let filteredOptions = safePermissionOptionsForAutoSelection(options)
+        let selectedOptionID: String? = if provider.providerID == .devin {
+            filteredOptions.first(where: { $0.optionID == "allow_once" })?.optionID
+        } else {
+            optionID(for: filteredOptions, preferences: preferences)
+        }
+        guard let selectedOptionID else { return nil }
+        return AutoApprovalSelection(optionID: selectedOptionID, match: match)
     }
 
     /// Options that must never be picked by an automatic or fallback selection path.
@@ -3956,6 +3999,8 @@ actor ACPAgentSessionController {
     private func emitTerminal(state: AgentSessionRunState, errorText: String?) {
         guard !didEmitTerminal else { return }
         didEmitTerminal = true
+        recentDevinToolCalls.removeAll()
+        recentDevinToolCallIDs.removeAll()
         emit(.terminal(state: state, errorText: errorText))
     }
 
