@@ -432,6 +432,16 @@ enum DevinIntegrationConfiguration {
             native: nativeSettings[readConfigFromKey]
         )
         guard !NSDictionary(dictionary: settings).isEqual(to: nativeSettings) else { return false }
+        // Publishing re-serializes as strict JSON; never do that over JSON5-only syntax
+        // (comments, trailing commas) the user wrote. The overlay stays as recovery data.
+        if let nativeData = try? Data(contentsOf: native),
+           (try? JSONSerialization.jsonObject(with: nativeData)) == nil
+        {
+            throw AIProviderError.invalidConfiguration(
+                detail: "Devin changed its settings during the run, but \(native.path) uses JSON5 syntax "
+                    + "RepoPrompt cannot rewrite without losing it, so the native file was left unchanged."
+            )
+        }
         try writeSettings(settings, to: overlay, permissions: posixPermissions(at: overlay) ?? 0o600)
         return true
     }

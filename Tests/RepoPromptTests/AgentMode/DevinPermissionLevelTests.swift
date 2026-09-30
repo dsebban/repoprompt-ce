@@ -949,6 +949,35 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
         )
     }
 
+    func testCleanupLeavesJSON5NativeSettingsUntouchedWhenDevinWroteOtherKeys() throws {
+        let sourceRoot = try makeTestDirectory(name: "DevinIntegrationJSON5SettingsWrite")
+        let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
+        try FileManager.default.createDirectory(at: devinSource, withIntermediateDirectories: true)
+        let nativeConfig = devinSource.appendingPathComponent("config.json")
+        let nativeText = "{\n  // keep this comment\n  \"agent\": {\"model\": \"before\"},\n}\n"
+        try nativeText.write(to: nativeConfig, atomically: true, encoding: .utf8)
+
+        let prepared = try DevinIntegrationConfiguration.prepare(
+            workingDirectory: sourceRoot.path,
+            mcpServers: .disableAll,
+            sourceEnvironment: ["XDG_CONFIG_HOME": sourceRoot.path, "HOME": sourceRoot.path]
+        )
+        let overlayRoot = try XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]).asFileURL
+        let overlayConfig = overlayRoot.appendingPathComponent("devin/config.json")
+        var overlay = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: overlayConfig)) as? [String: Any]
+        )
+        overlay["agent"] = ["model": "after"]
+        try JSONSerialization.data(withJSONObject: overlay).write(to: overlayConfig, options: .atomic)
+
+        XCTAssertThrowsError(try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Recovery data remains at \(overlayRoot.path)"))
+        }
+        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), nativeText)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: overlayConfig.path))
+        try? FileManager.default.removeItem(at: overlayRoot)
+    }
+
     func testCleanupPreservesNewerNativeConfigAndRetainsRecoveryOverlay() throws {
         let sourceRoot = try makeTestDirectory(name: "DevinIntegrationConcurrentNativeWrite")
         let devinSource = sourceRoot.appendingPathComponent("devin", isDirectory: true)
