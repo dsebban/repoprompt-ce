@@ -362,7 +362,7 @@ final class DevinPermissionLevelTests: XCTestCase {
         )
     }
 
-    func testRoutineInfoStderrIsHiddenWhileActionableOutputRemainsVisible() throws {
+    func testProcessStderrIsDiagnosticOnly() throws {
         let (provider, _) = try makeProvider()
 
         XCTAssertFalse(provider.shouldEmitStderrLine(
@@ -371,7 +371,7 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertFalse(provider.shouldEmitStderrLine(
             "2026-09-14T09:52:20Z INFO chisel: logging initialized"
         ))
-        XCTAssertTrue(provider.shouldEmitStderrLine("2026-09-14T09:52:20Z ERROR chisel: startup failed"))
+        XCTAssertFalse(provider.shouldEmitStderrLine("2026-09-14T09:52:20Z ERROR chisel: startup failed"))
         XCTAssertFalse(provider.shouldEmitStderrLine(
             "2026-09-15T11:10:05.047288Z  WARN message_forest: MessageChain tree duplication: system prefix changed"
         ))
@@ -381,8 +381,8 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertFalse(provider.shouldEmitStderrLine(
             "2026-09-17T09:11:36Z WARN windsurf_api_client::remote_config: remote config revalidation failed, keeping last-good value: error decoding response body"
         ))
-        XCTAssertTrue(provider.shouldEmitStderrLine("2026-09-14T09:52:20Z  WARN chisel: retrying"))
-        XCTAssertTrue(provider.shouldEmitStderrLine("permission denied while reading config"))
+        XCTAssertFalse(provider.shouldEmitStderrLine("2026-09-14T09:52:20Z  WARN chisel: retrying"))
+        XCTAssertFalse(provider.shouldEmitStderrLine("permission denied while reading config"))
     }
 
     func testOracleOneShotArgumentsUseSelectedModelAndPromptFile() {
