@@ -6409,8 +6409,7 @@ class PromptViewModel: ObservableObject {
         gitBaseOverride: String? = nil,
         selectionOverride: StoredSelection? = nil,
         lookupContextOverride: WorkspaceLookupContext? = nil,
-        reviewGitContextOverride: FrozenPromptGitReviewContext? = nil,
-        selectedFileContentPolicy: PromptSelectedFileContentPolicy = .bestEffort
+        reviewGitContextOverride: FrozenPromptGitReviewContext? = nil
     ) async throws -> AIMessage {
         let preset = oraclePromptConfiguration?.chatPreset ?? overrideChatPreset ?? currentChatPreset()
         var resolvedConfig: PromptContextResolved = {
@@ -6506,10 +6505,11 @@ class PromptViewModel: ObservableObject {
             }
         }
 
-        let requiresSelectedFileContent = selectedFileContentPolicy == .required
+        // Captured Oracle configuration is the authority for fail-closed packaging.
+        let requiresSelectedFileContent = oraclePromptConfiguration != nil
         let packaged: (message: AIMessage, preAssembly: PromptContextPreAssemblyResult)
         do {
-            if requiresSelectedFileContent {
+            if requiresSelectedFileContent, activeConfig.includeFiles {
                 try await PromptSelectedFileContentRequirement.awaitAppliedIngress(
                     selection: logicalSelection,
                     lookupContext: lookupContext,
