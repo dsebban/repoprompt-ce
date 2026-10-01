@@ -72,8 +72,8 @@ package struct OracleImageAttachmentLimits: Equatable {
 
     package static let production = OracleImageAttachmentLimits(
         maxCount: 10,
-        maxBytesPerImage: 20 * 1024 * 1024,
-        maxTotalBytes: 50 * 1024 * 1024
+        maxBytesPerImage: 3 * 1024 * 1024,
+        maxTotalBytes: 12 * 1024 * 1024
     )
 }
 

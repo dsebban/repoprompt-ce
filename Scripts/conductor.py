@@ -278,7 +278,7 @@ Operation commands:
   ./conductor app stop                                 # latest interactive stop intent
   ./conductor app launch-existing [-- <app args...>]   # launch existing DebugApps bundle without building
   ./conductor app relaunch [-- <app args...>]          # latest interactive relaunch intent
-  ./conductor smoke [--launch | --packaged-app <path>] [--artifact-manifest <path>] [--workspace <name>] [--window-id <id>] [--agent-run] [--execution-location-ui]
+  ./conductor smoke [--launch | --packaged-app <path>] [--artifact-manifest <path>] [--workspace <name>] [--window-id <id>] [--agent-run] [--execution-location-ui] [--oracle-image-request <approved-json>]
     --execution-location-ui uses REPOPROMPT_EXECUTION_LOCATION_UI_SMOKE_WAIT (default 3s) and _CYCLES (default 3); Accessibility permission is required.
     (without --launch/--packaged-app, requires the CE debug app to already be running and CLI installed)
   ./conductor diagnostics agent-mode-on [--log-file <path>]
@@ -8033,6 +8033,39 @@ def operation_smoke(repo_root: Path, args: Dict[str, Any]) -> int:
         if code != 0:
             return code
 
+    if args.get("oracleImageRequest"):
+        # Explicit opt-in only: never infer upload authorization from ordinary smoke.
+        request_path = Path(str(args["oracleImageRequest"]))
+        try:
+            payload = json.loads(request_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ConductorError(f"Could not read Oracle image smoke request: {exc}") from exc
+        if not isinstance(payload, dict) or payload.get("mode") != "chat" or payload.get("new_chat") is not True:
+            raise ConductorError("Oracle image smoke requires a fresh mode=chat request")
+        images = payload.get("images")
+        if not isinstance(images, list) or not images or any(
+            not isinstance(item, dict) or not isinstance(item.get("path"), str) or not item["path"]
+            for item in images
+        ):
+            raise ConductorError("Oracle image smoke requires nonempty images with explicit paths")
+        if not isinstance(payload.get("message"), str) or not payload["message"].strip():
+            raise ConductorError("Oracle image smoke requires a visual question")
+        code, _stdout, _stderr = run_operation_command(
+            "ask_oracle image (approved upload)",
+            routed_structured_cli_argv(cli, window_id, "ask_oracle", payload),
+            repo_root,
+            env=env,
+            timeout=max(1.0, deadline - now()),
+        )
+        if code != 0:
+            return code
+        print(
+            "Image request returned. Delivery proof remains INCONCLUSIVE until the visual answer, "
+            "thumbnail-only restoration, path redaction, and outside-root rejection are inspected "
+            "(docs/testing.md: Oracle image delivery).",
+            flush=True,
+        )
+
     if args.get("agentRun"):
         agent_timeout = float(args.get("agentTimeout") or SMOKE_AGENT_WAIT_SECONDS)
         start_payload = {
@@ -8667,6 +8700,7 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
         parser.add_argument("--artifact-manifest")
         parser.add_argument("--workspace", default="repoprompt-ce")
         parser.add_argument("--window-id", type=int, default=1)
+        parser.add_argument("--oracle-image-request", help="approved app-backed ask_oracle JSON request file; uploads originals and may incur costs")
         parser.add_argument("--agent-run", action="store_true")
         parser.add_argument("--agent-timeout", type=float, default=SMOKE_AGENT_WAIT_SECONDS)
         parser.add_argument("--execution-location-ui", action="store_true")
@@ -8675,6 +8709,8 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
             raise ConductorError("--agent-timeout must be non-negative")
         if ns.artifact_manifest and not ns.packaged_app:
             raise ConductorError("--artifact-manifest requires --packaged-app")
+        if ns.oracle_image_request and (ns.packaged_app or ns.launch or ns.agent_run):
+            raise ConductorError("--oracle-image-request requires an already-running app and cannot be combined with launch, packaged-app, or agent-run")
         if ns.packaged_app and ns.agent_run:
             raise ConductorError("--agent-run is not supported with --packaged-app")
         if ns.packaged_app and ns.execution_location_ui:
@@ -8686,6 +8722,7 @@ def handle_real_operation(paths: Paths, operation: str, argv: List[str]) -> int:
                 "artifactManifest": ns.artifact_manifest,
                 "workspace": ns.workspace,
                 "windowId": ns.window_id,
+                "oracleImageRequest": ns.oracle_image_request,
                 "agentRun": ns.agent_run,
                 "agentTimeout": ns.agent_timeout,
                 "executionLocationUI": ns.execution_location_ui,

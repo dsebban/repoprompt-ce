@@ -435,10 +435,10 @@ enum DevinIntegrationConfiguration {
 
     /// Project/local settings override the user overlay. Resolve nearest-directory and local
     /// overrides first, stopping at the checkout root (including Git worktrees), without writes.
-    private static func validateProjectImportIsolation(workingDirectory: String) throws {
+    private static func projectImportOverrides(workingDirectory: String) throws -> [String: (value: Any, file: URL)] {
+        var overrides: [String: (value: Any, file: URL)] = [:]
         var directory = URL(fileURLWithPath: workingDirectory, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
-        var resolvedSources = Set<String>()
         while true {
             for fileName in ["config.local.json", "config.json"] {
                 let file = directory.appendingPathComponent(".devin").appendingPathComponent(fileName)
@@ -453,24 +453,31 @@ enum DevinIntegrationConfiguration {
                         detail: "Cannot verify Devin import isolation: read_config_from in \(file.path) must be an object."
                     )
                 }
-                for source in foreignMCPImportSources where !resolvedSources.contains(source) {
+                for source in foreignMCPImportSources where overrides[source] == nil {
                     guard let value = imports[source] else { continue }
-                    guard let enabled = value as? Bool, !enabled else {
-                        throw AIProviderError.invalidConfiguration(
-                            detail: "Devin import isolation is overridden by \(file.path): set read_config_from.\(source) to false "
-                                + "or remove that override before running Devin through RepoPrompt. RepoPrompt has not changed the file."
-                        )
-                    }
-                    resolvedSources.insert(source)
+                    overrides[source] = (value, file)
                 }
             }
             if directory.path == "/"
                 || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".git").path)
                 || FileManager.default.fileExists(atPath: directory.appendingPathComponent(".jj").path)
             {
-                return
+                return overrides
             }
             directory.deleteLastPathComponent()
+        }
+    }
+
+    private static func validateProjectImportIsolation(workingDirectory: String) throws {
+        let overrides = try projectImportOverrides(workingDirectory: workingDirectory)
+        for source in foreignMCPImportSources {
+            guard let override = overrides[source] else { continue }
+            guard let enabled = override.value as? Bool, !enabled else {
+                throw AIProviderError.invalidConfiguration(
+                    detail: "Devin import isolation is overridden by \(override.file.path): set read_config_from.\(source) to false "
+                        + "or remove that override before running Devin through RepoPrompt. RepoPrompt has not changed the file."
+                )
+            }
         }
     }
 
@@ -485,6 +492,19 @@ enum DevinIntegrationConfiguration {
         environment: [String: String]
     ) -> Bool {
         let name = serverName.lowercased()
+        let projectOverrides = try? projectImportOverrides(workingDirectory: workingDirectory)
+        let nativeFile = sourceConfigurationRoot(environment: environment)
+            .appendingPathComponent("devin").appendingPathComponent(settingsFileName)
+        let nativeImports = settingsObject(at: nativeFile)?[readConfigFromKey] as? [String: Any]
+        func isEnabled(_ source: String) -> Bool {
+            // Unknown/malformed enablement stays conservative; only literal false disables.
+            guard let projectOverrides else { return true }
+            let value = projectOverrides[source]?.value ?? nativeImports?[source]
+            guard let boolean = value as? NSNumber, CFGetTypeID(boolean) == CFBooleanGetTypeID() else { return true }
+            return boolean.boolValue
+        }
+        let claudeEnabled = isEnabled("claude")
+        let cursorEnabled = isEnabled("cursor")
         func shadows(configAt url: URL, serverTables: ([String: Any]) -> [Any?]) -> Bool {
             guard FileManager.default.fileExists(atPath: url.path) else { return false }
             guard let data = try? Data(contentsOf: url),
@@ -500,7 +520,7 @@ enum DevinIntegrationConfiguration {
         var directory = URL(fileURLWithPath: workingDirectory, isDirectory: true)
             .resolvingSymlinksInPath().standardizedFileURL
         let workingPath = directory.path
-        let claudeShadows = shadows(configAt: home.appendingPathComponent(".claude.json")) { object in
+        let claudeShadows = claudeEnabled && shadows(configAt: home.appendingPathComponent(".claude.json")) { object in
             var tables: [Any?] = [object["mcpServers"]]
             for (path, project) in object["projects"] as? [String: Any] ?? [:] {
                 let root = URL(fileURLWithPath: path, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
@@ -509,11 +529,12 @@ enum DevinIntegrationConfiguration {
             }
             return tables
         }
-        if claudeShadows || shadows(configAt: home.appendingPathComponent(".cursor/mcp.json"), serverTables: { [$0["mcpServers"]] }) {
+        if claudeShadows || cursorEnabled && shadows(configAt: home.appendingPathComponent(".cursor/mcp.json"), serverTables: { [$0["mcpServers"]] }) {
             return true
         }
         while true {
-            for file in [".mcp.json", ".cursor/mcp.json"]
+            let files = (claudeEnabled ? [".mcp.json"] : []) + (cursorEnabled ? [".cursor/mcp.json"] : [])
+            for file in files
                 where shadows(configAt: directory.appendingPathComponent(file), serverTables: { [$0["mcpServers"]] })
             {
                 return true
@@ -551,7 +572,10 @@ enum DevinIntegrationConfiguration {
         guard var settings = settingsObject(at: overlay),
               let nativeSettings = settingsObject(at: native)
         else {
-            return true
+            throw AIProviderError.invalidConfiguration(
+                detail: "Devin settings could not be restored from readable JSON objects, so native settings were left unchanged "
+                    + "and isolated configuration was retained for recovery."
+            )
         }
         settings[readConfigFromKey] = restoredReadConfigFrom(
             overlay: settings[readConfigFromKey],

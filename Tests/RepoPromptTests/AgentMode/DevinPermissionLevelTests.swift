@@ -430,7 +430,9 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertFalse(message.userMessage.contains("Do not use any tools"))
         XCTAssertNil(message.resumeSessionID)
 
-        let config = DevinCLIProvider().test_makeImageHeadlessConfig(modelName: "claude-opus-4-6")
+        let config = DevinCLIProvider(config: DevinAgentConfig(commandName: "custom-devin", additionalPathHints: ["/custom/bin"])).test_makeImageHeadlessConfig(modelName: "claude-opus-4-6")
+        XCTAssertEqual(config.commandName, "custom-devin")
+        XCTAssertEqual(config.additionalPathHints, ["/custom/bin"])
         XCTAssertEqual(config.modelString, "claude-opus-4-6")
         XCTAssertFalse(config.includeRepoPromptMCPServer)
     }
@@ -622,102 +624,6 @@ final class DevinPermissionLevelTests: XCTestCase {
         return (store, defaults)
     }
 
-    func testHeadlessSparseRepoPromptPermissionsAreScopedAndFailClosed() async throws {
-        for scenario in [
-            "git", "git-input-update", "manage_selection", "corroborated", "foreign", "superseded", "completed",
-            "broad-only", "alias-only", "contradicted", "input-update-contradicted", "meta-contradicted"
-        ] {
-            let directory = try makeTestDirectory(name: "DevinHeadlessPermission")
-            let executable = directory.appendingPathComponent("devin")
-            let record = directory.appendingPathComponent("permission.json")
-            let script = #"""
-            #!/usr/bin/env python3
-            import json
-            import sys
-            if "--help" in sys.argv:
-                print("Run as an ACP server over stdio")
-                sys.exit(0)
-            scenario = "\#(scenario)"
-            def send(message):
-                print(json.dumps({"jsonrpc": "2.0", **message}), flush=True)
-            def update(value):
-                send({"method": "session/update", "params": {"sessionId": "test-session", "update": value}})
-            prompt_id = None
-            for line in sys.stdin:
-                request = json.loads(line)
-                method = request.get("method")
-                if method == "initialize":
-                    send({"id": request["id"], "result": {"agentCapabilities": {}, "authMethods": []}})
-                elif method == "session/new":
-                    send({"id": request["id"], "result": {"sessionId": "test-session"}})
-                elif method == "session/prompt":
-                    prompt_id = request["id"]
-                    tool = "manage_selection" if scenario == "manage_selection" else "git"
-                    server = "Other" if scenario == "foreign" else "RepoPromptCE"
-                    update({"sessionUpdate": "tool_call", "toolCallId": "tool-1", "title": "Calling " + tool,
-                            "kind": "read", "rawInput": {"op": "diff", "artifacts": False},
-                            "_meta": {"cognition.ai/toolName": "mcp__" + server + "__" + tool}})
-                    if scenario in ["git-input-update", "input-update-contradicted"]:
-                        update({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1",
-                                "rawInput": {"op": "diff", "artifacts": False, "detail": "patches"}})
-                    if scenario == "superseded":
-                        update({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1", "title": "Shell",
-                                "kind": "execute", "rawInput": {"command": "printf changed"},
-                                "_meta": {"cognition.ai/toolName": "shell"}})
-                    if scenario == "completed":
-                        update({"sessionUpdate": "tool_call_update", "toolCallId": "tool-1", "status": "completed"})
-                    options = [{"optionId": "allow_always", "kind": "allow_once", "name": "Always"},
-                               {"optionId": "ALLOW_ONCE", "kind": "allow_once", "name": "Alias"}]
-                    if scenario not in ["broad-only", "alias-only"]:
-                        options.append({"optionId": "allow_once", "kind": "allow_once", "name": "Allow"})
-                    options.append({"optionId": "reject_once", "kind": "reject_once", "name": "Decline"})
-                    permission_tool = {"toolCallId": "tool-1"}
-                    if scenario == "corroborated":
-                        permission_tool.update({"title": "Calling git", "kind": "read",
-                                                "_meta": {"cognition.ai/toolName": "mcp__RepoPromptCE__git"}})
-                    if scenario in ["contradicted", "input-update-contradicted"]:
-                        permission_tool.update({"title": "Shell command", "kind": "execute"})
-                    if scenario == "meta-contradicted":
-                        permission_tool["_meta"] = {"cognition.ai/toolName": "shell"}
-                    send({"id": "permission-1", "method": "session/request_permission", "params": {
-                        "sessionId": "test-session", "toolCall": permission_tool, "options": options}})
-                elif request.get("id") == "permission-1":
-                    with open(r"\#(record.path)", "w", encoding="utf-8") as output:
-                        json.dump(request["result"]["outcome"], output)
-                    send({"id": prompt_id, "result": {"stopReason": "end_turn"}})
-                elif method == "session/cancel" and prompt_id is not None:
-                    send({"id": prompt_id, "result": {"stopReason": "cancelled"}})
-            """#
-            try script.write(to: executable, atomically: true, encoding: .utf8)
-            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-            let provider = DevinACPHeadlessAgentProvider(
-                config: DevinAgentConfig(commandName: executable.path, includeRepoPromptMCPServer: true),
-                workspacePath: directory.path,
-                providerFactory: { _ in
-                    DevinACPAgentProvider(config: DevinAgentConfig(
-                        commandName: executable.path,
-                        includeRepoPromptMCPServer: false
-                    ))
-                }
-            )
-            let shouldApprove = ["git", "git-input-update", "manage_selection", "corroborated"].contains(scenario)
-            do {
-                let stream = try await provider.streamAgentMessage(AgentMessage(userMessage: "Discover"))
-                for try await _ in stream {}
-                XCTAssertTrue(shouldApprove, scenario)
-            } catch {
-                XCTAssertFalse(shouldApprove, "\(scenario): \(error)")
-                XCTAssertTrue(error.localizedDescription.contains("approval"), "\(scenario): \(error)")
-            }
-            await provider.dispose()
-            if shouldApprove {
-                let response = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: record)) as? [String: String])
-                XCTAssertEqual(response["outcome"], "selected", scenario)
-                XCTAssertEqual(response["optionId"], "allow_once", scenario)
-            }
-        }
-    }
-
     private func makeProvider() throws -> (DevinACPAgentProvider, URL) {
         let directory = try makeTestDirectory(name: "DevinPermissionLevelTests")
         let executable = directory.appendingPathComponent("devin")
@@ -851,7 +757,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
 
         let replacedConfig = overlayDevin.appendingPathComponent("config.json")
         try FileManager.default.removeItem(at: replacedConfig)
-        try "updated config".write(to: replacedConfig, atomically: true, encoding: .utf8)
+        try #"{"updated": "config"}"#.write(to: replacedConfig, atomically: true, encoding: .utf8)
         try "new state".write(
             to: overlayDevin.appendingPathComponent("new-state.json"),
             atomically: true,
@@ -860,10 +766,11 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
 
         try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
 
-        XCTAssertEqual(
-            try String(contentsOf: devinSource.appendingPathComponent("config.json"), encoding: .utf8),
-            "updated config"
+        let publishedConfig = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(contentsOf: devinSource.appendingPathComponent("config.json"))) as? [String: Any]
         )
+        XCTAssertEqual(publishedConfig["updated"] as? String, "config")
+        XCTAssertNil(publishedConfig["read_config_from"])
         XCTAssertEqual(
             try String(contentsOf: devinSource.appendingPathComponent("new-state.json"), encoding: .utf8),
             "new state"
@@ -1034,13 +941,13 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
             .appendingPathComponent("devin", isDirectory: true)
             .appendingPathComponent("config.json")
         try FileManager.default.removeItem(at: overlayConfig)
-        try "overlay update".write(to: overlayConfig, atomically: true, encoding: .utf8)
-        try "newer native update".write(to: nativeConfig, atomically: true, encoding: .utf8)
+        try #"{"overlay": true}"#.write(to: overlayConfig, atomically: true, encoding: .utf8)
+        try #"{"newer": true}"#.write(to: nativeConfig, atomically: true, encoding: .utf8)
 
         XCTAssertThrowsError(try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)) { error in
             XCTAssertTrue(error.localizedDescription.contains("Recovery data remains at \(overlayRoot.path)"))
         }
-        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), "newer native update")
+        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), #"{"newer": true}"#)
         XCTAssertTrue(FileManager.default.fileExists(atPath: overlayRoot.path))
         try? FileManager.default.removeItem(at: overlayRoot)
     }
@@ -1098,17 +1005,17 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
             .appendingPathComponent("devin", isDirectory: true)
             .appendingPathComponent("config.json")
         try FileManager.default.removeItem(at: overlayConfig)
-        try "overlay update".write(to: overlayConfig, atomically: true, encoding: .utf8)
+        try #"{"overlay": true}"#.write(to: overlayConfig, atomically: true, encoding: .utf8)
 
         XCTAssertThrowsError(try DevinIntegrationConfiguration.cleanup(
             artifact: prepared.cleanupArtifact,
             beforeReplacing: { sourceEntry in
-                try "newer native update".write(to: sourceEntry, atomically: true, encoding: .utf8)
+                try #"{"newer": true}"#.write(to: sourceEntry, atomically: true, encoding: .utf8)
             }
         )) { error in
             XCTAssertTrue(error.localizedDescription.contains("Recovery data remains at \(overlayRoot.path)"))
         }
-        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), "newer native update")
+        XCTAssertEqual(try String(contentsOf: nativeConfig, encoding: .utf8), #"{"newer": true}"#)
         XCTAssertTrue(FileManager.default.fileExists(atPath: overlayRoot.path))
         try? FileManager.default.removeItem(at: overlayRoot)
     }
@@ -1169,7 +1076,7 @@ final class DevinIntegrationConfigurationTests: XCTestCase {
             .appendingPathComponent("devin", isDirectory: true)
             .appendingPathComponent("config.json")
         try FileManager.default.removeItem(at: overlayConfig)
-        try "overlay update".write(to: overlayConfig, atomically: true, encoding: .utf8)
+        try #"{"overlay": true}"#.write(to: overlayConfig, atomically: true, encoding: .utf8)
 
         XCTAssertThrowsError(try DevinIntegrationConfiguration.cleanup(
             artifact: prepared.cleanupArtifact,

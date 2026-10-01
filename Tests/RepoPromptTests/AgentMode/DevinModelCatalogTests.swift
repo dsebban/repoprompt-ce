@@ -28,11 +28,9 @@ final class DevinModelCatalogTests: XCTestCase {
         ])
         let high = try? XCTUnwrap(catalog.entry(matching: " GPT-6-SOL-HIGH "))
         XCTAssertEqual(high?.option.displayName, "GPT-6 Sol · High")
-        XCTAssertEqual(high?.familyDisplayName, "GPT-6 Sol")
-        XCTAssertEqual(high?.effortDisplayName, "High")
+        XCTAssertEqual(high?.option.displayName, "GPT-6 Sol · High")
         XCTAssertEqual(high?.advertisedModelRaw, "gpt-6-sol-medium")
         XCTAssertEqual(high?.thinking, .init(configID: "thought_level", choiceRaw: "high"))
-        XCTAssertEqual(catalog.entry(matching: "swe-2-max")?.familyDisplayName, "SWE-2")
         // The advertised ID is itself an encoded selection: choosing it resets the effort.
         XCTAssertEqual(catalog.entry(matching: "gpt-6-sol-medium")?.thinking?.choiceRaw, "medium")
         XCTAssertTrue(catalog.entry(matching: "gpt-6-sol-medium")?.option.isProviderDefault == true)
@@ -45,20 +43,10 @@ final class DevinModelCatalogTests: XCTestCase {
         for raw in ["swe-1-7-medium", "fusion-a-high-sidekick-b-medium", "claude-opus-4-6"] {
             let entry = catalog.entry(matching: raw)
             XCTAssertNil(entry?.thinking, raw)
-            XCTAssertNil(entry?.effortDisplayName, raw)
         }
         XCTAssertNil(catalog.entry(matching: "swe-1-7-max"))
         XCTAssertNil(catalog.entry(matching: "fusion-a-high-sidekick-b-high"))
         XCTAssertTrue(DevinModelCatalog(snapshot: nil).entries.isEmpty)
-    }
-
-    func testMenuGroupsNestEffortsUnderFamilies() {
-        let catalog = DevinModelCatalog(snapshot: Self.snapshot)
-        let groups = catalog.menuGroups(for: catalog.entries.map(\.option))
-
-        XCTAssertEqual(groups.map(\.displayName), ["GPT-6 Sol", "SWE-2", "SWE-1.7", "Fusion", "Claude Opus 4.6"])
-        XCTAssertEqual(groups.map(\.rendersAsSubmenu), [true, true, false, false, false])
-        XCTAssertEqual(groups[0].entries.map(\.effortDisplayName), ["None", "Low", "Medium", "High"])
     }
 
     func testAgentModeAndOracleShareTheSameDevinIDs() {
@@ -103,37 +91,6 @@ final class DevinModelCatalogTests: XCTestCase {
             persistedSelections: [pin]
         ).isEmpty)
     }
-
-    func testListAgentsGroupsDevinEffortsByCatalogFamily() {
-        AgentACPModelRegistry.shared.updateDiscoveredModels(Self.snapshot, for: .devin)
-        let models: [Value] = DevinModelCatalog.current.entries.map {
-            .object(["model_id": .string("devin:\($0.option.rawValue)"), "name": .string($0.option.displayName)])
-        }
-        let content = ToolOutputFormatter.formatAgentManage(
-            args: ["op": .string("list_agents")],
-            value: .object(["agents": .array([.object([
-                "name": .string("Devin CLI"),
-                "available": .bool(true),
-                "models": .array(models)
-            ])])])
-        )
-        let text = content.compactMap { item -> String? in
-            if case let .text(text, _, _) = item { return text }
-            return nil
-        }.joined()
-        let lines = Set(text.split(separator: "\n").map(String.init))
-
-        for expected in [
-            "  `devin:gpt-6-sol-{none|low|medium|high}` — GPT-6 Sol",
-            "  `devin:swe-2-{medium|high|max}` — SWE-2",
-            "  `devin:swe-1-7-medium` — SWE-1.7",
-            "  `devin:fusion-a-high-sidekick-b-medium` — Fusion"
-        ] {
-            XCTAssertTrue(lines.contains(expected), "missing \(expected) in\n\(text)")
-        }
-    }
-
-    // MARK: - ACP boundary
 
     func testEncodedIDSelectsAdvertisedModelThenThoughtLevelBeforePrompt() async throws {
         AgentACPModelRegistry.shared.updateDiscoveredModels(Self.snapshot, for: .devin)

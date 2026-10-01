@@ -418,6 +418,7 @@ actor MessageFinalisationHub {
 }
 
 private struct SessionRunState {
+    var pendingImagePreparationID: UUID?
     var activeQueryId: UUID?
     var activeStreamId: ChatStreamID?
     var isStreaming: Bool {
@@ -1079,6 +1080,8 @@ class OracleViewModel: ObservableObject {
             id: ChatStreamID,
             stream: AsyncThrowingStream<ChatStreamOutput, Error>
         )
+
+        var oracleImageThumbnailsForTesting: (@MainActor ([AITransientImage]) async throws -> [AIChatImageAttachment])?
 
         var oracleReviewPackagingTraceObserverForTesting:
             OracleReviewPackagingTraceContext.Observer?
@@ -3180,9 +3183,39 @@ class OracleViewModel: ObservableObject {
         // Create the user message
         // Only suspend when images are attached so the text-only path keeps
         // creating the user message synchronously on the main actor.
-        let imageAttachments = oracleTransientImages.isEmpty
-            ? []
-            : await AIChatImageAttachment.thumbnails(from: oracleTransientImages)
+        let preparationID = oracleTransientImages.isEmpty ? nil : UUID()
+        runStateBySession[targetSessionID]?.pendingImagePreparationID = preparationID
+        defer {
+            if let preparationID,
+               runStateBySession[targetSessionID]?.pendingImagePreparationID == preparationID
+            {
+                runStateBySession[targetSessionID]?.pendingImagePreparationID = nil
+            }
+        }
+        let imageAttachments: [AIChatImageAttachment]
+        do {
+            if oracleTransientImages.isEmpty {
+                imageAttachments = []
+            } else {
+                #if DEBUG
+                    if let override = oracleImageThumbnailsForTesting {
+                        imageAttachments = try await override(oracleTransientImages)
+                    } else {
+                        imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleTransientImages)
+                    }
+                #else
+                    imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleTransientImages)
+                #endif
+            }
+        } catch {
+            return nil
+        }
+        guard !Task.isCancelled, contextBuilderScope?.isLive != false,
+              preparationID == nil || runStateBySession[targetSessionID]?.pendingImagePreparationID == preparationID
+        else { return nil }
+        if preparationID != nil {
+            runStateBySession[targetSessionID]?.pendingImagePreparationID = nil
+        }
         let userId = UUID()
         let userMessage = AIChatMessage(
             id: userId,
@@ -3968,6 +4001,7 @@ class OracleViewModel: ObservableObject {
         in sessionID: UUID, skipPartialParseAndSave: Bool = false,
         contextBuilderSuccessor: ContextBuilderOracleLaneScope? = nil
     ) async {
+        runStateBySession[sessionID]?.pendingImagePreparationID = nil
         if let query = runStateBySession[sessionID]?.activeQueryId, let scope = contextBuilderScopes[query] {
             await scope.cancelAndDrain()
             return
@@ -4052,6 +4086,9 @@ class OracleViewModel: ObservableObject {
 
     @MainActor
     func cancelAllActiveSessionStreams() async {
+        for sessionID in Array(runStateBySession.keys) {
+            runStateBySession[sessionID]?.pendingImagePreparationID = nil
+        }
         let activeSessions = Array(streamingSessions)
         for sessionID in activeSessions {
             await cancelAIResponse(in: sessionID, skipPartialParseAndSave: true)

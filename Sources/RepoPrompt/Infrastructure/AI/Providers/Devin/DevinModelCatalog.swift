@@ -15,23 +15,10 @@ struct DevinModelCatalog {
     struct Entry: Equatable {
         /// Selectable ID and full label (`GPT-6 Sol · High`).
         let option: AgentModelOption
-        let familyID: String
-        let familyDisplayName: String
-        /// Submenu leaf title; nil for a model with no encoded effort.
-        let effortDisplayName: String?
         /// Model ID Devin ACP advertises for this family.
         let advertisedModelRaw: String
         /// Thinking choice to apply after selecting `advertisedModelRaw`; nil = model only.
         let thinking: Thinking?
-    }
-
-    struct MenuGroup: Equatable {
-        let displayName: String
-        let entries: [Entry]
-
-        var rendersAsSubmenu: Bool {
-            entries.contains { $0.effortDisplayName != nil }
-        }
     }
 
     /// Families whose sibling effort IDs are not Devin CLI model IDs (`devin models list`:
@@ -59,9 +46,6 @@ struct DevinModelCatalog {
                 if seen.insert(Self.normalized(option.rawValue)).inserted {
                     entries.append(Entry(
                         option: option,
-                        familyID: option.rawValue,
-                        familyDisplayName: option.displayName,
-                        effortDisplayName: nil,
                         advertisedModelRaw: option.rawValue,
                         thinking: nil
                     ))
@@ -82,9 +66,6 @@ struct DevinModelCatalog {
                         isPlaceholderDefault: false,
                         isProviderDefault: isAdvertised && option.isProviderDefault
                     ),
-                    familyID: expansion.stem,
-                    familyDisplayName: expansion.familyDisplayName,
-                    effortDisplayName: choice.displayName,
                     advertisedModelRaw: option.rawValue,
                     thinking: Thinking(configID: expansion.definition.configID, choiceRaw: choice.rawValue)
                 ))
@@ -96,31 +77,6 @@ struct DevinModelCatalog {
 
     func entry(matching raw: String) -> Entry? {
         entriesByNormalizedRaw[Self.normalized(raw)]
-    }
-
-    /// Family → effort groups for `options`, in first-appearance order. Options the catalog
-    /// does not know stay direct items.
-    func menuGroups(for options: [AgentModelOption]) -> [MenuGroup] {
-        var groups: [(key: String, displayName: String, entries: [Entry])] = []
-        var indexByKey: [String: Int] = [:]
-        for option in options {
-            let entry = entry(matching: option.rawValue) ?? Entry(
-                option: option,
-                familyID: option.rawValue,
-                familyDisplayName: option.displayName,
-                effortDisplayName: nil,
-                advertisedModelRaw: option.rawValue,
-                thinking: nil
-            )
-            let key = entry.effortDisplayName == nil ? "model:\(Self.normalized(option.rawValue))" : "family:\(Self.normalized(entry.familyID))"
-            if let index = indexByKey[key] {
-                groups[index].entries.append(entry)
-            } else {
-                indexByKey[key] = groups.count
-                groups.append((key, entry.familyDisplayName, [entry]))
-            }
-        }
-        return groups.map { MenuGroup(displayName: $0.displayName, entries: $0.entries) }
     }
 
     private struct Expansion {

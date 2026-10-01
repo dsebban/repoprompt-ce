@@ -175,6 +175,8 @@ final class DevinCLIProvider: AIProvider {
 
     private func makeImageHeadlessConfig(modelName: String?) -> DevinAgentConfig {
         DevinAgentConfig(
+            commandName: config.commandName,
+            additionalPathHints: config.additionalPathHints,
             enableDebugLogging: config.enableDebugLogging,
             includeRepoPromptMCPServer: false,
             modelString: modelName

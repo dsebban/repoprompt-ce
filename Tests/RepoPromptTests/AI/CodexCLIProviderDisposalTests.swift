@@ -38,15 +38,25 @@ final class CodexCLIProviderDisposalTests: XCTestCase {
         defer { CodexCLIProvider.disposeDrainTimeout = 15 }
 
         let provider = CodexCLIProvider(configureDiscoveryServer: false)
+        let gate = DisposalGate()
         let bridgeTask = provider.test_registerActiveStreamTask(id: UUID()) {
-            // Ignores cancellation forever: awaits a continuation that never resumes.
-            Task { await withCheckedContinuation { (_: CheckedContinuation<Void, Never>) in } }
+            // Ignores cancellation until explicitly released, without leaking test-owned work.
+            Task {
+                await gate.waitForRelease()
+                await gate.markBridgeFinished()
+            }
         }
         XCTAssertNotNil(bridgeTask)
 
         let started = Date()
         await provider.dispose()
         XCTAssertLessThan(Date().timeIntervalSince(started), 5)
+        let finishedBeforeRelease = await gate.bridgeFinished
+        XCTAssertFalse(finishedBeforeRelease)
+        await gate.releaseBridge()
+        await bridgeTask?.value
+        let bridgeFinished = await gate.bridgeFinished
+        XCTAssertTrue(bridgeFinished)
     }
 
     func testRegistrationAfterDisposeIsRefusedWithoutStartingTask() async {

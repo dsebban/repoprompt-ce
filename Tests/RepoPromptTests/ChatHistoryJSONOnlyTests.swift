@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 @testable import RepoPromptApp
 import XCTest
 
@@ -90,7 +91,7 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
         XCTAssertNil(legacyDecoded.imageAttachments)
     }
 
-    func testTransientImageThumbnailsProduceBoundedOpaqueJPEGPreviews() async {
+    func testTransientImageThumbnailsProduceBoundedOpaqueJPEGPreviews() async throws {
         // 1200x800 fully transparent PNG: the thumbnail must be bounded and matted
         // onto white, since JPEG drops alpha and would otherwise render black.
         guard let bitmap = NSBitmapImageRep(
@@ -115,7 +116,7 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
             mediaType: .png,
             title: "big screenshot"
         )
-        let attachments = await AIChatImageAttachment.thumbnails(from: [transient])
+        let attachments = try await AIChatImageAttachment.thumbnails(from: [transient])
 
         XCTAssertEqual(attachments.count, 1)
         guard let attachment = attachments.first else { return }
@@ -132,8 +133,53 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
 
         // Corrupt bytes must be skipped rather than crashing.
         let corrupt = AITransientImage(bytes: Data([0x00, 0x01]), mediaType: .png, title: nil)
-        let corruptAttachments = await AIChatImageAttachment.thumbnails(from: [corrupt])
+        let corruptAttachments = try await AIChatImageAttachment.thumbnails(from: [corrupt])
         XCTAssertTrue(corruptAttachments.isEmpty)
+        let second = AITransientImage(bytes: png, mediaType: .png, title: "second")
+        let mixed = try await AIChatImageAttachment.thumbnails(from: [transient, corrupt, second])
+        XCTAssertEqual(mixed.map(\.title), ["big screenshot", "second"])
+        XCTAssertEqual(transient.bytes, png)
+
+        let stored = StoredMessage(isUser: true, rawText: "preview", sequenceIndex: 0, imageAttachments: attachments)
+        let decoded = try JSONDecoder().decode(StoredMessage.self, from: JSONEncoder().encode(stored))
+        let restored = await OracleViewModel.parseSingleRawMessage(decoded)
+        XCTAssertEqual(restored.imageAttachments, attachments)
+        XCTAssertNotEqual(attachment.thumbnailData, png)
+    }
+
+    func testThumbnailSourceBoundsAndCancelledParent() async throws {
+        func image(_ width: Int, _ height: Int) throws -> AITransientImage {
+            try autoreleasepool {
+                let bitmap = try XCTUnwrap(NSBitmapImageRep(
+                    bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
+                    bitsPerSample: 8, samplesPerPixel: 3, hasAlpha: false, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+                ))
+                let bytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                return AITransientImage(bytes: bytes, mediaType: .png, title: nil)
+            }
+        }
+        // Valid encoded fixtures distinguish preflight omission from a corrupt-file fallback.
+        for (width, height, expectedCount) in [(8193, 1, 0), (4097, 4096, 0), (8192, 1, 1), (4096, 4096, 1)] {
+            let source = try image(width, height)
+            let imageSource = try XCTUnwrap(CGImageSourceCreateWithData(source.bytes as CFData, nil))
+            let properties = try XCTUnwrap(CGImageSourceCopyPropertiesAtIndex(imageSource, 0, nil) as? [CFString: Any])
+            XCTAssertEqual((properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue, width)
+            XCTAssertEqual((properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue, height)
+            let previews = try await AIChatImageAttachment.thumbnails(from: [source])
+            XCTAssertEqual(previews.count, expectedCount, "\(width)x\(height)")
+        }
+        let entered = expectation(description: "parent cancelled")
+        let task = Task {
+            await fulfillment(of: [entered], timeout: 5)
+            return try await AIChatImageAttachment.thumbnails(from: [image(1, 1)])
+        }
+        task.cancel()
+        entered.fulfill()
+        do {
+            _ = try await task.value
+            XCTFail("Cancelled preparation must throw")
+        } catch is CancellationError {}
     }
 
     func testStoredMessageOmitsLegacyDelegateAndCombinedTextFields() throws {

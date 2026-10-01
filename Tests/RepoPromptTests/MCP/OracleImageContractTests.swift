@@ -1,6 +1,7 @@
 import Foundation
 import MCP
 @testable import RepoPromptApp
+import RepoPromptDomainRuntime
 import XCTest
 
 @MainActor
@@ -42,7 +43,15 @@ final class OracleImageContractTests: XCTestCase {
         ])))
     }
 
-    func testAskOracleImageDocumentationIsProviderNeutralAndMatchesLimits() {
+    func testAskOracleImageDocumentationIsProviderNeutralAndMatchesLimits() throws {
+        let canonical = try XCTUnwrap(MCPDomainCanonicalToolDefinitions.definition(named: "ask_oracle"))
+        let schema = try XCTUnwrap(canonical.inputSchema.objectValue)
+        let properties = try XCTUnwrap(schema["properties"]?.objectValue)
+        let canonicalArgument = try XCTUnwrap(properties["images"]?.objectValue?["description"]?.stringValue)
+        let headlessDisclaimer = " Requires the app backend; the direct headless backend rejects `images`."
+        XCTAssertEqual(canonicalArgument, MCPOracleToolProvider.askOracleImagesArgumentDescription + headlessDisclaimer)
+        XCTAssertTrue(canonical.description.contains(MCPOracleToolProvider.askOracleImageUsageDescription + headlessDisclaimer))
+
         let documentation = [
             MCPOracleToolProvider.askOracleImageUsageDescription,
             MCPOracleToolProvider.askOracleImagesArgumentDescription
@@ -50,8 +59,23 @@ final class OracleImageContractTests: XCTestCase {
 
         XCTAssertFalse(documentation.lowercased().contains("anthropic"))
         XCTAssertTrue(documentation.contains("10 images"))
-        XCTAssertTrue(documentation.contains("20 MiB"))
-        XCTAssertTrue(documentation.contains("50 MiB"))
+        XCTAssertTrue(documentation.contains("3 MiB each"))
+        XCTAssertTrue(documentation.contains("12 MiB total"))
+        for description in [
+            MCPOracleToolProvider.askOracleImageUsageDescription,
+            MCPOracleToolProvider.askOracleImagesArgumentDescription
+        ] {
+            XCTAssertTrue(description.contains("raw attachment-file bytes before provider encoding"))
+            XCTAssertTrue(description.contains("provider or model may impose additional restrictions"))
+            XCTAssertTrue(description.contains("do not guarantee full-request or model-context fit"))
+        }
+        let usage = MCPOracleToolProvider.askOracleImageUsageDescription
+        XCTAssertTrue(usage.contains("additional to pre-send text estimates and Context Builder text-selection budgets"))
+        XCTAssertTrue(usage.contains("Originals, not transcript thumbnails, are sent to each Oracle lane"))
+        XCTAssertTrue(usage.contains("group fan-out multiplies image usage/cost, not any one request's attachment cap"))
+        XCTAssertTrue(usage.contains("Provider-reported input totals may already include image usage"))
+        XCTAssertTrue(usage.contains("this-turn-only"))
+        XCTAssertTrue(usage.contains("continuations do not automatically reattach prior images or send saved thumbnails"))
         XCTAssertTrue(documentation.contains("PNG"))
         XCTAssertTrue(documentation.lowercased().contains("rejected"))
     }

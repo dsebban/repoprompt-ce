@@ -151,6 +151,59 @@ final class DevinDiscoveryImportIsolationTests: XCTestCase {
         }
     }
 
+    func testUnreadableIsolatedOverlayRetainsRecoveryAndNativeSettings() throws {
+        for malformed in ["{broken", "[]"] {
+            let fixture = try makeFixture()
+            let native = #"{"read_config_from":{"claude":true},"theme":"dark"}"#
+            try write(native, to: fixture.nativeConfig)
+            let prepared = try prepare(fixture)
+            let overlay = try overlayConfig(prepared)
+            try write(malformed, to: overlay)
+
+            XCTAssertThrowsError(try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact))
+            XCTAssertEqual(try String(contentsOf: fixture.nativeConfig, encoding: .utf8), native)
+            XCTAssertEqual(try String(contentsOf: overlay, encoding: .utf8), malformed)
+        }
+    }
+
+    func testDisabledImportCollisionDoesNotIsolateOtherSources() throws {
+        for source in ["claude", "cursor"] {
+            for overrideFile in [nil, "config.json", "config.local.json"] as [String?] {
+                let fixture = try makeFixture()
+                let other = source == "claude" ? "cursor" : "claude"
+                let native = "{\"read_config_from\":{\"\(source)\":\(overrideFile == nil ? "false" : "true"),\"\(other)\":true}}"
+                try write(native, to: fixture.nativeConfig)
+                if let overrideFile {
+                    try write(
+                        "{\"read_config_from\":{\"\(source)\":false,\"\(other)\":true}}",
+                        to: fixture.workspace.appendingPathComponent(".devin/\(overrideFile)")
+                    )
+                }
+                let home = try URL(fileURLWithPath: XCTUnwrap(fixture.environment["HOME"]))
+                try write(
+                    #"{"mcpServers":{"RepoPromptCE":{"command":"proxy"}}}"#,
+                    to: home.appendingPathComponent(source == "claude" ? ".claude.json" : ".cursor/mcp.json")
+                )
+                let executable = fixture.workspace.appendingPathComponent("repoprompt-mcp")
+                try write("#!/bin/sh\nexit 0\n", to: executable)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+                let prepared = try DevinIntegrationConfiguration.prepare(
+                    workingDirectory: fixture.workspace.path,
+                    mcpServers: .mergeRepoPrompt(RepoPromptMCPServerConfiguration(command: executable.path)),
+                    sourceEnvironment: fixture.environment,
+                    isolateForeignMCPImports: false
+                )
+                let root = try URL(fileURLWithPath: XCTUnwrap(prepared.environment["XDG_CONFIG_HOME"]))
+                addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+                let overlay = try overlayConfig(prepared)
+                XCTAssertNotNil(try? FileManager.default.destinationOfSymbolicLink(atPath: overlay.path))
+                XCTAssertEqual(try String(contentsOf: overlay, encoding: .utf8), native)
+                try DevinIntegrationConfiguration.cleanup(artifact: prepared.cleanupArtifact)
+                XCTAssertEqual(try String(contentsOf: fixture.nativeConfig, encoding: .utf8), native)
+            }
+        }
+    }
+
     func testUnisolatedCleanupDoesNotUndoDevinImportWrites() throws {
         let fixture = try makeFixture()
         try write(#"{"read_config_from":{"claude":true}}"#, to: fixture.nativeConfig)

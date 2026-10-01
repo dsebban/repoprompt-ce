@@ -190,8 +190,26 @@ final class OracleImageAttachmentLoaderTests: XCTestCase {
         try Self.gifData.write(to: firstURL)
         try Self.gifData.write(to: secondURL)
 
+        let requests: [OracleImageRequest] = [
+            .init(index: 0, path: firstURL.path, title: nil),
+            .init(index: 1, path: secondURL.path, title: nil)
+        ]
+        let images = try OracleImageAttachmentLoader(
+            limits: .init(
+                maxCount: requests.count,
+                maxBytesPerImage: Self.gifData.count,
+                maxTotalBytes: Self.gifData.count * 2
+            )
+        ).load(
+            requests: requests,
+            authority: authority(logical: testRoot, physical: testRoot)
+        )
+        XCTAssertEqual(images.map(\.bytes), [Self.gifData, Self.gifData])
+        XCTAssertEqual(images.map(\.mediaType), [.gif, .gif])
+
         XCTAssertThrowsError(try OracleImageAttachmentLoader(
-            limits: .init(maxCount: 10, maxBytesPerImage: Self.gifData.count - 1, maxTotalBytes: 100)
+            limits: .init(maxCount: 10, maxBytesPerImage: Self.gifData.count - 1, maxTotalBytes: 100),
+            afterFirstRead: { _ in XCTFail("Oversized image must be rejected before reading bytes") }
         ).load(
             requests: [.init(index: 0, path: firstURL.path, title: nil)],
             authority: authority(logical: testRoot, physical: testRoot)
@@ -207,7 +225,8 @@ final class OracleImageAttachmentLoaderTests: XCTestCase {
                 maxCount: 10,
                 maxBytesPerImage: Self.gifData.count,
                 maxTotalBytes: Self.gifData.count * 2 - 1
-            )
+            ),
+            afterFirstRead: { _ in XCTFail("Oversized aggregate must be rejected before reading any image bytes") }
         ).load(
             requests: [
                 .init(index: 0, path: firstURL.path, title: nil),
