@@ -196,7 +196,12 @@ struct MCPOracleToolService {
             let lookupContext = try await oraclePackagingLookupContext(owner: owner)
             let transientImages = try await loadOracleImages(
                 imageRequests,
-                lookupContext: lookupContext
+                lookupContext: lookupContext,
+                sessionAttachmentPaths: sessionAttachmentPaths(
+                    for: imageRequests,
+                    tabID: tabID,
+                    owner: owner
+                )
             )
             let reviewGitContext = await promptVM.freezePromptGitReviewContext(
                 workspaceID: targetWindow.workspaceManager.activeWorkspace?.id,
@@ -733,7 +738,12 @@ struct MCPOracleToolService {
         let lookupContext = try await oraclePackagingLookupContext(for: stabilizedContext)
         let transientImages = try await loadOracleImages(
             imageRequests,
-            lookupContext: lookupContext
+            lookupContext: lookupContext,
+            sessionAttachmentPaths: sessionAttachmentPaths(
+                for: imageRequests,
+                tabID: stabilizedContext.tabID,
+                owner: owner
+            )
         )
         let reviewGitContext = await promptVM.freezePromptGitReviewContext(
             workspaceID: stabilizedContext.workspaceID,
@@ -772,9 +782,23 @@ struct MCPOracleToolService {
         )
     }
 
+    /// Exact image files the owning Agent session attached itself; empty without an owner.
+    private func sessionAttachmentPaths(
+        for requests: [OracleImageRequest],
+        tabID: UUID,
+        owner: AgentOracleOwner
+    ) -> [String] {
+        guard !requests.isEmpty, let targetWindow = try? requireTargetWindow() else { return [] }
+        return targetWindow.agentModeViewModel.oracleAuthorizedAttachmentPaths(
+            tabID: tabID,
+            agentSessionID: owner.agentSessionID
+        )
+    }
+
     private func loadOracleImages(
         _ requests: [OracleImageRequest],
-        lookupContext: WorkspaceLookupContext
+        lookupContext: WorkspaceLookupContext,
+        sessionAttachmentPaths: [String]
     ) async throws -> [AITransientImage] {
         guard !requests.isEmpty else { return [] }
         let storeRoots = await promptVM.workspaceFileContextStore.rootRefs(scope: lookupContext.rootScope)
@@ -809,7 +833,8 @@ struct MCPOracleToolService {
         }
         do {
             let authority = try await OracleImageAttachmentLoader.deriveAuthorityDetached(
-                rootSpecs: rootSpecs
+                rootSpecs: rootSpecs,
+                sessionAttachmentPaths: sessionAttachmentPaths
             )
             return try await OracleImageAttachmentLoader.loadDetached(
                 requests: requests,

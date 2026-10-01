@@ -83,9 +83,20 @@ struct OracleImageUnavailableRoot: Equatable {
     let candidatePrefixes: [String]
 }
 
+/// One exact image file the current Agent Mode session itself attached (pasted or dropped into
+/// its composer and copied into the app-managed attachment store). Authority covers only this
+/// file, never its directory, so sibling files from other sessions stay unreachable.
+struct OracleImageSessionAttachment: Equatable {
+    /// Request paths that name this file (as stored, and its symlink-resolved form).
+    let requestPaths: [String]
+    let directory: OracleImagePhysicalRootCapture
+    let fileName: String
+}
+
 struct OracleImageWorkspaceAuthority: Equatable {
     let roots: [OracleImageRootProjection]
     var unavailableRoots: [OracleImageUnavailableRoot] = []
+    var sessionAttachments: [OracleImageSessionAttachment] = []
 }
 
 enum OracleImageLoadError: Error, LocalizedError, Equatable {
@@ -108,7 +119,7 @@ enum OracleImageLoadError: Error, LocalizedError, Equatable {
         case let .invalidPath(index):
             "images[\(index)].path must be a canonical absolute local workspace path."
         case let .outsideAuthority(index):
-            "images[\(index)].path is outside the current workspace roots."
+            "images[\(index)].path is outside the current workspace roots and this session's attached images."
         case let .unsafePath(index):
             "images[\(index)].path changed or contains a symbolic link."
         case let .missingOrUnreadable(index):
@@ -163,11 +174,12 @@ struct OracleImageAttachmentLoader {
     /// executor. A root that cannot be captured is recorded in `unavailableRoots` so only image
     /// requests under it fail, rather than one broken root rejecting the whole request.
     static func deriveAuthorityDetached(
-        rootSpecs: [OracleImageRootSpec]
+        rootSpecs: [OracleImageRootSpec],
+        sessionAttachmentPaths: [String] = []
     ) async throws -> OracleImageWorkspaceAuthority {
         try Task.checkCancellation()
         let task = Task.detached(priority: .userInitiated) {
-            try deriveAuthority(rootSpecs: rootSpecs)
+            try deriveAuthority(rootSpecs: rootSpecs, sessionAttachmentPaths: sessionAttachmentPaths)
         }
         return try await withTaskCancellationHandler {
             try await task.value
@@ -177,7 +189,8 @@ struct OracleImageAttachmentLoader {
     }
 
     static func deriveAuthority(
-        rootSpecs: [OracleImageRootSpec]
+        rootSpecs: [OracleImageRootSpec],
+        sessionAttachmentPaths: [String] = []
     ) throws -> OracleImageWorkspaceAuthority {
         var roots: [OracleImageRootProjection] = []
         var unavailableRoots: [OracleImageUnavailableRoot] = []
@@ -200,7 +213,38 @@ struct OracleImageAttachmentLoader {
                 ))
             }
         }
-        return OracleImageWorkspaceAuthority(roots: roots, unavailableRoots: unavailableRoots)
+        var sessionAttachments: [OracleImageSessionAttachment] = []
+        var seenAttachmentPaths: Set<String> = []
+        for rawPath in sessionAttachmentPaths {
+            try Task.checkCancellation()
+            let path = StandardizedPath.absolute(rawPath)
+            let fileURL = URL(fileURLWithPath: path)
+            let fileName = fileURL.lastPathComponent
+            guard path.hasPrefix("/"), !path.contains("\0"), !fileName.isEmpty, fileName != "/",
+                  seenAttachmentPaths.insert(path).inserted
+            else { continue }
+            let directoryPath = fileURL.deletingLastPathComponent().path
+            do {
+                let directory = try OracleImagePhysicalRootCapture.capture(
+                    physicalRootPath: directoryPath,
+                    index: 0
+                )
+                let resolvedPath = directory.resolvedPhysicalRootPath + "/" + fileName
+                sessionAttachments.append(OracleImageSessionAttachment(
+                    requestPaths: Array(Set([path, resolvedPath])).sorted(),
+                    directory: directory,
+                    fileName: fileName
+                ))
+            } catch {
+                // Only this exact file is attributed unreadable; its directory is not authorized.
+                unavailableRoots.append(OracleImageUnavailableRoot(candidatePrefixes: [path]))
+            }
+        }
+        return OracleImageWorkspaceAuthority(
+            roots: roots,
+            unavailableRoots: unavailableRoots,
+            sessionAttachments: sessionAttachments
+        )
     }
 
     func load(
@@ -211,7 +255,9 @@ struct OracleImageAttachmentLoader {
             throw OracleImageLoadError.tooMany(maximumCount: limits.maxCount)
         }
         guard !requests.isEmpty else { return [] }
-        guard !authority.roots.isEmpty || !authority.unavailableRoots.isEmpty else {
+        guard !authority.roots.isEmpty || !authority.unavailableRoots.isEmpty
+            || !authority.sessionAttachments.isEmpty
+        else {
             throw OracleImageLoadError.outsideAuthority(index: requests[0].index)
         }
 
@@ -370,6 +416,17 @@ struct OracleImageAttachmentLoader {
         let components = rawPath.split(separator: "/", omittingEmptySubsequences: false)
         guard components.dropFirst().allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else {
             throw OracleImageLoadError.invalidPath(index: request.index)
+        }
+
+        // An exact session-attached file wins outright; nothing else in its directory matches.
+        if let attachment = authority.sessionAttachments.first(where: { $0.requestPaths.contains(rawPath) }) {
+            let directory = attachment.directory.resolvedPhysicalRootPath
+            return Resolution(
+                physicalRootPath: directory,
+                physicalFilePath: join(root: directory, relativePath: attachment.fileName),
+                relativePath: attachment.fileName,
+                expectedRootIdentity: attachment.directory.rootIdentity
+            )
         }
 
         var matches: [(specificity: Int, resolution: Resolution)] = []

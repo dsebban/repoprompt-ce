@@ -445,6 +445,78 @@ final class OracleImageAttachmentLoaderTests: XCTestCase {
         XCTAssertEqual(images.map(\.bytes), [Self.gifData, Self.gifData, Self.gifData])
     }
 
+    func testSessionAttachmentAuthorizesOnlyThatExactFileOutsideWorkspaceRoots() throws {
+        let workspaceRoot = testRoot.appendingPathComponent("workspace", isDirectory: true)
+        let store = testRoot.appendingPathComponent("agent_attachments", isDirectory: true)
+        try FileManager.default.createDirectory(at: workspaceRoot, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
+        let attached = store.appendingPathComponent("ATTACHED.png")
+        let sibling = store.appendingPathComponent("OTHER-SESSION.png")
+        let outside = testRoot.appendingPathComponent("outside.png")
+        try Self.pngData.write(to: attached)
+        try Self.gifData.write(to: sibling)
+        try Self.pngData.write(to: outside)
+
+        let authority = try OracleImageAttachmentLoader.deriveAuthority(
+            rootSpecs: [OracleImageRootSpec(physicalRootPath: workspaceRoot.path, logicalRootPaths: [workspaceRoot.path])],
+            sessionAttachmentPaths: [attached.path]
+        )
+
+        let images = try OracleImageAttachmentLoader().load(
+            requests: [.init(index: 0, path: attached.path, title: nil)],
+            authority: authority
+        )
+        XCTAssertEqual(images.map(\.bytes), [Self.pngData])
+
+        // The temp directory is reached through /var -> /private/var; both spellings name the file.
+        let resolvedAttached = attached.resolvingSymlinksInPath().path
+        XCTAssertEqual(
+            try OracleImageAttachmentLoader().load(
+                requests: [.init(index: 0, path: resolvedAttached, title: nil)],
+                authority: authority
+            ).map(\.bytes),
+            [Self.pngData]
+        )
+
+        // Neither another file in the same managed store nor an arbitrary outside path is authorized.
+        for (index, url) in [sibling, outside].enumerated() {
+            XCTAssertThrowsError(try OracleImageAttachmentLoader().load(
+                requests: [.init(index: index, path: url.path, title: nil)],
+                authority: authority
+            )) { error in
+                XCTAssertEqual(error as? OracleImageLoadError, .outsideAuthority(index: index))
+            }
+        }
+        // Without the session allowance, the attached file itself is outside authority too.
+        let rootsOnly = try OracleImageAttachmentLoader.deriveAuthority(rootSpecs: [
+            OracleImageRootSpec(physicalRootPath: workspaceRoot.path, logicalRootPaths: [workspaceRoot.path])
+        ])
+        XCTAssertThrowsError(try OracleImageAttachmentLoader().load(
+            requests: [.init(index: 0, path: attached.path, title: nil)],
+            authority: rootsOnly
+        )) { error in
+            XCTAssertEqual(error as? OracleImageLoadError, .outsideAuthority(index: 0))
+        }
+    }
+
+    func testSessionAttachmentReplacedBySymlinkIsRejected() throws {
+        let store = testRoot.appendingPathComponent("agent_attachments", isDirectory: true)
+        try FileManager.default.createDirectory(at: store, withIntermediateDirectories: true)
+        let attached = store.appendingPathComponent("ATTACHED.png")
+        let target = testRoot.appendingPathComponent("secret.png")
+        try Self.pngData.write(to: target)
+        try FileManager.default.createSymbolicLink(at: attached, withDestinationURL: target)
+
+        let authority = try OracleImageAttachmentLoader.deriveAuthority(
+            rootSpecs: [],
+            sessionAttachmentPaths: [attached.path]
+        )
+        XCTAssertThrowsError(try OracleImageAttachmentLoader().load(
+            requests: [.init(index: 0, path: attached.path, title: nil)],
+            authority: authority
+        ))
+    }
+
     private func authority(logical: URL, physical: URL) throws -> OracleImageWorkspaceAuthority {
         let capture = try OracleImagePhysicalRootCapture.capture(
             physicalRootPath: physical.path,
