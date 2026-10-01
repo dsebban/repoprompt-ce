@@ -78,6 +78,20 @@ final class OracleImageContractTests: XCTestCase {
         XCTAssertTrue(usage.contains("continuations do not automatically reattach prior images or send saved thumbnails"))
         XCTAssertTrue(documentation.contains("PNG"))
         XCTAssertTrue(documentation.lowercased().contains("rejected"))
+
+        // Images the user attached to the agent session are accepted at their exact path, so every
+        // surface (app tool, canonical/headless definition, path field) must say so.
+        for description in [
+            MCPOracleToolProvider.askOracleImageUsageDescription,
+            MCPOracleToolProvider.askOracleImagesArgumentDescription
+        ] {
+            XCTAssertTrue(description.contains("image the user attached to this agent session"))
+        }
+        let items = try XCTUnwrap(properties["images"]?.objectValue?["items"]?.objectValue)
+        let pathDescription = try XCTUnwrap(
+            items["properties"]?.objectValue?["path"]?.objectValue?["description"]?.stringValue
+        )
+        XCTAssertTrue(pathDescription.contains("image attached to this agent session"))
     }
 
     func testRawImagesAtOracleDispatchAreAnInternalInvariantFailure() {
