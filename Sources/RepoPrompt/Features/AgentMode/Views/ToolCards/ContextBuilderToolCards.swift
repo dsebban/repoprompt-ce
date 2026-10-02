@@ -206,17 +206,6 @@ struct ContextBuilderResultCard: View {
         return outcome.isEmpty ? laneCoverage.summaryText : "\(outcome) · \(laneCoverage.summaryText)"
     }
 
-    private var summary: String {
-        if isActiveResultCard {
-            return contextBuilderCardSubtitle(
-                contextBuilderAgentVM: contextBuilderAgentVM,
-                fallbackStatus: dto?.status,
-                phase: phase
-            )
-        }
-        return contextBuilderFinalStatusLabel(dto?.status)
-    }
-
     private var laneCoverage: OracleLaneCoverage? {
         contextBuilderOracleLaneCoverage(for: dto)
     }
@@ -225,7 +214,6 @@ struct ContextBuilderResultCard: View {
         if phase == .running || phase == .generatingPlan { return .running }
         if item.toolIsError == true || dto?.status?.lowercased() == "error" { return .failure }
         if let coverageStatus = laneCoverage?.cardStatus { return coverageStatus }
-        if item.toolIsError == true { return .failure }
         if let dto {
             switch dto.status?.lowercased() {
             case "error": return .failure
