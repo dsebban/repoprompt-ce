@@ -4569,6 +4569,19 @@ extension ToolOutputFormatter {
                 errorMessage: lane.error?.message
             )
         })
+        if let preamble = OracleGroupDeliveryContract.preamble(lanes: payload.lanes.map { lane in
+            OracleGroupDeliveryContract.Lane(
+                laneIndex: lane.laneIndex,
+                modelID: lane.modelID,
+                chatID: lane.chatID,
+                status: lane.status.rawValue,
+                response: lane.response,
+                partialResponse: lane.partialResponse
+            )
+        }) {
+            lines.append("")
+            lines.append(preamble)
+        }
         let laneMarkdown = OracleLaneMarkdownFormatter.format(payload)
         if !laneMarkdown.isEmpty {
             lines.append("")
@@ -4579,6 +4592,10 @@ extension ToolOutputFormatter {
                 lines.append("")
                 lines.append("Warning [\(warning.code)]: \(warning.message)")
             }
+        }
+        if let endMarker = OracleGroupDeliveryContract.endMarker(laneCount: ordered.count) {
+            lines.append("")
+            lines.append(endMarker)
         }
         return lines.joined(separator: "\n")
     }
