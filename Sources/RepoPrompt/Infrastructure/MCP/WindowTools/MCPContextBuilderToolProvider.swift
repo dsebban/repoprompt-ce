@@ -999,10 +999,6 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             return continuation
         }
         return reminder + "\n\nOptional later follow-up: " + continuation
-        guard let oracleCount, oracleCount > 1 else { return continuation }
-
-        let groupGuidance = "The Oracle group returned ordered, independent lane results. Check each result against the task and report unresolved disagreements."
-        return groupGuidance + "\n\nOptional later follow-up: " + continuation
     }
 
     nonisolated static func responseDisposition(
