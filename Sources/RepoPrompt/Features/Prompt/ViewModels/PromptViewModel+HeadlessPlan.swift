@@ -124,7 +124,7 @@ extension PromptViewModel {
         return try await withPreassembledPromptContext(
             cfg: headlessConfig,
             selection: snapshot.selection,
-            lookupContext: snapshot.lookupContext ?? allLoadedWorkspaceLookupContext(),
+            lookupContext: lookupContext,
             reviewGitContext: snapshot.reviewGitContext,
             sourceTabID: snapshot.tabID,
             finalReviewAuthorization: snapshot.finalReviewAuthorization
