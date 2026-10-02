@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptDomainRuntime
 import UniformTypeIdentifiers
 
 enum ACPPromptContentBuilder {
@@ -15,10 +16,11 @@ enum ACPPromptContentBuilder {
 
     static func blocks(
         text: String,
-        attachments: [AgentImageAttachment]
+        attachments: [AgentImageAttachment],
+        transientImages: [AITransientImage] = []
     ) throws -> [[String: Any]] {
         var blocks: [[String: Any]] = []
-        if !text.isEmpty || attachments.isEmpty {
+        if !text.isEmpty || (attachments.isEmpty && transientImages.isEmpty) {
             blocks.append([
                 "type": "text",
                 "text": text
@@ -29,6 +31,19 @@ enum ACPPromptContentBuilder {
             if let block = try imageBlock(for: attachment) {
                 blocks.append(block)
             }
+        }
+        for image in transientImages {
+            if let annotation = image.titleAnnotation {
+                blocks.append([
+                    "type": "text",
+                    "text": annotation
+                ])
+            }
+            blocks.append([
+                "type": "image",
+                "mimeType": image.mediaType.rawValue,
+                "data": image.base64Payload
+            ])
         }
 
         return blocks
