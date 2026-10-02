@@ -971,9 +971,12 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
                         markdown,
                         capturedOracleExportDestination
                     )
+                    let exportedLaneCount = [planReply, reviewReply]
+                        .compactMap { $0?.oracleGroup?.result.oracleResults.count }
+                        .max()
                     oracleExportFile = OracleExportFile(
                         path: resolvedPath,
-                        instruction: AgentOracleExport.instruction(path: resolvedPath)
+                        instruction: AgentOracleExport.instruction(path: resolvedPath, oracleLaneCount: exportedLaneCount)
                     )
                 }
 

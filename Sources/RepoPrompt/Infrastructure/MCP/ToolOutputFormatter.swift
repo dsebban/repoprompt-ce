@@ -4597,7 +4597,9 @@ extension ToolOutputFormatter {
             lines.append("")
             lines.append(endMarker)
         }
-        return lines.joined(separator: "\n")
+        // MCP clients may concatenate adjacent text blocks with no separator;
+        // end with a line break so the end marker stays on its own line.
+        return lines.joined(separator: "\n") + "\n"
     }
 
     static func formatFileAction(value: Value) -> [MCP.Tool.Content] {

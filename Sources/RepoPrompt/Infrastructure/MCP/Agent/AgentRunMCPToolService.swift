@@ -62,11 +62,15 @@ struct OracleExportRequest {
 }
 
 enum AgentOracleExport {
-    static func instruction(path: String) -> String {
+    static func instruction(path: String, oracleLaneCount: Int? = nil) -> String {
         let pathLiteral = jsonStringLiteral(path)
-        return """
+        let base = """
         Read the Oracle export with `read_file` using `{"path": \(pathLiteral)}`. Use this exact absolute `path` value verbatim without shortening or rewriting it, and use the file as planning context for this task.
         """
+        guard let requirement = OracleGroupDeliveryContract.exportReadingRequirement(laneCount: oracleLaneCount ?? 0) else {
+            return base
+        }
+        return base + " " + requirement
     }
 
     private static func jsonStringLiteral(_ value: String) -> String {
@@ -129,7 +133,7 @@ enum AgentOracleExport {
             sections.append(preamble)
         }
         sections.append("## Oracle results")
-        sections.append(contentsOf: result.oracleResults.map(laneMarkdown))
+        sections.append(contentsOf: lanes.map(laneMarkdown))
         if let endMarker = OracleGroupDeliveryContract.endMarker(laneCount: lanes.count) {
             sections.append(endMarker)
         }
