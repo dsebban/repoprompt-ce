@@ -6421,7 +6421,7 @@ class PromptViewModel: ObservableObject {
         selectionOverride: StoredSelection? = nil,
         lookupContextOverride: WorkspaceLookupContext? = nil,
         reviewGitContextOverride: FrozenPromptGitReviewContext? = nil
-    ) async -> AIMessage {
+    ) async throws -> AIMessage {
         let preset = oraclePromptConfiguration?.chatPreset ?? overrideChatPreset ?? currentChatPreset()
         var resolvedConfig: PromptContextResolved = {
             if let oraclePromptConfiguration {
@@ -6516,14 +6516,26 @@ class PromptViewModel: ObservableObject {
             }
         }
 
+        // Captured Oracle configuration is the authority for fail-closed packaging.
+        let requiresSelectedFileContent = oraclePromptConfiguration != nil
         let packaged: (message: AIMessage, preAssembly: PromptContextPreAssemblyResult)
         do {
+            if requiresSelectedFileContent, activeConfig.includeFiles {
+                try await PromptSelectedFileContentRequirement.awaitAppliedIngress(
+                    selection: logicalSelection,
+                    lookupContext: lookupContext,
+                    store: workspaceFileContextStore
+                )
+            }
             packaged = try await withPreassembledPromptContext(
                 cfg: activeConfig,
                 selection: logicalSelection,
                 lookupContext: lookupContext,
                 reviewGitContext: frozenReviewGitContext
             ) { preAssembly in
+                if requiresSelectedFileContent {
+                    try PromptSelectedFileContentRequirement.validate(preAssembly, config: activeConfig)
+                }
                 let (_, codeEntries) = PromptPackagingService.partitionPromptEntriesForGitDiff(
                     preAssembly.entries
                 )
@@ -6554,6 +6566,7 @@ class PromptViewModel: ObservableObject {
                 return (message, preAssembly)
             }
         } catch {
+            if requiresSelectedFileContent { throw error }
             return AIMessage(systemPrompt: systemPrompt, userMessage: "")
         }
         #if DEBUG
