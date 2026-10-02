@@ -2169,12 +2169,11 @@ enum AgentToolResultPersistencePolicy {
         }
 
         if let branch = ContextBuilderFollowUpBranch.select(responseType: responseType),
-           let reply = boundedContextBuilderReply(rawObject[branch.rawValue] as? [String: Any])
+           let rawReply = rawObject[branch.rawValue] as? [String: Any],
+           let reply = boundedContextBuilderReply(rawReply)
         {
             object[branch.rawValue] = reply
-            if let rawReply = rawObject[branch.rawValue] as? [String: Any],
-               let digest = oracleGroupDigest(from: rawReply)
-            {
+            if let digest = oracleGroupDigest(from: rawReply) {
                 var withDigest = object
                 withDigest[branch.rawValue] = reply.merging(digest) { current, _ in current }
                 if let json = jsonString(from: withDigest), !exceedsPersistedToolSummaryBudget(json) {
