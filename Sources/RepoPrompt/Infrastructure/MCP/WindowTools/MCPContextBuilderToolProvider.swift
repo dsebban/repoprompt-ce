@@ -992,6 +992,10 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         oracleCount: Int?
     ) -> String {
         let continuation = "Continue this \(modeLabel) conversation with ask_oracle(chat_id: \"\(chatID)\", new_chat: false)"
+        guard let reminder = OracleGroupDeliveryContract.followUpReminder(laneCount: oracleCount ?? 0) else {
+            return continuation
+        }
+        return reminder + "\n\nOptional later follow-up: " + continuation
         guard let oracleCount, oracleCount > 1 else { return continuation }
 
         let groupGuidance = "The Oracle group returned ordered, independent lane results. Check each result against the task and report unresolved disagreements."
