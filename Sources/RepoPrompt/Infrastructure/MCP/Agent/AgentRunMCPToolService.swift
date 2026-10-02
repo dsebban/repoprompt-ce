@@ -101,6 +101,7 @@ enum AgentOracleExport {
     }
 
     private static func groupMarkdown(_ result: OracleGroupResult) -> String {
+        let lanes = result.oracleResults.sorted { $0.laneIndex < $1.laneIndex }
         var sections = [
             """
             ## Oracle group
@@ -115,8 +116,23 @@ enum AgentOracleExport {
                     .joined(separator: "\n")
             )
         }
+        if let preamble = OracleGroupDeliveryContract.preamble(lanes: lanes.map { lane in
+            OracleGroupDeliveryContract.Lane(
+                laneIndex: lane.laneIndex,
+                modelID: lane.executionProfile?.modelID ?? lane.modelID,
+                chatID: lane.chatID,
+                status: lane.status.rawValue,
+                response: lane.response,
+                partialResponse: lane.error?.partialResponse
+            )
+        }) {
+            sections.append(preamble)
+        }
         sections.append("## Oracle results")
         sections.append(contentsOf: result.oracleResults.map(laneMarkdown))
+        if let endMarker = OracleGroupDeliveryContract.endMarker(laneCount: lanes.count) {
+            sections.append(endMarker)
+        }
         return sections.joined(separator: "\n\n")
     }
 
