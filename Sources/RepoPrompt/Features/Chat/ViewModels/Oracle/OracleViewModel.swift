@@ -3821,6 +3821,11 @@ class OracleViewModel: ObservableObject {
     }
 
     private func userFriendlyErrorMessage(for error: Error, tokenCount: Int = 0) -> String {
+        if let unavailable = error as? PromptSelectedFileContentUnavailableError,
+           let description = unavailable.errorDescription
+        {
+            return description
+        }
         guard let err = error as NSError?, err.domain == NSURLErrorDomain else {
             // Check if this is an OpenAI request too large error
             if let openAIError = error as? CustomOpenAIProviderError {
