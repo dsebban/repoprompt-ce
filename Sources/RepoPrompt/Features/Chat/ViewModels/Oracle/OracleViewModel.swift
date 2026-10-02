@@ -3304,7 +3304,7 @@ class OracleViewModel: ObservableObject {
                     let overrideContext = oraclePromptConfiguration?.promptContext
                         ?? promptViewModel.resolvedPromptContext(from: chatPreset)
 
-                    aiMessage = await promptViewModel.packagePrompt(
+                    aiMessage = try await promptViewModel.packagePrompt(
                         conversation: conversation,
                         overrideModel: model,
                         overridePromptConfig: overrideContext,
