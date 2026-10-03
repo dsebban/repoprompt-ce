@@ -1,4 +1,6 @@
-import Darwin
+#if os(Linux)
+    import RepoPromptC
+#endif
 import Foundation
 import Logging
 import MCP
@@ -71,8 +73,10 @@ actor DirectHeadlessChildEndpoint {
 
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
         guard fd >= 0 else { throw EndpointError.socket(errno: errno) }
-        var noSigPipe: Int32 = 1
-        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #if canImport(Darwin)
+            var noSigPipe: Int32 = 1
+            setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+        #endif
         var address = sockaddr_un()
         address.sun_family = sa_family_t(AF_UNIX)
         let bytes = socketURL.path.utf8CString
@@ -173,8 +177,10 @@ actor DirectHeadlessChildEndpoint {
                 if errno == EINTR || errno == EAGAIN { continue }
                 return
             }
-            var noSigPipe: Int32 = 1
-            setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+            #if canImport(Darwin)
+                var noSigPipe: Int32 = 1
+                setsockopt(clientFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+            #endif
             await endpoint.acceptClient(fd: clientFD, handler: handler)
         }
     }
@@ -232,8 +238,12 @@ actor DirectHeadlessChildEndpoint {
 
     private nonisolated static func peerPID(fd: Int32) -> Int32? {
         var pid: pid_t = 0
-        var size = socklen_t(MemoryLayout<pid_t>.size)
-        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0, pid > 0 else { return nil }
+        #if canImport(Darwin)
+            var size = socklen_t(MemoryLayout<pid_t>.size)
+            guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERPID, &pid, &size) == 0, pid > 0 else { return nil }
+        #else
+            guard repo_linux_socket_peer_pid(fd, &pid) == 0, pid > 0 else { return nil }
+        #endif
         return pid
     }
 

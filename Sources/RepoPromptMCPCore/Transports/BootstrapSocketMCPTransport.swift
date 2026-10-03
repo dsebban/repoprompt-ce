@@ -166,8 +166,10 @@ public actor BootstrapSocketMCPTransport: Transport {
             try Self.ensureNonBlocking(fd: socketFD)
 
             // Disable SIGPIPE on this socket
-            var noSigPipe: Int32 = 1
-            setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+            #if canImport(Darwin)
+                var noSigPipe: Int32 = 1
+                setsockopt(socketFD, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+            #endif
 
             try startReadSource(fd: socketFD)
             isConnected = true

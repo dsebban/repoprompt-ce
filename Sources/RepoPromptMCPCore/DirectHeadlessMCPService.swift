@@ -1,5 +1,4 @@
 import CryptoKit
-import Darwin
 import Foundation
 import Logging
 import MCP
@@ -498,11 +497,26 @@ package actor DirectHeadlessMCPService {
     /// Binds the kernel-observed parent PID to the executable identity currently on disk.
     /// Display names and initialize metadata never participate in mutation authority.
     nonisolated static func verifiedExecutableFingerprint(processID: Int32) -> String? {
-        var buffer = [CChar](repeating: 0, count: 4096)
-        guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        let path = URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
+        #if canImport(Darwin)
+            var buffer = [CChar](repeating: 0, count: 4096)
+            guard proc_pidpath(processID, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+            let path = URL(fileURLWithPath: String(cString: buffer)).standardizedFileURL.path
+        #else
+            // stat() follows the /proc magic link to the running image itself, even when it is unlinked
+            // (its readlink text then ends in " (deleted)" and may name an unrelated file).
+            let procExe = "/proc/\(processID)/exe"
+            var image = stat()
+            guard stat(procExe, &image) == 0, image.st_mode & S_IFMT == S_IFREG,
+                  let executable = try? FileManager.default.destinationOfSymbolicLink(atPath: procExe)
+            else { return nil }
+            let path = URL(fileURLWithPath: executable).standardizedFileURL.path
+        #endif
         var info = stat()
         guard lstat(path, &info) == 0 else { return nil }
+        #if !canImport(Darwin)
+            // Hash only a path that still names the running image.
+            guard info.st_dev == image.st_dev, info.st_ino == image.st_ino else { return nil }
+        #endif
         let material = "\(path)|\(info.st_dev)|\(info.st_ino)"
         return SHA256.hash(data: Data(material.utf8))
             .map { String(format: "%02x", $0) }

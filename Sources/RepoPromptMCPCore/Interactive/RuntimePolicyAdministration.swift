@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 import RepoPromptDomainRuntime
 
@@ -28,7 +27,11 @@ package enum RuntimePolicyAdministration {
             guard let command = arguments.first else {
                 throw CommandError.invalidArguments(usage)
             }
-            let store = makeRuntime().mutationPolicyStore
+            #if canImport(Darwin)
+                let store = makeRuntime().mutationPolicyStore
+            #else
+                let store = try makeLinuxRuntime().mutationPolicyStore
+            #endif
             let administrator = DomainClientPrincipal(
                 principalID: UUID(),
                 stableKey: "tty:\(getuid())",
@@ -175,6 +178,28 @@ package enum RuntimePolicyAdministration {
             externalReloadInterval: nil
         ))
     }
+
+    #if os(Linux)
+        /// Resolves the same profile and storage root as `--backend headless`, so grants land in the policy
+        /// file that runtime reads (Linux's applicationSupportDirectory is XDG, not ~/Library).
+        private static func makeLinuxRuntime() throws -> MCPDomainRuntime {
+            var environment = ProcessInfo.processInfo.environment
+            // The resolver validates working dirs, but the profile and storage roots never depend on them.
+            environment.removeValue(forKey: "REPOPROMPT_MCP_WORKING_DIRS")
+            let locations = try DirectHeadlessRuntimeLocationResolver.resolve(
+                environment: environment,
+                currentDirectory: URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            )
+            return MCPDomainRuntime(configuration: DomainRuntimeConfiguration(
+                mode: .standalone,
+                profileIdentifier: locations.profileIdentifier,
+                storageDirectory: locations.storageDirectory,
+                eventDirectory: locations.eventDirectory,
+                temporaryDirectory: locations.temporaryDirectory,
+                externalReloadInterval: nil
+            ))
+        }
+    #endif
 
     private static let usage = """
     Usage:

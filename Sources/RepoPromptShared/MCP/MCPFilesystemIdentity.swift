@@ -1,4 +1,3 @@
-import Darwin
 import Foundation
 
 /// Shared filesystem and stable-name authority for RepoPrompt MCP products.

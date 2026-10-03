@@ -1,0 +1,44 @@
+name: Linux Headless MCP
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Scripts/linux_headless_smoke.py'
+      - '.github/workflows/linux-headless.yml'
+  pull_request:
+    paths:
+      - 'Package.swift'
+      - 'Package.resolved'
+      - 'Sources/**'
+      - 'Scripts/linux_headless_smoke.py'
+      - '.github/workflows/linux-headless.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Build and Smoke Headless MCP on Linux
+    runs-on: ubuntu-24.04
+    container: swift:6.2
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install python3 if missing
+        run: command -v python3 >/dev/null || { apt-get update && apt-get install -y --no-install-recommends python3-minimal; }
+
+      - name: Build repoprompt-mcp
+        run: swift build --product repoprompt-mcp --only-use-versions-from-resolved-file
+
+      # XCTest suites are intentionally not run here: corelibs XCTest on Linux intermittently
+      # hangs in its async tearDown wait after a test body completes.
+      - name: Run headless stdio smoke
+        run: python3 Scripts/linux_headless_smoke.py "$(swift build --product repoprompt-mcp --only-use-versions-from-resolved-file --show-bin-path)/repoprompt-mcp"
