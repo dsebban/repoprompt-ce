@@ -25,6 +25,9 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
 async function handle(name: string, args: Record<string, unknown>) {
   const req = { params: { name } };
   const json = (v: unknown) => ({ content: [{ type: "text", text: JSON.stringify(v) }] });
+  if (req.params.name === "fixture_echo") {
+    return { content: [{ type: "text", text: String(args.text) }] };
+  }
   if (req.params.name === "agent_run" && args.op === "poll" && args.session_id === LANE_B) {
     return json({
       session_id: LANE_B,

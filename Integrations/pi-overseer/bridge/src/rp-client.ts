@@ -53,7 +53,8 @@ export class RPClient {
   }
 
   async call(tool: string, args: Record<string, unknown>, timeoutMs = 180_000): Promise<ToolOutcome> {
-    const routed = { ...args };
+    // Watcher and phone views consume the MCP data contract, not formatted Markdown.
+    const routed: Record<string, unknown> = { ...args, _rawJSON: true };
     // Window-scoped tools route through `_windowID`; global tools ignore it.
     if (routed._windowID === undefined && this.opts.defaultWindowID !== null && tool !== "bind_context") {
       routed._windowID = this.opts.defaultWindowID;
@@ -83,6 +84,14 @@ export class RPClient {
   }
 
   private truncate(text: string): string {
+    // JSON is an atomic data contract for phone views and the watcher. Slicing it
+    // corrupts otherwise successful MCP responses; the cap applies only to prose.
+    try {
+      JSON.parse(text);
+      return text;
+    } catch {
+      // Non-JSON tool output is still bounded before crossing the wire.
+    }
     const max = this.opts.maxResultChars;
     if (text.length <= max) return text;
     return `${text.slice(0, max)}\n…[truncated ${text.length - max} chars by bridge]`;

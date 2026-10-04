@@ -104,7 +104,11 @@ export class Watcher {
       if (!snap) return;
       const status = str(snap.status) ?? "";
       const runID = str(snap.run_id) ?? "";
-      const key = `${runID}:${status}`;
+      // RP can reuse a run ID across steers. Transcript growth identifies a new
+      // completed turn even when polling never observed its running state.
+      const count = snap.transcript_item_count;
+      const transcriptCount = typeof count === "number" && Number.isSafeInteger(count) && count >= 0 ? count : "";
+      const key = `${runID}:${status}:${transcriptCount}`;
       const primed = this.lastOverseerKey !== null;
       if (key === this.lastOverseerKey) return;
       this.lastOverseerKey = key;

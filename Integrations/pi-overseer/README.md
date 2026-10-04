@@ -111,7 +111,7 @@ To keep it running in the background, use `com.repoprompt.pi-overseer-bridge.pli
 | `RPCE_MCP_COMMAND` / `RPCE_MCP_ARGS` | `rpce-cli-debug` / `--backend app` | RepoPrompt MCP stdio server |
 | `RP_WINDOW_ID` | `1` | Default `_windowID` for window-scoped tools (`none` to omit) |
 | `OVERSEER_POLL_MS` / `INPUT_POLL_MS` | `15000` / `60000` | Watcher cadence |
-| `MAX_RESULT_CHARS` | `24000` | Truncates large tool results before they cross the wire |
+| `MAX_RESULT_CHARS` | `24000` | Truncates prose tool results; valid JSON is preserved atomically for phone views |
 | `RPCE_BRIDGE_POLICY` | built-in | JSON override of the tool/op allowlist |
 
 ### 3. Use it from the phone
@@ -143,10 +143,23 @@ For UI work, run `npm run dev` in `worker/` (wrangler on :8787) and `npm run dev
 
 On every screen it checks for horizontal overflow, 44 pt tap targets, inputs of 16 px or more and clear safe areas, and it runs a simulated-keyboard layout check. It also asserts that every `/api/rp` call and every MCP call reaching RepoPrompt succeeded, that the bridge refused nothing, that there were no console errors, and that overseer digests and needs-input events reached the activity log. Screenshots go to `web/test/screenshots/`. If Playwright's bundled browser isn't installed, set `CHROMIUM_PATH`. This is Chromium emulating the device, not WebKit, so do a final check on a real iPhone.
 
-The bridge e2e test runs the real bridge between a fake cloud socket and a fake RepoPrompt MCP server (`bridge/test/fake-rp-server.ts`). It covers call relay, `_windowID` routing, policy refusal, overseer-turn digests, and needs-input events. The worker tests cover transcript repair and resume, compaction boundaries, and the memory SQL (through a `node:sqlite` shim).
+The bridge e2e test runs the real bridge between a fake cloud socket and a fake RepoPrompt MCP server (`bridge/test/fake-rp-server.ts`). It covers call relay, `_windowID` routing, policy refusal, overseer-turn digests, and needs-input events. The worker tests cover transcript repair, compaction boundaries, and the memory SQL (through a `node:sqlite` shim). `cd worker && npm run test:recovery` additionally starts the real local Wrangler runtime with fresh persistent state, interrupts a pending keyless tool, restarts, and asserts automatic resume with no replay. It never connects to RepoPrompt and retains sanitized evidence under the printed temporary path. Install worker/bridge dependencies and build web assets first.
+
+The bridge requests `_rawJSON` from RepoPrompt so Sessions/Workspaces and the watcher consume the machine-readable contract. `MAX_RESULT_CHARS` applies to prose, not valid JSON: slicing JSON would corrupt successful replies. Very large structured responses can therefore exceed that cap; use the tools’ supported session/log limits to bound requests.
 
 ## Not built yet
 
 - Self-modification and redeploy from inside the agent.
 - Code-mode / executor-style tool calling. Today the tools are typed one-shot calls.
 - Telegram, Slack, or iMessage front ends. The DO's `/api/prompt` endpoint and phone socket are channel-agnostic.
+
+
+### Verification feature map
+
+| Feature | User / agent entry | Observable proof | Prerequisites / traps |
+| --- | --- | --- | --- |
+| Phone chat and RP control | Chat `/tool rp_* {JSON}` with faux provider, or `/api/prompt` | `/api/state` contains assistant tool result; owned RP status reflects the action | Local worker + authenticated bridge + running CE; mutate only owned throwaway IDs |
+| Sessions / Workspaces | Phone tabs or `/api/rp` | Successful MCP text parses as complete JSON | Bridge forces `_rawJSON`; large JSON is not prose-truncated |
+| Digest / needs-input activity | Adopt owned session with `overseer_setup`, then a new turn | `/api/state.activity` has `overseer_turn` / digest | First watcher observation only primes; validated transcript growth distinguishes completed turns even with a reused run ID |
+| Restart repair / resume | `worker: npm run test:recovery` | Interrupted tool result + resumed assistant, exactly one dispatch | Keyless local Wrangler; unknown-effect calls are not replayed |
+| Bridge policy | `bridge: npm test` or controlled cloud call frames | Refusal before MCP connection/call | `/api/rp` 403 proves only the separate worker gate |

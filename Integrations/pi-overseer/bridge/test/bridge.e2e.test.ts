@@ -7,7 +7,8 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
 import { checkPolicy, DEFAULT_POLICY } from "../src/policy.ts";
-import { collectSnapshots, parseJSON } from "../src/watcher.ts";
+import { Watcher, collectSnapshots, parseJSON } from "../src/watcher.ts";
+import { RPClient } from "../src/rp-client.ts";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "..");
@@ -75,7 +76,7 @@ test("bridge relays calls, enforces policy, and reports overseer turns", { timeo
 
     const ok = await next((m) => m.type === "result" && m.id === "c1");
     assert.equal(ok.isError, false);
-    assert.deepEqual(JSON.parse(ok.text).echo, { action: "list", _windowID: 1 });
+    assert.deepEqual(JSON.parse(ok.text).echo, { action: "list", _rawJSON: true, _windowID: 1 });
 
     const refused = await next((m) => m.type === "result" && m.id === "c2");
     assert.equal(refused.isError, true);
@@ -93,5 +94,51 @@ test("bridge relays calls, enforces policy, and reports overseer turns", { timeo
   } finally {
     bridge.kill("SIGTERM");
     wss.close();
+  }
+});
+
+test("MCP preserves oversized JSON and still bounds prose", { timeout: 10_000 }, async () => {
+  const rp = new RPClient({
+    command: path.join(root, "node_modules/.bin/tsx"),
+    args: ["test/fake-rp-server.ts"],
+    defaultWindowID: 1,
+    maxResultChars: 24_000,
+    log: () => {},
+  });
+  try {
+    const workspaces = { workspaces: [{ id: "w1", name: "x".repeat(25_000) }] };
+    const structured = await rp.call("fixture_echo", { text: JSON.stringify(workspaces) });
+    assert.deepEqual(JSON.parse(structured.text), workspaces);
+    const prose = await rp.call("fixture_echo", { text: "x".repeat(25_000) });
+    assert.equal(prose.text, `${"x".repeat(24_000)}\n…[truncated 1000 chars by bridge]`);
+  } finally {
+    await rp.close();
+  }
+});
+
+test("watcher detects completed turns with a reused run ID without duplicate events", { timeout: 5_000 }, async () => {
+  const snapshots = [2, 7, 7].map((transcript_item_count) => ({
+    session_id: "owned", run_id: "same-run", status: "completed", transcript_item_count,
+    assistant_text: `DIGEST: transcript ${transcript_item_count}`,
+  }));
+  const events: Array<{ assistantText?: string }> = [];
+  let finish!: () => void;
+  const observed = new Promise<void>((resolve) => { finish = resolve; });
+  const rp = { call: async () => {
+    const snapshot = snapshots.shift();
+    if (!snapshots.length) setImmediate(finish);
+    return { text: JSON.stringify(snapshot), isError: false };
+  } } as unknown as RPClient;
+  const watcher = new Watcher(rp, {
+    overseerPollMs: 10, inputPollMs: 60_000,
+    emit: (event) => events.push(event), log: () => {},
+  });
+  watcher.setOverseer("owned");
+  watcher.start();
+  try {
+    await observed;
+    assert.deepEqual(events.map((event) => event.assistantText), ["DIGEST: transcript 7"]);
+  } finally {
+    watcher.stop();
   }
 });

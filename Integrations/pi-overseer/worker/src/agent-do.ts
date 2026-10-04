@@ -206,7 +206,8 @@ export class PiOverseer extends DurableObject<Env> {
         this.memory.logEvent("bridge_online", null, `${msg.host} (bridge ${msg.bridgeVersion})`);
         this.sendBridge({ type: "watch", overseerSessionID: this.memory.get("overseer_session_id") });
         this.broadcastStatus();
-        if (this.needsResume) void this.resume();
+        // Rehydrate before checking needsResume; a fresh activation has not set it yet.
+        void this.resume();
         break;
       case "result": {
         const p = this.pending.get(msg.id);
@@ -419,7 +420,7 @@ export class PiOverseer extends DurableObject<Env> {
     await this.ctx.storage.setAlarm(Date.now() + ALARM_INTERVAL_MS);
     if (this.bridge) {
       this.sendBridge({ type: "ping" });
-      if (this.needsResume) await this.resume();
+      await this.resume();
       return;
     }
     // Rehydrate so a restart is detected even with nobody chatting.

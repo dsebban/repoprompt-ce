@@ -10,6 +10,7 @@
     "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
+    "test:recovery": "node test/verify-recovery.mjs",
     "build:check": "npm run build && wrangler deploy --dry-run --outdir .wrangler/dry-run"
   },
   "dependencies": {
