@@ -269,6 +269,10 @@ enum MCPCommandParser {
         }
     }
 
+    static func isLongRunningControlOperation(_ operation: String?) -> Bool {
+        ["poll", "wait", "cancel"].contains(operation?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "")
+    }
+
     /// Normalizes context_builder arguments by mapping instruction aliases to 'instructions'.
     /// - Parameter args: The arguments dictionary to normalize (modified in place)
     /// - Throws: CommandParseError if multiple conflicting instruction aliases are provided
@@ -832,6 +836,16 @@ enum MCPCommandParser {
             }
 
             try applyContextBuilderExportFlag(flags, to: &args)
+            if let raw = flags["detach"] {
+                guard let detach = parseBoolFlag(raw) else { throw CommandParseError.invalidArgument("--detach must be boolean") }
+                args["op"] = UncheckedSendableValue("start")
+                args["detach"] = UncheckedSendableValue(detach)
+            }
+            if let raw = flags["timeout"] {
+                guard let timeout = Double(raw), timeout.isFinite else { throw CommandParseError.invalidArgument("--timeout must be finite seconds") }
+                args["op"] = UncheckedSendableValue("start")
+                args["timeout"] = UncheckedSendableValue(timeout)
+            }
 
             return .aliasCall(toolName: "context_builder", args: args)
 
@@ -1810,6 +1824,12 @@ enum MCPCommandParser {
             }
             // Normalize instruction aliases (task, prompt, query, etc. -> instructions)
             var args = parsed.args
+            if isLongRunningControlOperation(args["op"]?.value as? String) {
+                guard let id = args["job_id"]?.value as? String, UUID(uuidString: id) != nil else {
+                    throw CommandParseError.invalidArgument("context_builder controls require job_id from a start response")
+                }
+                return .aliasCall(toolName: "context_builder", args: args)
+            }
             try normalizeContextBuilderArgs(&args)
 
             // Validate required instructions parameter

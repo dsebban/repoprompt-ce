@@ -723,10 +723,11 @@ final class AgentOraclePillRoutingTests: XCTestCase {
             await vm.loadOracleGroupPresentation(containing: selected)
             XCTAssertEqual(pill.memberDotState(for: selected), .unknown)
             var sawPrepared = false
+            fixture.composition.workspaceManager.setActiveChatSessionID(selected.id, forTabID: fixture.tabID)
             let invocation = Task { @MainActor in
                 do {
                     _ = try await vm.tool_chatSendWithConfiguredRosterCompletion(
-                        args: ["message": .string("next"), "chat_id": .string(selected.shortID)],
+                        args: ["message": .string("next")],
                         promptVM: fixture.composition.promptManager,
                         tabContext: oracleTabContext(fixture),
                         callbacks: AppOracleGroupExecutionCallbacks(
@@ -979,7 +980,7 @@ final class AgentOraclePillRoutingTests: XCTestCase {
         XCTAssertEqual(fixture.oracleViewModel.sessions.map(\.id), [projection.id, duplicate.id])
     }
 
-    func testGroupedProjectionRestorationRepairsNameOnlyWhenIdentityMatches() async throws {
+    func testGroupedProjectionRestorationPreservesExistingNameAndIdentity() async throws {
         let fixture = try await makeFixture()
         defer { fixture.cleanup() }
         let canonical = try makeCanonicalOracleGroup(fixture: fixture)
@@ -993,12 +994,12 @@ final class AgentOraclePillRoutingTests: XCTestCase {
         projection.name = "Mutable presentation name"
         let beforeIdentity = ProjectionIdentitySnapshot(projection)
         fixture.oracleViewModel.sessions = [projection]
+        fixture.composition.workspaceManager.setActiveChatSessionID(projection.id, forTabID: fixture.tabID)
 
         do {
             _ = try await fixture.oracleViewModel.tool_chatSendWithConfiguredRosterCompletion(
                 args: [
-                    "message": .string("continue"),
-                    "chat_id": .string(canonical.group.members[0].publicChatID)
+                    "message": .string("continue")
                 ],
                 promptVM: fixture.composition.promptManager,
                 tabContext: oracleTabContext(fixture),
@@ -1015,7 +1016,7 @@ final class AgentOraclePillRoutingTests: XCTestCase {
         }
 
         let restored = try XCTUnwrap(fixture.oracleViewModel.sessions.first)
-        XCTAssertEqual(restored.name, OracleViewModel.oracleProjectionName(base: canonical.group.name, laneIndex: 0))
+        XCTAssertEqual(restored.name, projection.name)
         XCTAssertEqual(ProjectionIdentitySnapshot(restored), beforeIdentity)
     }
 

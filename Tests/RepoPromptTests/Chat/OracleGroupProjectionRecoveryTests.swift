@@ -128,9 +128,10 @@ final class OracleGroupProjectionRecoveryTests: XCTestCase {
                     provenance: .direct
                 )
             )
+            composition.workspaceManager.setActiveChatSessionID(primary.memberID.rawValue, forTabID: tab.id)
             do {
                 _ = try await composition.oracleViewModel.tool_chatSendWithConfiguredRosterCompletion(
-                    args: ["message": .string("Follow up"), "chat_id": .string(primary.publicChatID)],
+                    args: ["message": .string("Follow up")],
                     promptVM: composition.promptManager,
                     tabContext: context,
                     callbacks: AppOracleGroupExecutionCallbacks(
