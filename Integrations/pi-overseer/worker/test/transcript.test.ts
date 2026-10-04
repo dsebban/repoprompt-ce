@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import { extractDigest } from "../src/prompts.ts";
-import { compactionCut, messageText, repairTranscript } from "../src/transcript.ts";
+import { compactionCut, displayText, messageText, repairTranscript } from "../src/transcript.ts";
 
 const user = (text: string): AgentMessage => ({ role: "user", content: text, timestamp: 1 });
 const assistant = (content: unknown[]): AgentMessage =>
@@ -51,4 +51,9 @@ test("extractDigest reads the overseer's DIGEST line", () => {
   assert.equal(extractDigest("did things\nDIGEST: lane A done; B needs approval"), "lane A done; B needs approval");
   assert.equal(extractDigest("no digest"), null);
   assert.equal(extractDigest(undefined), null);
+});
+
+test("displayText keeps prose and drops tool calls", () => {
+  assert.equal(displayText(assistant([{ type: "text", text: "a" }, call("x")])), "a");
+  assert.equal(displayText(assistant([call("x")])), "");
 });

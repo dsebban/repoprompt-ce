@@ -5,11 +5,12 @@ A durable [pi](https://github.com/badlogic/pi-mono) agent for managing RepoPromp
 It's a **separate component**. It talks to RepoPrompt only over MCP and adds no code to the Swift app.
 
 ```
- phone (web app, ntfy push)
+ phone: Svelte 5 web app (installable), ntfy push
         │  HTTPS / WSS, PHONE_TOKEN
         ▼
  ┌──────────────────────────── Cloudflare ────────────────────────────┐
- │  Worker ──► Durable Object "PiOverseer"                            │
+ │  static assets (web/dist, served from the edge, ~27 KB gzipped)    │
+ │  Worker /api, /phone ──► Durable Object "PiOverseer"               │
  │               • pi-agent-core Agent loop + tools                   │
  │               • SQLite: transcript, memories, kv, activity log     │
  │               • alarm: bridge health + interrupted-run resume      │
@@ -21,6 +22,21 @@ It's a **separate component**. It talks to RepoPrompt only over MCP and adds no 
  │    • watcher: polls the overseer session + sessions needing input   │
  └────────────────────────────────────────────────────────────────────┘
 ```
+
+## The phone app
+
+`web/` is a Svelte 5 + Vite single-page app. The build is about 27 KB gzipped (24 KB JS, 2.4 KB CSS) with no runtime dependencies. Cloudflare serves it as static assets straight from the edge (`run_worker_first` sends only `/api/*`, `/bridge` and `/phone` to the Worker), and hashed assets are cached as immutable. Add it to your home screen and it runs as a standalone app.
+
+| Screen | What it does | Model involved? |
+| --- | --- | --- |
+| **Chat** | Talk to pi; replies stream token by token (batched to one update per animation frame). Quick actions: Status, Needs me, Overseer digest, While away, Stop. | Yes |
+| **Sessions** | List sessions, sorted with "needs me" first, plus filters. Open one to answer its approval with one tap, steer it, read its log, cancel the run, or hand it to pi. | No, direct MCP via `/api/rp` |
+| **Workspaces** | List workspaces, see which window shows each, and switch or open. | No, direct MCP |
+| **Memory** | Activity feed (overseer digests, needs-input, bridge status), the rolling summary, and searchable memories you can delete. | No |
+
+The direct screens skip the model, so they respond in roughly one network round-trip and cost no tokens. `/api/rp` only accepts `agent_manage` list_sessions/get_log, `agent_run` poll/steer/respond/cancel and `manage_workspaces` list/switch (`worker/src/direct-calls.ts`). The bridge allowlist still applies on the Mac after that.
+
+The app reconnects its socket and resyncs whenever it comes back to the foreground, because phones suspend background sockets. Assistant Markdown goes through a small renderer that escapes everything first, so transcript text can't inject HTML.
 
 ## How it uses the overseer feature
 
@@ -55,12 +71,12 @@ Messages pi relays arrive in the overseer session as that session's user turns. 
 
 ```bash
 cd Integrations/pi-overseer/worker
-npm install
+npm install                                # npm run deploy builds ../web first
 npx wrangler secret put BRIDGE_TOKEN       # long random string
 npx wrangler secret put PHONE_TOKEN        # different long random string
 npx wrangler secret put ANTHROPIC_API_KEY  # or <PROVIDER>_API_KEY for PI_PROVIDER
 npx wrangler secret put NTFY_URL           # optional: https://ntfy.sh/<long-random-topic>
-npx wrangler deploy
+npm run deploy                             # builds web/ then wrangler deploy
 ```
 
 The model is set by `PI_PROVIDER`, `PI_MODEL`, and `PI_THINKING` in `wrangler.jsonc`. Model ids newer than pi-ai's bundled registry work too: they reuse a sibling model's API settings. For a keyless dry run, set `PI_PROVIDER=faux`. In that mode `/tool <name> {json}` calls one tool directly, which is a quick way to prove the whole path works.
@@ -89,7 +105,7 @@ To keep it running in the background, use `com.repoprompt.pi-overseer-bridge.pli
 
 ### 3. Use it from the phone
 
-Open `https://pi-overseer.<you>.workers.dev`, enter the phone token, and add the page to your home screen. Subscribe to your ntfy topic in the ntfy app if you want push notifications. Then try:
+Open `https://pi-overseer.<you>.workers.dev`, enter the phone token, and add the app to your home screen. Subscribe to your ntfy topic in the ntfy app if you want push notifications. Then try:
 
 - "Set up the overseer." It creates the 📱 Pi Overseer session in RepoPrompt. Link sessions to it with **Oversee**.
 - "What's running and what's waiting on me?"
@@ -101,7 +117,20 @@ Open `https://pi-overseer.<you>.workers.dev`, enter the phone token, and add the
 ```bash
 cd worker && npm run typecheck && npm test && npm run build:check
 cd bridge && npm run typecheck && npm test
+cd web    && npm run check && npm test
+cd web    && npm run verify      # full-stack browser verification (below)
 ```
+
+For UI work, run `npm run dev` in `worker/` (wrangler on :8787) and `npm run dev` in `web/` (Vite with hot reload, proxying `/api` and `/phone` to wrangler).
+
+**Full-stack verification:** `web/test/verify-ui.mjs` boots `wrangler dev` with fresh state and the keyless faux model, plus the real bridge and the fake RepoPrompt MCP server. It then drives the built app in headless Chromium at iPhone 14 size, in light and dark mode:
+- login
+- all 14 agent tools through chat
+- the Sessions filter, a one-tap approval, steer and log
+- switching workspaces
+- memory search
+
+It asserts that every `/api/rp` call and every MCP call reaching RepoPrompt succeeded, that the bridge refused nothing, that there were no console errors, and that overseer digests and needs-input events reached the activity log. Screenshots go to `web/test/screenshots/`. If Playwright's bundled browser isn't installed, set `CHROMIUM_PATH`.
 
 The bridge e2e test runs the real bridge between a fake cloud socket and a fake RepoPrompt MCP server (`bridge/test/fake-rp-server.ts`). It covers call relay, `_windowID` routing, policy refusal, overseer-turn digests, and needs-input events. The worker tests cover transcript repair and resume, compaction boundaries, and the memory SQL (through a `node:sqlite` shim).
 

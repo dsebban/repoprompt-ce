@@ -29,6 +29,10 @@ export class RPClient {
       const transport = new StdioClientTransport({
         command: this.opts.command,
         args: this.opts.args,
+        // The SDK otherwise passes only a minimal default environment.
+        env: Object.fromEntries(
+          Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+        ),
         stderr: "pipe",
       });
       const client = new Client({ name: "pi-overseer-bridge", version: "0.1.0" });

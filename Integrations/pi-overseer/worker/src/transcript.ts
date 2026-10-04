@@ -62,3 +62,15 @@ export function compactionCut(messages: AgentMessage[], keep: number): number {
   while (cut < messages.length && (messages[cut] as { role: string }).role !== "user") cut++;
   return cut >= messages.length ? 0 : cut;
 }
+
+/** What the phone shows: only the prose. Tool calls are shown as their own activity notes. */
+export function displayText(m: AgentMessage): string {
+  const content = (m as { content?: unknown }).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content
+    .filter((c: { type: string }) => c.type === "text")
+    .map((c: { text?: string }) => c.text ?? "")
+    .join("\n")
+    .trim();
+}

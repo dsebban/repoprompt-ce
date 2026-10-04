@@ -12,11 +12,13 @@ import type { BridgeToCloud, CloudToBridge, EventMessage } from "../../shared/pr
 import { Memory } from "./memory.ts";
 import { buildSystemPrompt, extractDigest } from "./prompts.ts";
 import { buildTools } from "./tools.ts";
+import { checkDirectCall } from "./direct-calls.ts";
 import { fauxModel } from "./faux-model.ts";
-import { compactionCut, messageText, repairTranscript } from "./transcript.ts";
+import { compactionCut, displayText, messageText, repairTranscript } from "./transcript.ts";
 
 export interface Env {
   PI_OVERSEER: DurableObjectNamespace<PiOverseer>;
+  ASSETS: Fetcher;
   BRIDGE_TOKEN: string;
   PHONE_TOKEN: string;
   PI_PROVIDER?: string;
@@ -87,6 +89,26 @@ export class PiOverseer extends DurableObject<Env> {
         return Response.json({ aborted: true });
       case "/api/state":
         return Response.json(this.stateSnapshot());
+      case "/api/rp": {
+        // Direct, model-free RepoPrompt calls for the Sessions/Workspaces screens.
+        const { tool, args } = (await request.json()) as { tool?: string; args?: Record<string, unknown> };
+        const refusal = checkDirectCall(tool, args);
+        if (refusal) return Response.json({ error: refusal }, { status: 403 });
+        try {
+          const result = await this.callBridge(tool!, args!, 60_000);
+          return Response.json(result);
+        } catch (error) {
+          return Response.json({ error: String(error instanceof Error ? error.message : error) }, { status: 502 });
+        }
+      }
+      case "/api/memories": {
+        if (request.method === "DELETE") {
+          const id = Number(url.searchParams.get("id"));
+          return Response.json({ deleted: this.memory.forget(id) });
+        }
+        const q = url.searchParams.get("q") ?? "";
+        return Response.json({ memories: this.memory.search(q, undefined, 100) });
+      }
       case "/api/reset": {
         this.agent?.abort();
         this.memory.replaceMessages([]);
@@ -286,8 +308,9 @@ export class PiOverseer extends DurableObject<Env> {
         // Persist as soon as each message lands: this is what makes a restart resumable.
         this.memory.appendMessage(event.message);
         const role = (event.message as { role: string }).role;
-        if (role === "assistant" || role === "user") {
-          this.broadcast({ type: "message", role, text: messageText(event.message), at: Date.now() });
+        const text = displayText(event.message);
+        if ((role === "assistant" || role === "user") && text) {
+          this.broadcast({ type: "message", role, text, at: Date.now() });
         }
         break;
       }
@@ -303,10 +326,10 @@ export class PiOverseer extends DurableObject<Env> {
         this.broadcast({ type: "tool", phase: "end", name: event.toolName, isError: event.isError });
         break;
       case "agent_start":
-      case "agent_end":
-        // Defer: isStreaming flips after listeners settle.
-        queueMicrotask(() => this.broadcastStatus());
+        this.broadcastStatus();
         break;
+      // agent_end is not reported here: isStreaming stays true until every awaited
+      // listener (including this one) settles, so runPrompt/resume report it after.
     }
   }
 
@@ -335,6 +358,8 @@ export class PiOverseer extends DurableObject<Env> {
       await agent.prompt(text);
     } catch (error) {
       this.broadcast({ type: "error", text: String(error) });
+    } finally {
+      this.broadcastStatus();
     }
   }
 
@@ -348,6 +373,8 @@ export class PiOverseer extends DurableObject<Env> {
       await agent.continue();
     } catch (error) {
       this.broadcast({ type: "error", text: `Resume failed: ${String(error)}` });
+    } finally {
+      this.broadcastStatus();
     }
   }
 
@@ -444,7 +471,7 @@ export class PiOverseer extends DurableObject<Env> {
     const messages = this.ensureAgent()
       .state.messages.filter((m) => ["user", "assistant"].includes((m as { role: string }).role))
       .slice(-60)
-      .map((m) => ({ role: (m as { role: string }).role, text: messageText(m), at: (m as { timestamp?: number }).timestamp }))
+      .map((m) => ({ role: (m as { role: string }).role, text: displayText(m), at: (m as { timestamp?: number }).timestamp }))
       .filter((m) => m.text);
     return {
       ...(this.statusEvent() as object),

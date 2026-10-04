@@ -5,11 +5,12 @@
   "type": "module",
   "description": "Durable pi agent (Cloudflare Durable Object) that manages RepoPrompt CE from a phone",
   "scripts": {
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev": "npm --prefix ../web run build && wrangler dev",
+    "build": "npm --prefix ../web ci && npm --prefix ../web run build",
+    "deploy": "npm run build && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test test/*.test.ts",
-    "build:check": "wrangler deploy --dry-run --outdir .wrangler/dry-run"
+    "build:check": "npm run build && wrangler deploy --dry-run --outdir .wrangler/dry-run"
   },
   "dependencies": {
     "@mariozechner/pi-agent-core": "^0.73.1",

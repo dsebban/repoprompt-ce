@@ -1,7 +1,8 @@
-// Worker entry: authenticates and routes everything to the single PiOverseer object.
+// Worker entry: authenticates API/socket routes and hands them to the single PiOverseer
+// object. The Svelte phone app (../web/dist) is served as static assets straight from
+// the edge; `run_worker_first` in wrangler.jsonc means only API routes reach this code.
 
 import { PiOverseer, type Env } from "./agent-do.ts";
-import { PHONE_HTML } from "./phone-ui.ts";
 
 export { PiOverseer };
 
@@ -24,18 +25,12 @@ export default {
       return new Response("Set BRIDGE_TOKEN and PHONE_TOKEN secrets first (wrangler secret put).", { status: 500 });
     }
 
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      return new Response(PHONE_HTML, {
-        headers: { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-      });
-    }
-
     let authorized = false;
     if (url.pathname === "/bridge") authorized = safeEqual(bearer(request), env.BRIDGE_TOKEN);
     // Browsers cannot set headers on WebSocket upgrades, so the phone socket uses a query token.
     else if (url.pathname === "/phone") authorized = safeEqual(url.searchParams.get("token") ?? "", env.PHONE_TOKEN);
     else if (url.pathname.startsWith("/api/")) authorized = safeEqual(bearer(request), env.PHONE_TOKEN);
-    else return new Response("not found", { status: 404 });
+    else return env.ASSETS.fetch(request);
 
     if (!authorized) return new Response("unauthorized", { status: 401 });
 

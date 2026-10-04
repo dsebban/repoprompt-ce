@@ -2,3 +2,5 @@ node_modules/
 .wrangler/
 .dev.vars
 *.local.env
+web/dist/
+web/test/screenshots/
