@@ -1191,6 +1191,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     func prepareForWindowClose() {
         guard !hasPreparedForWindowClose else { return }
         hasPreparedForWindowClose = true
+        WindowStatesManager.shared.longRunningJobs.close(windowID: mcpServer.windowID)
         backgroundPlanUIRefreshTask?.cancel()
         backgroundPlanUIRefreshTask = nil
         pendingBackgroundPlanRefreshTabIDs.removeAll()
@@ -1722,6 +1723,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     private func cancelMCPRunsWhoseTargetWasRemoved(_ workspaces: [WorkspaceModel]) {
         let workspaceIDs = Set(workspaces.map(\.id))
+        WindowStatesManager.shared.longRunningJobs.cancel { $0.windowID == mcpServer.windowID && $0.workspaceID.map { !workspaceIDs.contains($0) } == true }
         for tabID in sessions.keys {
             guard let record = runRegistry.activeRecord(tabID: tabID),
                   let identity = record.mcpConfiguration?.identity
@@ -1744,6 +1746,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
     /// Called before compose tabs are closed. Cancels all running tasks for those tabs.
     @MainActor
     private func handleComposeTabsWillClose(_ tabIDs: Set<UUID>) async {
+        WindowStatesManager.shared.longRunningJobs.cancel { $0.windowID == mcpServer.windowID && tabIDs.contains($0.tabID) }
         for tabID in tabIDs {
             guard let session = sessions[tabID] else { continue }
 
@@ -4905,7 +4908,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         gitScopeOverride: GitInclusion?,
         onProgress: ((_ text: String, _ reasoning: String?) -> Void)?,
         progressReporter: ContextBuilderMCPProgressReporter?,
-        activityReporter: ContextBuilderMCPActivityReporter?
+        activityReporter: ContextBuilderMCPActivityReporter?,
+        jobProgress: MCPLongRunningJobProgress? = nil
     ) async throws -> ChatSendReply {
         let session = session(for: tabID)
         try Task.checkCancellation()
@@ -4983,7 +4987,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 prebuiltAIMessage: frozenPack.message,
                 provenance: .direct
             )
-            let tabContext = OracleViewModel.OracleSendTabContext(
+            var tabContext = OracleViewModel.OracleSendTabContext(
                 tabID: tabID,
                 workspaceID: originWorkspaceID,
                 agentModeSessionID: agentModeSessionID,
@@ -4991,6 +4995,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 activationPolicy: .background,
                 packaging: packaging
             )
+            tabContext.jobProgress = jobProgress
             let callbacks = AppOracleGroupExecutionCallbacks(
                 prepared: { [weak self] groupID, turnID, members in
                     guard let self, let session = sessions[tabID] else { throw CancellationError() }
@@ -5071,7 +5076,9 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 supervision.cancel()
                 task.cancel()
             }
-            try requireCurrentOracleRun(session: session, generation: generation)
+            // Ticket cancellation observes the drained canonical group, rather than discarding
+            // its partial lanes at the request-cancellation fence. Legacy callers retain that fence.
+            try requireCurrentOracleRun(session: session, generation: generation, retainingSettledCancellation: jobProgress != nil)
             let groupReply = ContextBuilderOracleGroupReply(result: completion.result)
             guard session.followUpOracleGroupState.matchesFinalResult(
                 groupReply.result,
@@ -5089,12 +5096,13 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             #if DEBUG
                 await runTestHooks?.afterOracleArtifactReservationReleased?(generation)
             #endif
-            try requireCurrentOracleRun(session: session, generation: generation)
+            try requireCurrentOracleRun(session: session, generation: generation, retainingSettledCancellation: jobProgress != nil)
             let reply = try session.completeOracleGroupReply(
                 groupReply,
                 generation: generation,
                 originWorkspaceID: originWorkspaceID,
-                mode: mode
+                mode: mode,
+                retainingSettledCancellation: jobProgress != nil
             )
             clearPendingBackgroundPlanUIRefresh(for: tabID)
             applyPlanPreview(to: session)
@@ -5132,9 +5140,10 @@ final class ContextBuilderAgentViewModel: ObservableObject {
 
     private func requireCurrentOracleRun(
         session: TabSession,
-        generation: UInt64
+        generation: UInt64,
+        retainingSettledCancellation: Bool = false
     ) throws {
-        try Task.checkCancellation()
+        if !retainingSettledCancellation { try Task.checkCancellation() }
         guard session.followUpOracleGroupState.generation == generation else {
             throw CancellationError()
         }
@@ -5161,7 +5170,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         gitScopeOverride: GitInclusion? = nil,
         onProgress: ((_ text: String, _ reasoning: String?) -> Void)? = nil,
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
-        activityReporter: ContextBuilderMCPActivityReporter? = nil
+        activityReporter: ContextBuilderMCPActivityReporter? = nil,
+        jobProgress: MCPLongRunningJobProgress? = nil
     ) async throws -> ChatSendReply {
         let session = session(for: tabID)
         if execution.roster.count > 1 {
@@ -5182,7 +5192,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 gitScopeOverride: gitScopeOverride,
                 onProgress: onProgress,
                 progressReporter: progressReporter,
-                activityReporter: activityReporter
+                activityReporter: activityReporter,
+                jobProgress: jobProgress
             )
         }
 
@@ -5242,6 +5253,7 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 agentModeRunID: agentModeRunID
             )
             createdSessionID = createdSession.id
+            await jobProgress?.settled(.object(["chat_id": .string(createdSession.shortID)]))
             guard let createdSessionIndex = oracleViewModel.sessions.firstIndex(where: { $0.id == createdSession.id }) else {
                 throw ChatToolError.internalError("Context Builder Oracle conversation was not created.")
             }
@@ -5391,7 +5403,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
         finalReviewAuthorization: ContextBuilderFinalReviewAuthorization? = nil,
         gitScopeOverride: GitInclusion? = nil,
         progressReporter: ContextBuilderMCPProgressReporter? = nil,
-        activityReporter: ContextBuilderMCPActivityReporter? = nil
+        activityReporter: ContextBuilderMCPActivityReporter? = nil,
+        jobProgress: MCPLongRunningJobProgress? = nil
     ) async throws -> ChatSendReply {
         let tabID = identity.tabID
         #if DEBUG
@@ -5494,7 +5507,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             mcpSessionUIState: mcpSessionUIState,
             gitScopeOverride: gitScopeOverride,
             progressReporter: progressReporter,
-            activityReporter: activityReporter
+            activityReporter: activityReporter,
+            jobProgress: jobProgress
         )
     }
 
@@ -5514,7 +5528,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
             finalReviewAuthorization: ContextBuilderFinalReviewAuthorization? = nil,
             gitScopeOverride: GitInclusion? = nil,
             progressReporter: ContextBuilderMCPProgressReporter? = nil,
-            activityReporter: ContextBuilderMCPActivityReporter? = nil
+            activityReporter: ContextBuilderMCPActivityReporter? = nil,
+            jobProgress: MCPLongRunningJobProgress? = nil
         ) async throws -> ChatSendReply {
             guard let workspaceID = workspaceManager?.activeWorkspaceID else {
                 throw ContextBuilderWorkspaceContextError.missingWorkspace
@@ -5533,7 +5548,8 @@ final class ContextBuilderAgentViewModel: ObservableObject {
                 finalReviewAuthorization: finalReviewAuthorization,
                 gitScopeOverride: gitScopeOverride,
                 progressReporter: progressReporter,
-                activityReporter: activityReporter
+                activityReporter: activityReporter,
+                jobProgress: jobProgress
             )
         }
     #endif
@@ -6132,9 +6148,10 @@ extension ContextBuilderAgentViewModel.TabSession {
         _ groupReply: ContextBuilderOracleGroupReply,
         generation: UInt64,
         originWorkspaceID: UUID,
-        mode: HeadlessMode
+        mode: HeadlessMode,
+        retainingSettledCancellation: Bool = false
     ) throws -> ChatSendReply {
-        try Task.checkCancellation()
+        if !retainingSettledCancellation { try Task.checkCancellation() }
         guard followUpOracleGroupState.generation == generation else { throw CancellationError() }
         guard followUpOracleGroupState.matchesFinalResult(groupReply.result, generation: generation),
               let primary = followUpOracleGroupState.members.first

@@ -9,6 +9,77 @@ import XCTest
 #if DEBUG
     @MainActor
     final class OracleGroupBoundaryTests: XCTestCase {
+        func testRequestDiagnosticsReachBothOracleAdaptersWithoutForwardingPublicKnobs() async throws {
+            for ask in [false, true] {
+                for ticket in [false, true] {
+                    for control in [["debug_primary_only": Value.bool(true)], ["debug_lane_timeout_seconds": Value.double(1.5)]] {
+                        var captured: OracleViewModel.OracleRequestDiagnostics?
+                        let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), sendOperation: { args, _, context in
+                            captured = context?.requestDiagnostics
+                            XCTAssertNil(args["debug_primary_only"])
+                            XCTAssertNil(args["debug_lane_timeout_seconds"])
+                            return ["response": .string("retained"), "chat_id": .string("fixture")]
+                        })
+                        defer { fixture.cleanup() }
+                        var args = control
+                        args["message"] = .string("fixture")
+                        args["new_chat"] = .bool(true)
+                        if ticket { args["op"] = .string("start")
+                            args["timeout"] = .int(5)
+                        }
+                        let result = try await (
+                            ask
+                                ? fixture.service.executeAskOracle(args: args, invocationContext: fixture.invocationContext)
+                                : fixture.service.executeOracleSend(args: args, invocationContext: fixture.invocationContext)
+                        )
+                        XCTAssertEqual(result.objectValue?["response"], .string("retained"))
+                        XCTAssertEqual(captured, try OracleViewModel.OracleRequestDiagnostics.parse(args))
+                        XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+                    }
+                }
+            }
+        }
+
+        func testInvalidRequestDiagnosticsRejectBeforeJobAdmissionOrSend() async throws {
+            let invalid: [[String: Value]] = [
+                ["debug_primary_only": .bool(true)],
+                ["debug_primary_only": .bool(true), "chat_id": .string("old"), "new_chat": .bool(true)],
+                ["debug_primary_only": .string("true"), "new_chat": .bool(true)],
+                ["debug_lane_timeout_seconds": .double(.infinity), "new_chat": .bool(true)],
+                ["debug_lane_timeout_seconds": .double(.nan), "new_chat": .bool(true)],
+                ["debug_lane_timeout_seconds": .int(0), "new_chat": .bool(true)],
+                ["debug_lane_timeout_seconds": .int(301), "new_chat": .bool(true)],
+                ["debug_lane_timeout_seconds": .string("30"), "new_chat": .bool(true)],
+                ["debug_primary_only": .bool(true), "debug_lane_timeout_seconds": .int(30), "new_chat": .bool(true)]
+            ]
+            for ask in [false, true] {
+                for ticket in [false, true] {
+                    for control in invalid {
+                        let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID())
+                        defer { fixture.cleanup() }
+                        var args = control
+                        args["message"] = .string("must not launch")
+                        if ticket { args["op"] = .string("start")
+                            args["detach"] = .bool(true)
+                        }
+                        do {
+                            _ = try await (
+                                ask
+                                    ? fixture.service.executeAskOracle(args: args, invocationContext: fixture.invocationContext)
+                                    : fixture.service.executeOracleSend(args: args, invocationContext: fixture.invocationContext)
+                            )
+                            XCTFail("Invalid diagnostics admitted: \(args)")
+                        } catch let MCPError.invalidParams(rawDetail) {
+                            let detail = try XCTUnwrap(rawDetail)
+                            XCTAssertTrue(detail.contains("Oracle diagnostics") || detail.contains("debug_primary_only") || detail.contains("debug_lane_timeout_seconds"), detail)
+                        } catch { XCTFail("Reached later work: \(error)") }
+                        XCTAssertEqual(fixture.sendRecorder.calls.count, 0)
+                        XCTAssertEqual(fixture.rebindRecorder.count, 0)
+                    }
+                }
+            }
+        }
+
         func testOracleSendStartWithChatIDDoesNotRebind() async {
             let fixture = makeOracleSendFixture()
             defer { fixture.cleanup() }
@@ -115,6 +186,215 @@ import XCTest
             XCTAssertNil(fixture.sendRecorder.calls[0]["new_chat"])
             XCTAssertNil(fixture.sendRecorder.calls[0]["model"])
             XCTAssertEqual(fixture.rebindRecorder.count, 0)
+        }
+
+        func testAskOracleDisconnectReconnectCompletesSamePipelineExactlyOnce() async throws {
+            let availability = OracleConnectionAvailability()
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("ask-ticket-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let gate = AsyncStream<Void>.makeStream()
+            var exports = 0
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), exportOperation: { _ in
+                exports += 1
+                return OracleExportFile(path: "/tmp/ask-ticket-fixture.md", instruction: "read fixture")
+            }, sendOperation: { _, _, context in
+                XCTAssertNotNil(context?.jobProgress)
+                for await _ in gate.stream {
+                    break
+                }
+                return ["chat_id": .string("fixture-chat"), "response": .string("  retained answer\n")]
+            }, contextAvailable: { availability.connected })
+            defer { fixture.cleanup() }
+            await fixture.window.workspaceManager.awaitInitialized()
+            let workspace = try WorkspaceModel(id: XCTUnwrap(fixture.context.workspaceID), name: "Ask ticket fixture", repoPaths: [root.path], ephemeralFlag: true)
+            fixture.window.workspaceManager.workspaces = [workspace]
+            fixture.window.workspaceManager.activeWorkspace = workspace
+            let start = try await fixture.service.executeAskOracle(args: ["op": .string("start"), "detach": .bool(true), "message": .string("fixture"), "export_response": .bool(true)], invocationContext: fixture.invocationContext)
+            let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue.flatMap(UUID.init(uuidString:)))
+            availability.connected = false
+            let observer = Task { await fixture.service.jobCenter.store.wait(id: id, timeout: 60) }
+            observer.cancel()
+            _ = await observer.value
+            let running = await fixture.service.jobCenter.store.wait(id: id, timeout: 0)
+            XCTAssertEqual(running?.status, .running)
+            gate.continuation.yield(())
+            gate.continuation.finish()
+            let terminal = await fixture.service.jobCenter.store.wait(id: id, timeout: 5)
+            XCTAssertEqual(terminal?.status, .completed)
+            availability.connected = true
+            for op in ["poll", "wait", "cancel"] {
+                let result = try await fixture.service.executeAskOracle(args: ["op": .string(op), "job_id": .string(id.uuidString)], invocationContext: fixture.invocationContext)
+                XCTAssertEqual(result.objectValue?["response"], .string("  retained answer\n"))
+                XCTAssertEqual(result.objectValue?["oracle_export_path"], .string("/tmp/ask-ticket-fixture.md"))
+            }
+            XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+            XCTAssertEqual(exports, 1)
+            XCTAssertEqual(fixture.sendRecorder.calls.first?["new_chat"], .bool(true))
+            XCTAssertNil(fixture.sendRecorder.calls.first?["op"])
+        }
+
+        func testAskOracleTicketCancellationSkipsExportAndRetainsCanonicalGroup() async throws {
+            let group = try OracleGroupResult(groupID: OracleGroupID(rawValue: UUID()), status: .partialFailure, oracleResults: [
+                OracleLaneResult(laneIndex: 0, chatID: "done", providerID: nil, modelID: "m", status: .completed, response: "retained"),
+                OracleLaneResult(laneIndex: 1, chatID: "cancelled", providerID: nil, modelID: "n", status: .cancelled, error: OracleLaneError(code: "cancelled", message: "Cancelled", partialResponse: "partial"))
+            ])
+            let payload = ContextBuilderOracleGroupReply(result: group).toMCPFields()
+            let entered = expectation(description: "ticket send entered")
+            let gate = AsyncStream<Void>.makeStream()
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("ask-cancel-export-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), exportOperation: { _ in
+                XCTFail("Cancelled ticket must not start export")
+                throw CancellationError()
+            }, sendOperation: { _, _, _ in
+                entered.fulfill()
+                for await _ in gate.stream {}
+                return payload
+            })
+            defer { fixture.cleanup()
+                gate.continuation.finish()
+            }
+            await fixture.window.workspaceManager.awaitInitialized()
+            let workspace = try WorkspaceModel(id: XCTUnwrap(fixture.context.workspaceID), name: "Ask cancellation export", repoPaths: [root.path], ephemeralFlag: true)
+            fixture.window.workspaceManager.workspaces = [workspace]
+            fixture.window.workspaceManager.activeWorkspace = workspace
+            let start = try await fixture.service.executeAskOracle(args: ["op": .string("start"), "detach": .bool(true), "message": .string("fixture"), "export_response": .bool(true)], invocationContext: fixture.invocationContext)
+            let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
+            await fulfillment(of: [entered], timeout: 2)
+            _ = try await fixture.service.executeAskOracle(args: ["op": .string("cancel"), "job_id": .string(id)], invocationContext: fixture.invocationContext)
+            let result = try await fixture.service.executeAskOracle(args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], invocationContext: fixture.invocationContext)
+            XCTAssertEqual(result.objectValue?["job"]?.objectValue?["status"], .string("cancelled"))
+            XCTAssertEqual(result.objectValue?["oracle_results"], payload["oracle_results"])
+            XCTAssertNotNil(result.objectValue?["oracle_export_error"])
+            XCTAssertNil(result.objectValue?["oracle_export_path"])
+            XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+        }
+
+        func testAskOracleLegacyPayloadAndTicketPartialFailureAreIdentical() async throws {
+            let group = try OracleGroupResult(groupID: OracleGroupID(rawValue: UUID()), status: .partialFailure, oracleResults: [
+                OracleLaneResult(laneIndex: 0, chatID: "a", providerID: nil, modelID: "m", status: .completed, response: "answer"),
+                OracleLaneResult(laneIndex: 1, chatID: "b", providerID: nil, modelID: "n", status: .failed, error: OracleLaneError(code: "provider_failed", message: "failed", partialResponse: "partial"))
+            ])
+            let payload = ContextBuilderOracleGroupReply(result: group).toMCPFields()
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), settledReply: payload)
+            defer { fixture.cleanup() }
+            let args: [String: Value] = ["message": .string("fixture")]
+            let legacy = try await fixture.service.executeAskOracle(args: args, invocationContext: fixture.invocationContext)
+            XCTAssertEqual(legacy, .object(payload))
+            var startArgs = args
+            startArgs["op"] = .string("start")
+            startArgs["timeout"] = .int(5)
+            let terminal = try await fixture.service.executeAskOracle(args: startArgs, invocationContext: fixture.invocationContext)
+            var fields = try XCTUnwrap(terminal.objectValue)
+            fields.removeValue(forKey: "job")
+            fields.removeValue(forKey: "job_id")
+            XCTAssertEqual(fields, payload)
+            XCTAssertEqual(fixture.sendRecorder.calls[0], fixture.sendRecorder.calls[1])
+            let legacyBlocks = ToolOutputFormatter.formatAskOracle(args: args, value: legacy, emitResources: false)
+            let jobBlocks = ToolOutputFormatter.formatAskOracle(args: args, value: terminal, emitResources: false)
+            XCTAssertEqual(String(describing: legacyBlocks), String(describing: jobBlocks))
+        }
+
+        func testAskOracleLegacyCancellationCancelsSendButTicketObserverDoesNot() async throws {
+            let entered = expectation(description: "legacy send entered")
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), sendOperation: { _, _, _ in
+                entered.fulfill()
+                try await Task.sleep(for: .seconds(60))
+                return [:]
+            })
+            defer { fixture.cleanup() }
+            let request = Task { try await fixture.service.executeAskOracle(args: ["message": .string("fixture")], invocationContext: fixture.invocationContext) }
+            await fulfillment(of: [entered], timeout: 2)
+            request.cancel()
+            do { _ = try await request.value
+                XCTFail("Legacy send must cancel")
+            } catch is CancellationError {}
+            XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+        }
+
+        func testAskOracleControlsRejectWrongToolAndOriginWithoutSending() async throws {
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID())
+            defer { fixture.cleanup() }
+            for tool in ["oracle_send", "ask_oracle"] {
+                let id = UUID()
+                let owner = DomainLongRunningJobStore.Owner(windowID: fixture.window.windowID, workspaceID: fixture.context.workspaceID, tabID: fixture.context.tabID, sessionID: UUID(), runID: UUID())
+                _ = try await fixture.service.jobCenter.store.register(id: id, tool: tool, owner: owner)
+                for op in ["poll", "wait", "cancel"] {
+                    do {
+                        _ = try await fixture.service.executeAskOracle(args: ["op": .string(op), "job_id": .string(id.uuidString)], invocationContext: fixture.invocationContext)
+                        XCTFail("Wrong tool/origin must be rejected")
+                    } catch { XCTAssertTrue(error.localizedDescription.contains(tool == "ask_oracle" ? "different Agent session/run" : "different tool")) }
+                }
+                await fixture.service.jobCenter.store.finish(id: id, error: "fixture complete")
+            }
+            XCTAssertTrue(fixture.sendRecorder.calls.isEmpty)
+        }
+
+        func testOracleSendTicketExecutesOnceAndPollingDoesNotRebindOrSend() async throws {
+            let fixture = makeOracleSendFixture(stopAfterRoute: false)
+            defer { fixture.cleanup() }
+            let start = try await fixture.service.executeOracleSend(args: ["op": .string("start"), "detach": .bool(true), "message": .string("fixture"), "new_chat": .bool(true)], invocationContext: fixture.invocationContext)
+            let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
+            let settled = try await fixture.service.executeOracleSend(args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], invocationContext: fixture.invocationContext)
+            XCTAssertEqual(settled.objectValue?["response"], .string("response"))
+            XCTAssertEqual(settled.objectValue?["job"]?.objectValue?["status"], .string("completed"))
+            let poll = try await fixture.service.executeOracleSend(args: ["op": .string("poll"), "job_id": .string(id)], invocationContext: fixture.invocationContext)
+            XCTAssertEqual(poll, settled)
+            XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+            XCTAssertEqual(fixture.rebindRecorder.count, 0)
+            XCTAssertNil(fixture.sendRecorder.calls[0]["op"])
+        }
+
+        func testOracleSendTicketSurvivesOriginDisconnectAndAuthorizedReconnect() async throws {
+            let availability = OracleConnectionAvailability()
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, contextAvailable: { availability.connected })
+            defer { fixture.cleanup() }
+            let start = try await fixture.service.executeOracleSend(args: ["op": .string("start"), "detach": .bool(true), "message": .string("fixture"), "new_chat": .bool(true)], invocationContext: fixture.invocationContext)
+            let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue.flatMap(UUID.init(uuidString:)))
+            availability.connected = false
+            let terminal = await fixture.service.jobCenter.store.wait(id: id, timeout: 5)
+            XCTAssertEqual(terminal?.result?.objectValue?["response"], .string("response"))
+            XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+            XCTAssertEqual(fixture.sendRecorder.progressContexts, [true])
+            availability.connected = true
+            let poll = try await fixture.service.executeOracleSend(args: ["op": .string("poll"), "job_id": .string(id.uuidString)], invocationContext: fixture.invocationContext)
+            XCTAssertEqual(poll.objectValue?["response"], .string("response"))
+            XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+        }
+
+        func testTicketRejectsUnresolvedAgentOriginBeforeWorkOrObservation() async throws {
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), livePurpose: .agentModeRun)
+            defer { fixture.cleanup() }
+            do {
+                _ = try await fixture.service.executeOracleSend(args: ["op": .string("start"), "detach": .bool(true), "message": .string("fixture")], invocationContext: fixture.invocationContext)
+                XCTFail("An unresolved Agent origin must not admit a ticket")
+            } catch { XCTAssertTrue(error.localizedDescription.contains("active Agent session/run context")) }
+            let id = UUID()
+            let owner = DomainLongRunningJobStore.Owner(windowID: fixture.window.windowID, workspaceID: fixture.context.workspaceID, tabID: fixture.context.tabID, sessionID: nil, runID: nil)
+            _ = try await fixture.service.jobCenter.store.register(id: id, tool: "oracle_send", owner: owner)
+            do {
+                _ = try await fixture.service.executeOracleSend(args: ["op": .string("poll"), "job_id": .string(id.uuidString)], invocationContext: fixture.invocationContext)
+                XCTFail("An unresolved Agent origin must not match a non-agent origin")
+            } catch { XCTAssertTrue(error.localizedDescription.contains("active Agent session/run context")) }
+            XCTAssertTrue(fixture.sendRecorder.calls.isEmpty)
+        }
+
+        func testExternalCallerCannotControlAgentOwnedJobInSameContext() async throws {
+            let fixture = makeOracleSendFixture(stopAfterRoute: false)
+            defer { fixture.cleanup() }
+            let id = UUID()
+            let owner = DomainLongRunningJobStore.Owner(windowID: fixture.window.windowID, workspaceID: fixture.context.workspaceID, tabID: fixture.context.tabID, sessionID: UUID(), runID: UUID())
+            _ = try await fixture.service.jobCenter.store.register(id: id, tool: "oracle_send", owner: owner)
+            for op in ["poll", "wait", "cancel"] {
+                do {
+                    _ = try await fixture.service.executeOracleSend(args: ["op": .string(op), "job_id": .string(id.uuidString)], invocationContext: fixture.invocationContext)
+                    XCTFail("Non-agent origin must not control agent-owned ticket")
+                } catch { XCTAssertTrue(error.localizedDescription.contains("different Agent session/run")) }
+            }
+            let snapshot = await fixture.service.jobCenter.store.snapshot(id: id)
+            XCTAssertEqual(snapshot?.status, .running)
         }
 
         func testAgentModeOracleSendDoesNotCompatibilityRebind() async {
@@ -354,7 +634,7 @@ import XCTest
             }
         }
 
-        func testOrdinaryExportFailurePreservesSettledGroupedAndSingleRepliesOnBlockingPaths() async throws {
+        func testOrdinaryExportFailurePreservesSettledGroupedAndSingleRepliesOnBlockingAndTicketPaths() async throws {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent("oracle-export-fixture-\(UUID())", isDirectory: true)
             try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             defer { try? FileManager.default.removeItem(at: root) }
@@ -376,39 +656,46 @@ import XCTest
             grouped["response"] = .string("Primary answer")
             let single: [String: Value] = ["chat_id": .string("single-chat"), "response": .string("Single answer")]
             for payload in [grouped, single] {
-                let fixture = makeOracleSendFixture(stopAfterRoute: false, exportOperation: { request in
-                    XCTAssertEqual(request.chatID, payload["chat_id"]?.stringValue)
-                    throw NSError(domain: "OracleExportFixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Private export diagnostic"])
-                }, settledReply: payload)
-                defer { fixture.cleanup() }
-                await fixture.window.workspaceManager.awaitInitialized()
-                let workspace = try WorkspaceModel(
-                    id: XCTUnwrap(fixture.context.workspaceID), name: "Oracle export fixture",
-                    repoPaths: [root.path], ephemeralFlag: true
-                )
-                fixture.window.workspaceManager.workspaces = [workspace]
-                fixture.window.workspaceManager.activeWorkspace = workspace
-                let args: [String: Value] = ["message": .string("fixture"), "new_chat": .bool(true), "export_response": .bool(true)]
-                let reply: Value
-                do {
-                    reply = try await fixture.service.executeOracleSend(args: args, invocationContext: fixture.invocationContext)
-                } catch {
-                    XCTFail("Optional export failure discarded settled reply: \(error)")
-                    XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
-                    continue
+                for ticket in [false, true] {
+                    let fixture = makeOracleSendFixture(stopAfterRoute: false, exportOperation: { request in
+                        XCTAssertEqual(request.chatID, payload["chat_id"]?.stringValue)
+                        throw NSError(domain: "OracleExportFixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "Private export diagnostic"])
+                    }, settledReply: payload)
+                    defer { fixture.cleanup() }
+                    await fixture.window.workspaceManager.awaitInitialized()
+                    let workspace = try WorkspaceModel(
+                        id: XCTUnwrap(fixture.context.workspaceID), name: "Oracle export fixture",
+                        repoPaths: [root.path], ephemeralFlag: true
+                    )
+                    fixture.window.workspaceManager.workspaces = [workspace]
+                    fixture.window.workspaceManager.activeWorkspace = workspace
+                    var args: [String: Value] = ["message": .string("fixture"), "new_chat": .bool(true), "export_response": .bool(true)]
+                    if ticket { args["op"] = .string("start") }
+                    let reply: Value
+                    do {
+                        reply = try await fixture.service.executeOracleSend(args: args, invocationContext: fixture.invocationContext)
+                    } catch {
+                        XCTFail("Optional export failure discarded settled reply: \(error)")
+                        XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+                        continue
+                    }
+                    var fields = try XCTUnwrap(reply.objectValue)
+                    guard let notice = fields.removeValue(forKey: "oracle_export_error")?.stringValue else {
+                        XCTFail("Export failure erased the settled ticket payload: \(reply)")
+                        XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+                        continue
+                    }
+                    XCTAssertTrue(notice.contains("returned chat IDs"))
+                    XCTAssertFalse(notice.contains("Private export diagnostic"))
+                    XCTAssertNil(fields["oracle_export_path"])
+                    XCTAssertNil(fields["oracle_export_instruction"])
+                    if ticket {
+                        XCTAssertEqual(fields.removeValue(forKey: "job")?.objectValue?["status"], .string("completed"))
+                        XCTAssertNotNil(fields.removeValue(forKey: "job_id"))
+                    }
+                    XCTAssertEqual(fields, payload)
+                    XCTAssertEqual(fixture.sendRecorder.calls.count, 1, "Recovery must not rerun paid work")
                 }
-                var fields = try XCTUnwrap(reply.objectValue)
-                guard let notice = fields.removeValue(forKey: "oracle_export_error")?.stringValue else {
-                    XCTFail("Export failure erased the settled payload: \(reply)")
-                    XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
-                    continue
-                }
-                XCTAssertTrue(notice.contains("returned chat IDs"))
-                XCTAssertFalse(notice.contains("Private export diagnostic"))
-                XCTAssertNil(fields["oracle_export_path"])
-                XCTAssertNil(fields["oracle_export_instruction"])
-                XCTAssertEqual(fields, payload)
-                XCTAssertEqual(fixture.sendRecorder.calls.count, 1, "Recovery must not rerun paid work")
             }
         }
 
@@ -446,7 +733,9 @@ import XCTest
             connectionID: UUID? = nil,
             livePurpose: MCPRunPurpose = .unknown,
             exportOperation: MCPOracleToolService.ExportOracleResponse? = nil,
-            settledReply: [String: Value]? = nil
+            settledReply: [String: Value]? = nil,
+            sendOperation: MCPOracleToolService.SendChat? = nil,
+            contextAvailable: @escaping @MainActor () -> Bool = { true }
         ) -> OracleSendBoundaryFixture {
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
             GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
@@ -484,7 +773,7 @@ import XCTest
                 },
                 resolveTabContextSnapshot: { _ in .init(snapshot: snapshot) },
                 requireCurrentTabContext: { _ in
-                    if stopAfterRoute { throw OracleBoundaryTestStop.afterRoute }
+                    if stopAfterRoute || !contextAvailable() { throw OracleBoundaryTestStop.afterRoute }
                     return snapshot
                 },
                 stabilizedVirtualContext: { $0 },
@@ -494,28 +783,51 @@ import XCTest
                 requireTargetWindow: { window },
                 rawExplicitTabID: { _ in nil },
                 sendStageProgress: { _, _, _, _ in },
-                withHeartbeat: { _, _, _, _, operation in try await operation() },
-                sendChat: { args, _, _ in
+                withHeartbeat: { _, _, _, _, operation in
+                    guard contextAvailable() else { throw OracleBoundaryTestStop.afterRoute }
+                    return try await operation()
+                },
+                sendChat: { args, _, tabContext in
                     sendRecorder.record(args)
+                    sendRecorder.progressContexts.append(tabContext?.jobProgress != nil)
+                    if let sendOperation { return try await sendOperation(args, window.promptManager, tabContext) }
                     return settledReply ?? [
                         "chat_id": .string("selected-chat"),
                         "response": .string("response")
                     ]
                 },
-                exportOracleResponse: exportOperation ?? { _ in throw OracleBoundaryTestStop.unexpectedExport }
+                exportOracleResponse: exportOperation ?? { _ in throw OracleBoundaryTestStop.unexpectedExport },
+                jobCenter: MCPLongRunningJobCenter()
             )
             return OracleSendBoundaryFixture(
                 window: window,
-                context: snapshot,
                 service: service,
                 invocationContext: .trustedLocal(toolName: "oracle_send", metadata: metadata),
                 rebindRecorder: recorder,
-                sendRecorder: sendRecorder
+                sendRecorder: sendRecorder,
+                context: snapshot
             )
         }
     }
 
     final class OracleContextBuilderCommandRunnerTests: XCTestCase {
+        func testJobControlsAndDetachedAliasReachSessionWithoutDiscoveryInputs() async throws {
+            let fixture = try await makeCommandRunnerFixture()
+            addTeardownBlock { await fixture.cleanup() }
+            let id = UUID().uuidString
+            for op in ["poll", "wait", "cancel"] {
+                let result = await fixture.runner.runLine("call context_builder {\"op\":\"\(op)\",\"job_id\":\"\(id)\"}")
+                XCTAssertTrue(result.succeeded)
+            }
+            let alias = await fixture.runner.runLine("builder --detach --timeout 20 Inspect the workspace")
+            XCTAssertTrue(alias.succeeded)
+            let calls = await fixture.recorder.recordedCalls()
+            XCTAssertEqual(calls.count, 4)
+            XCTAssertEqual(calls.last?.arguments?["op"], .string("start"))
+            XCTAssertEqual(calls.last?.arguments?["detach"], .bool(true))
+            XCTAssertEqual(calls.last?.arguments?["timeout"], .int(20))
+        }
+
         func testInstructionsOnlyAndPackOnlyReachSession() async throws {
             let fixture = try await makeCommandRunnerFixture()
             addTeardownBlock { await fixture.cleanup() }
@@ -664,6 +976,7 @@ import XCTest
     @MainActor
     private final class OracleSendArgsRecorder {
         private(set) var calls: [[String: Value]] = []
+        var progressContexts: [Bool] = []
 
         func record(_ args: [String: Value]) {
             calls.append(args)
@@ -671,13 +984,18 @@ import XCTest
     }
 
     @MainActor
+    private final class OracleConnectionAvailability {
+        var connected = true
+    }
+
+    @MainActor
     private struct OracleSendBoundaryFixture {
         let window: WindowState
-        let context: MCPTabContextSnapshot
         let service: MCPOracleToolService
         let invocationContext: ToolInvocationContext
         let rebindRecorder: OracleRebindRecorder
         let sendRecorder: OracleSendArgsRecorder
+        let context: MCPTabContextSnapshot
 
         func cleanup() {
             WindowStatesManager.shared.unregisterWindowState(window)
@@ -1305,3 +1623,167 @@ final class MCPToolHeartbeatTests: XCTestCase {
         }
     }
 }
+
+#if DEBUG
+    @MainActor
+    final class LongRunningJobTests: XCTestCase {
+        private func owner(tabID: UUID = UUID()) -> DomainLongRunningJobStore.Owner {
+            .init(windowID: 987_654, workspaceID: UUID(), tabID: tabID, sessionID: nil, runID: nil)
+        }
+
+        func testDetachedWorkerSurvivesObserverCancellationAndDeliversExactPayloadOnce() async throws {
+            let center = MCPLongRunningJobCenter()
+            let gate = AsyncStream<Void>.makeStream()
+            var calls = 0
+            let payload: Value = .object(["status": .string("partial_failure"), "response": .string("  unchanged\n"), "extension_field": .int(73)])
+            let snapshot = try await center.start(tool: "oracle_send", owner: owner()) { _ in
+                calls += 1
+                for await _ in gate.stream {
+                    break
+                }
+                return payload
+            }
+            let waiter = Task { await center.store.wait(id: snapshot.id, timeout: 60) }
+            waiter.cancel()
+            _ = await waiter.value
+            let running = await center.store.snapshot(id: snapshot.id)
+            XCTAssertEqual(running?.status, .running)
+            gate.continuation.yield(())
+            gate.continuation.finish()
+            let terminal = await center.store.wait(id: snapshot.id, timeout: 5)
+            XCTAssertEqual(terminal?.result, payload)
+            XCTAssertEqual(terminal?.status, .completed)
+            let readAgain = await center.store.wait(id: snapshot.id, timeout: 0)
+            XCTAssertEqual(readAgain?.result, payload)
+            XCTAssertEqual(calls, 1)
+            let fields = try XCTUnwrap(terminal?.value().objectValue)
+            XCTAssertEqual(fields["status"], .string("partial_failure"))
+            XCTAssertEqual(fields["response"], .string("  unchanged\n"))
+            XCTAssertEqual(fields["extension_field"], .int(73))
+        }
+
+        func testWaitTimeoutIsNotWorkerTimeoutAndContextReservationLastsThroughCancellationDrain() async throws {
+            let center = MCPLongRunningJobCenter()
+            let target = owner()
+            let gate = AsyncStream<Void>.makeStream()
+            let snapshot = try await center.start(tool: "oracle_send", owner: target) { _ in
+                for await _ in gate.stream {
+                    break
+                }
+                return .object(["response": .string("settled despite cancellation")])
+            }
+            let timedOut = await center.store.wait(id: snapshot.id, timeout: 0.001)
+            XCTAssertEqual(timedOut?.status, .running)
+            do {
+                _ = try await center.start(tool: "ask_oracle", owner: target) { _ in .null }
+                XCTFail("Expected busy context")
+            } catch {
+                XCTAssertTrue(error.localizedDescription.contains("context_job_busy"))
+                XCTAssertTrue(error.localizedDescription.contains(snapshot.id.uuidString))
+                XCTAssertTrue(error.localizedDescription.contains(target.tabID.uuidString))
+            }
+            center.cancel(id: snapshot.id)
+            gate.continuation.finish()
+            let terminal = await center.store.wait(id: snapshot.id, timeout: 5)
+            XCTAssertTrue(terminal?.isTerminal == true)
+            _ = try await center.start(tool: "oracle_send", owner: target) { _ in .object([:]) }
+        }
+
+        func testCancellationAcknowledgementRetainsPartialLaneCoverage() async throws {
+            let center = MCPLongRunningJobCenter()
+            let gate = AsyncStream<Void>.makeStream()
+            let result = Value.object(["status": .string("partial_failure"), "oracle_results": .array([.object(["lane_index": .int(0), "status": .string("completed"), "response": .string("paid result")]), .object(["lane_index": .int(1), "status": .string("cancelled")])])])
+            let snapshot = try await center.start(tool: "oracle_send", owner: owner()) { _ in
+                for await _ in gate.stream {
+                    break
+                }
+                return result
+            }
+            await Task.yield()
+            center.cancel(id: snapshot.id)
+            gate.continuation.finish()
+            let terminal = await center.store.wait(id: snapshot.id, timeout: 5)
+            XCTAssertEqual(terminal?.status, .cancelled)
+            XCTAssertEqual(terminal?.result, result)
+            XCTAssertEqual(terminal?.value().objectValue?["status"], .string("partial_failure"))
+        }
+
+        func testControlRejectsWrongKindAndOwnerBeforeCancellation() async throws {
+            let center = MCPLongRunningJobCenter()
+            let target = owner()
+            let gate = AsyncStream<Void>.makeStream()
+            let snapshot = try await center.start(tool: "oracle_send", owner: target) { _ in
+                for await _ in gate.stream {
+                    break
+                }
+                return .object([:])
+            }
+            do {
+                _ = try await center.control(operation: .poll(snapshot.id), tool: "ask_oracle", authorize: { _ in })
+                XCTFail("Expected kind mismatch")
+            } catch { XCTAssertTrue(error.localizedDescription.contains("different tool")) }
+            do {
+                _ = try await center.control(operation: .cancel(snapshot.id), tool: "oracle_send", authorize: { _ in throw MCPError.invalidParams("wrong owner") })
+                XCTFail("Expected authorization failure")
+            } catch { XCTAssertTrue(error.localizedDescription.contains("wrong owner")) }
+            let stillRunning = await center.store.snapshot(id: snapshot.id)
+            XCTAssertEqual(stillRunning?.status, .running)
+            gate.continuation.finish()
+            _ = await center.store.wait(id: snapshot.id, timeout: 5)
+            let expired = try await center.control(operation: .poll(UUID()), tool: "oracle_send", authorize: { _ in XCTFail("Unknown job has no owner") })
+            XCTAssertEqual(expired.objectValue?["job"]?.objectValue?["status"], .string("expired"))
+        }
+
+        func testLaneSnapshotsNeverExposeEarlyBodiesAndIgnoreOlderEvents() async throws {
+            let store = DomainLongRunningJobStore()
+            let id = UUID()
+            _ = try await store.register(id: id, tool: "oracle_send", owner: owner())
+            let progress = MCPLongRunningJobProgress(id: id, store: store)
+            let group = OracleGroupID(rawValue: UUID())
+            let turn = OracleTurnID(rawValue: UUID())
+            let member = try OracleGroupMember(laneID: OracleLaneID(index: 0), publicChatID: "lane-0", model: OracleModelReference(modelID: "model"))
+            await progress.prepared(group: group, turn: turn, members: [member])
+            await progress.progress(.init(kind: .laneStarted, groupID: group, turnID: turn, laneID: member.laneID, sequence: 0))
+            await progress.progress(.init(kind: .laneDelta, groupID: group, turnID: turn, laneID: member.laneID, sequence: 1, text: "secret early response"))
+            await progress.progress(.init(kind: .laneSettled, groupID: group, turnID: turn, laneID: member.laneID, sequence: 2, text: "completed"))
+            await progress.progress(.init(kind: .laneStarted, groupID: group, turnID: turn, laneID: member.laneID, sequence: 0))
+            let snapshot = await store.snapshot(id: id)
+            let json = try ToolOutputFormatter.rawJSONString(XCTUnwrap(snapshot?.value()))
+            XCTAssertFalse(json.contains("secret early response"))
+            XCTAssertTrue(json.contains("completed"))
+            XCTAssertFalse(json.contains("streaming"))
+        }
+
+        func testTerminalRecordsAreImmutableAndBoundedByRetention() async throws {
+            let store = DomainLongRunningJobStore(maximumRetained: 1)
+            let first = UUID()
+            _ = try await store.register(id: first, tool: "oracle_send", owner: owner())
+            await store.finish(id: first, result: .object(["response": .string("first")]))
+            await store.update(id: first, fields: ["phase": .string("late")])
+            await store.finish(id: first, error: "late failure")
+            let terminal = await store.snapshot(id: first)
+            XCTAssertEqual(terminal?.status, .completed)
+            XCTAssertNil(terminal?.progress["phase"])
+            let second = UUID()
+            _ = try await store.register(id: second, tool: "oracle_send", owner: owner())
+            await store.finish(id: second, result: .object(["response": .string("second")]))
+            let evicted = await store.snapshot(id: first)
+            XCTAssertNil(evicted)
+            let expiring = DomainLongRunningJobStore(retention: 0)
+            let id = UUID()
+            _ = try await expiring.register(id: id, tool: "oracle_send", owner: owner())
+            await expiring.finish(id: id, result: .object([:]))
+            let expired = await expiring.snapshot(id: id)
+            XCTAssertNil(expired)
+        }
+
+        func testLifecycleParserUsesAgentTimeoutResolversAndRejectsMixedControls() throws {
+            guard case .blocking = try MCPLongRunningJobOperation.parse(["message": .string("legacy")]) else { return XCTFail("Expected blocking") }
+            for args: [String: Value] in [["detach": .bool(true)], ["op": .string("poll"), "job_id": .string(UUID().uuidString), "message": .string("never send")]] {
+                XCTAssertThrowsError(try MCPLongRunningJobOperation.parse(args))
+            }
+            guard case let .wait(_, timeout) = try MCPLongRunningJobOperation.parse(["op": .string("wait"), "job_id": .string(UUID().uuidString), "timeout": .int(0)]) else { return XCTFail("Expected wait") }
+            XCTAssertEqual(timeout, 0)
+        }
+    }
+#endif

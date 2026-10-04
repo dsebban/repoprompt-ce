@@ -879,6 +879,28 @@ extension ToolOutputFormatter {
             return [.text(rawJSONString(result))]
         }
 
+        if let object = result.objectValue, let job = object["job"]?.objectValue, object["job_id"] != nil {
+            if let status = job["status"]?.stringValue, ["completed", "cancelled"].contains(status), object["response"] != nil || object["oracle_results"] != nil || object["prompt"] != nil {
+                var payload = object
+                payload.removeValue(forKey: "job")
+                payload.removeValue(forKey: "job_id")
+                return buildContentBlocks(toolName: toolName, args: args, result: .object(payload), emitResources: emitResources)
+            }
+            var lines = ["## Long-running job", "- **Job ID**: `\(object["job_id"]?.stringValue ?? "")`", "- **Status**: \(job["status"]?.stringValue ?? "unknown")"]
+            if let phase = job["phase"]?.stringValue { lines.append("- **Phase**: \(phase)") }
+            if let context = job["context_id"]?.stringValue { lines.append("- **Context ID**: `\(context)`") }
+            if case let .array(lanes)? = job["oracle_lanes"] {
+                for lane in lanes {
+                    let fields = lane.objectValue ?? [:]
+                    lines.append("- \(fields["label"]?.stringValue ?? "Oracle"): \(fields["status"]?.stringValue ?? "unknown") • chat `\(fields["chat_id"]?.stringValue ?? "")`")
+                }
+            }
+            if let error = job["error"]?.objectValue?["message"]?.stringValue { lines.append(error) }
+            if let message = job["message"]?.stringValue { lines.append(message) }
+            if let next = object["next_action"]?.stringValue { lines.append(next) }
+            return [.text(lines.joined(separator: "\n"))]
+        }
+
         switch toolName {
         case "workspace_context":
             return formatPromptState(value: result)
@@ -4504,6 +4526,11 @@ extension ToolOutputFormatter {
                     let reviewBlocks = formatChatSend(args: [:], value: reviewObj, emitResources: false)
                     blocks.append(contentsOf: reviewBlocks)
                 }
+            }
+
+            if let exportError = obj["oracle_export_error"]?.stringValue {
+                let prefix = blocks.isEmpty ? "" : "\n\n"
+                blocks.append(.text("\(prefix)> ⚠️ \(exportError)"))
             }
 
             // Follow-up hint

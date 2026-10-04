@@ -3666,12 +3666,14 @@ enum AgentTranscriptIO {
         upToRowID: UUID? = nil,
         maxTranscriptItems: Int = 200,
         maxToolArgsCharacters: Int = 2000,
-        preserveIntermediateAssistantNarration: Bool = false
+        preserveIntermediateAssistantNarration: Bool = false,
+        preserveToolInputFidelity: Bool = false
     ) -> String {
         let entries = handoffExportEntries(
             from: transcript,
             upToRowID: upToRowID,
-            preserveIntermediateAssistantNarration: preserveIntermediateAssistantNarration
+            preserveIntermediateAssistantNarration: preserveIntermediateAssistantNarration,
+            preserveToolInputFidelity: preserveToolInputFidelity
         )
         logHandoffDebug("buildForkTranscriptXML entries=\(entries.count) transcriptTurns=\(transcript.turns.count) upToRowID=\(upToRowID?.uuidString ?? "nil") preserveIntermediateAssistantNarration=\(preserveIntermediateAssistantNarration)")
 
@@ -3724,8 +3726,9 @@ enum AgentTranscriptIO {
                     guard !AgentTranscriptToolVisibilityPolicy.shouldSuppressRow(row),
                           let toolName = AgentTranscriptToolVisibilityPolicy.normalizedVisibleToolName(row.toolName) else { continue }
                     let args = truncateArgs(row.toolArgsJSON, max: maxToolArgsCharacters)
+                    let inputStatus = preserveToolInputFidelity ? " input_status=\"unavailable\"" : ""
                     let xml = args.isEmpty
-                        ? "<tool_call name=\"\(toolName)\"/>"
+                        ? "<tool_call name=\"\(toolName)\"\(inputStatus)/>"
                         : "<tool_call name=\"\(toolName)\">\(args)</tool_call>"
                     forkItems.append(ForkItem(pos: pos, payload: .rawXML(xml), dropPriority: .toolCall, turnID: tid))
                     pos += 1
@@ -3871,7 +3874,8 @@ enum AgentTranscriptIO {
             from: transcript,
             maxTranscriptItems: maxTranscriptItems,
             maxToolArgsCharacters: maxToolArgsCharacters,
-            preserveIntermediateAssistantNarration: true
+            preserveIntermediateAssistantNarration: true,
+            preserveToolInputFidelity: true
         )
     }
 
@@ -3954,14 +3958,21 @@ enum AgentTranscriptIO {
     private static func handoffExportEntries(
         from transcript: AgentTranscript,
         upToRowID: UUID?,
-        preserveIntermediateAssistantNarration: Bool = false
+        preserveIntermediateAssistantNarration: Bool = false,
+        preserveToolInputFidelity: Bool = false
     ) -> [HandoffExportEntry] {
         let materialized = AgentTranscriptPolicyPipeline.handoffTranscript(
             from: transcript,
             upToRowID: upToRowID
         )
         let projection = materialized.projection
-        let blocks = projection.archivedBlocks + projection.workingBlocks
+        let blocks = (projection.archivedBlocks + projection.workingBlocks).flatMap { block in
+            guard preserveToolInputFidelity, block.kind == .groupedHistory else { return [block] }
+            // Presentation collapse is not log retention: expand observed children without
+            // changing compact handoff behavior or reconstructing discarded historical inputs.
+            let children = block.groupedHistory?.sections.flatMap(\.childBlocks) ?? []
+            return children.isEmpty ? [block] : children
+        }
         // Build turn lookup for rewriting baked summary text in handoff.
         // Use uniquingKeysWith to tolerate duplicate turn IDs without crashing;
         // keep the first occurrence when duplicates are present.
@@ -4010,7 +4021,7 @@ enum AgentTranscriptIO {
             // same sanitized tool-result shape we persist rather than the full live payload.
             if block.kind == .standaloneTool {
                 let migratedToolRow = handoffMigratedStandaloneToolItem(for: block)
-                let toolPreviewItem = groupedHistoryToolPreviewItem(for: block)
+                let toolPreviewItem = groupedHistoryToolPreviewItem(for: block, preserveToolInputFidelity: preserveToolInputFidelity)
                 if let toolPreviewItem {
                     logHandoffDebug("standaloneTool synthesized toolCall tool=\(toolPreviewItem.toolName ?? "nil")")
                 }
@@ -4384,7 +4395,8 @@ enum AgentTranscriptIO {
     }
 
     private static func groupedHistoryToolPreviewItem(
-        for childBlock: AgentTranscriptRenderBlock
+        for childBlock: AgentTranscriptRenderBlock,
+        preserveToolInputFidelity: Bool = false
     ) -> AgentChatItem? {
         let visibleRows = childBlock.rows.filter { !AgentTranscriptToolVisibilityPolicy.shouldSuppressRow($0) }
         let toolCallRow = visibleRows.first(where: { $0.kind == .toolCall })
@@ -4398,13 +4410,16 @@ enum AgentTranscriptIO {
         let toolExecution = childBlock.rows
             .compactMap { AgentTranscriptToolNormalizer.toolExecution(for: $0) }
             .last
-        if let toolExecution,
+        if !preserveToolInputFidelity, let toolExecution,
            toolExecution.status == .failed || toolExecution.status == .cancelled
         {
             logHandoffDebug("tool preview pruned tool=\(toolName) status=\(toolExecution.status.rawValue)")
             return nil
         }
-        let argsJSON = localizedGroupedHistoryPreviewArgsJSON(
+        // Faithful logs use only observed input bytes. Compact handoff previews may use
+        // result metadata and derived paths, but those are never evidence of call arguments.
+        // Historical storage intentionally strips inputs; absence must remain unavailable.
+        let argsJSON = preserveToolInputFidelity ? sourceRow.toolArgsJSON : localizedGroupedHistoryPreviewArgsJSON(
             from: sourceRow,
             execution: toolExecution
         )

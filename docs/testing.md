@@ -68,11 +68,22 @@ or `ACPAgentSessionController`, or scope a launch/probe with
 to the configured instance or task, not a process-global environment switch. Mark a process
 `.tool` only for genuinely non-provider tooling, such as Git worktree operations.
 
-## Oracle settled-response recovery
+## App-backed long-running Oracle tickets
+
+Feature map (app-backed `oracle_send`, `context_builder` and Agent Mode `ask_oracle`; direct headless rejects job operations):
 
 | Reach / drive | Observable proof | Prerequisites / traps |
 | --- | --- | --- |
-| App-backed `ask_oracle` / `oracle_send` with `export_response:true`; `make dev-test FILTER=OracleGroupBoundaryTests` | Optional export failure retains the settled answer and chat IDs with a safe `oracle_export_error`; no automatic paid replay | Pre-settlement validation/send failures still throw. Recover through returned chat IDs. The deterministic fixture is not live filesystem proof. |
+| DEBUG app-backed `oracle_send` / `ask_oracle`: fresh `new_chat:true` without `chat_id`, `debug_primary_only:true` **or** `debug_lane_timeout_seconds:30` | Primary-only dispatches one resolved model while the next ordinary fresh request still uses the configured roster; grouped deadline settles each lane with canonical timeout coverage and drains streams. Drive via exact DebugApps bundled CLI JSON and inspect ticket poll/wait plus saved lane chats; focused `OracleGroupBoundaryTests`, `OracleExecutionResolverTests`, `ContextBuilderGroupedSupervisionTests`. | DEBUG only, no settings mutation; timeout is finite 1–300 seconds including setup/finalization, not observer timeout. Cannot combine controls; timeout requires multiple configured lanes. Release, headless and Context Builder reject unsupported controls before paid work. |
+| CE MCP `oracle_send` or Agent Mode `ask_oracle` with `op:start,detach:true` in a bound disposable context; close initiating client, reconnect with the returned context ID, then `op:poll|wait,job_id` | Same job survives disconnect; lane statuses/chat IDs are visible outside Agent Mode; terminal response retains the complete original payload; exactly one provider turn/export | Already-running matching debug artifact, authorized loaded fixture, inspected roster/credentials, bounded paid prompt approval. Tickets are in-memory and expire on restart or after retention; never automatically resend paid work. No early lane bodies or synthesis. `timeout` limits observation only. |
+| Blocking ACP Agent Mode `ask_oracle` / `oracle_send`; cancel the owning run after one lane completes | Canonical group settles completed/cancelled; the same prepared transcript row retains group/chat handles and lane fraction even if MCP tracking retires first. Native provider part stays aborted with its terminal/end state. Inspect local row IDs, canonical group, read-only provider part, and cold card; `make dev-test FILTER=ACPToolObservationCorrelationTests` also covers late abort, ownership fences and healthy first-result accounting. | Use a fresh bounded owned run, not corrupted historical rows. Capture the association before cancellation; no anonymous row synthesis, provider-part rewrite or paid replay. Detached-start transport completion is not job completion. |
+| `oracle_send` / `ask_oracle op:cancel,job_id` | Cancelling remains visible while feature cleanup drains; terminal job includes existing canonical partial lane outcome or safe failure | Must bind the original workspace/context. A wait disconnect is **not** cancellation. Owning run/tab/workspace/window closure cancels work. Legacy omitted-op calls keep their request-owned lifetime. |
+| App-backed `ask_oracle` / `oracle_send` with an explicit lane `chat_id`; deterministic persisted journey: `make dev-test FILTER=OraclePresetExecutionTests.testTwoLanePresetPreservesRosterPromptAndContinuationAuthority` | One provider turn using that member's frozen authority; target chat appends two messages, prior messages/names retained, sibling chat and canonical group files byte-identical; cold UUID continuation targets the same lane | `new_chat=true` starts the configured roster instead. Omit `chat_id` to continue the implicitly selected group. Historical group results remain historical; explicit lane follow-ups return the single-response shape. No settings write required. Live proof still requires the matching debug artifact. |
+| App-backed `ask_oracle` / `oracle_send` with `export_response:true`; deterministic failure fixture: `make dev-test FILTER=OracleGroupBoundaryTests` | Ordinary optional-export failure returns the original settled response/chat IDs plus `oracle_export_error`, including single-lane legacy and grouped/ticket replies; no fabricated export path or repeated provider work | Export destination validation and send failures still throw before settlement; non-group cancellation still throws. Output may have been written before export failed. Recover from returned responses/chat IDs, not by automatically repeating paid work. The fixture does not prove a live filesystem-failure path. |
+
+For Context Builder, one ticket owns discovery, optional Oracle follow-up and export. Ticket export cancellation or failure retains the settled group and recovery chat IDs with a sanitized `oracle_export_error`; the omitted-op builder keeps its legacy request-error behavior. The routed deterministic journey `make dev-test FILTER=ContextBuilderGroupedSupervisionTests` disconnects the initiating socket during discovery, reconnects the same Agent origin, and observes one discovery, one Oracle group and one exported file; repeated terminal controls launch nothing.
+
+Use raw JSON controls, for example `rpce-cli-debug --context-id <context> --raw-json -c oracle_send -j '{"op":"wait","job_id":"<job>","timeout":20}'`. Job IDs are not chat IDs or Agent session IDs. Observe via the same tool that admitted the job. Poll/wait never launch providers or incur new AI work. Direct-headless calls fail explicitly before provider launch; server-process restart cannot resume tickets. Full live verification requires actual initiating-client disconnect and terminal result, not only registry tests or ordinary smoke.
 
 ## Oracle reconciliation and progress lifetime
 
@@ -646,7 +657,12 @@ The smoke lane uses a script-owned app worktree and temporary roots. It checks:
   `RPCE_ACTIVE_PARENT_OK`. Its transcript rejects Bash/shell/exec, delegation,
   any other substitute tool, missing/extra/reordered invocations or paired
   result events, explicitly unsuccessful statuses, or a missing final sentinel.
-  `agent_manage.get_log` intentionally emits spartan self-closing result events,
+  `agent_manage.get_log` uses exact retained call arguments, not result-summary
+  previews. When storage policy removed inputs, the self-closing call has
+  `input_status="unavailable"`; it does not recover or expand historical retention.
+  Failed/cancelled calls and observed calls hidden by presentation grouping remain
+  represented exactly once; compact handoff filtering is not log retention.
+  It intentionally emits spartan self-closing result events,
   so the harness does not claim unavailable result payload/status proof; terminal
   `completed` plus the exact sentinel is the available completion evidence;
 - a nested child started from the parent context has the exact parent session

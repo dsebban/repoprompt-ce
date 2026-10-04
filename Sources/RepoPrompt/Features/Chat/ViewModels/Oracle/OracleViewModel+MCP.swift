@@ -122,7 +122,11 @@ extension OracleViewModel {
         let activationPolicy: OracleSendActivationPolicy
         let packaging: OracleSendPackagingContext
         let transientImages: [AITransientImage]
+        var jobProgress: MCPLongRunningJobProgress?
         var toolSettlement: OracleToolSettlementCallbacks?
+        #if DEBUG
+            var requestDiagnostics = OracleRequestDiagnostics()
+        #endif
 
         init(
             tabID: UUID,
@@ -144,6 +148,44 @@ extension OracleViewModel {
             self.transientImages = transientImages
         }
     }
+
+    #if DEBUG
+        /// Request-only controls: never stored in settings or conversation authority.
+        struct OracleRequestDiagnostics: Equatable {
+            static let argumentKeys: Set<String> = ["debug_primary_only", "debug_lane_timeout_seconds"]
+            var primaryOnly = false
+            var laneTimeout: TimeInterval?
+
+            static func parse(_ args: [String: Value]) throws -> Self {
+                guard !argumentKeys.isDisjoint(with: args.keys) else { return Self() }
+                guard args["new_chat"]?.boolValue == true, args["chat_id"] == nil else {
+                    throw MCPError.invalidParams("Oracle diagnostics require new_chat=true and no chat_id")
+                }
+                var result = Self()
+                if let value = args["debug_primary_only"] {
+                    guard let enabled = value.boolValue, enabled else {
+                        throw MCPError.invalidParams("debug_primary_only must be true when provided")
+                    }
+                    result.primaryOnly = enabled
+                }
+                if let value = args["debug_lane_timeout_seconds"] {
+                    let seconds: Double? = switch value {
+                    case let .int(number): Double(number)
+                    case let .double(number): number
+                    default: nil
+                    }
+                    guard let seconds, seconds.isFinite, seconds >= 1, seconds <= 300 else {
+                        throw MCPError.invalidParams("debug_lane_timeout_seconds must be a finite number from 1 through 300")
+                    }
+                    result.laneTimeout = seconds
+                }
+                guard !result.primaryOnly || result.laneTimeout == nil else {
+                    throw MCPError.invalidParams("debug_lane_timeout_seconds requires grouped execution; it cannot combine with debug_primary_only")
+                }
+                return result
+            }
+        }
+    #endif
 
     @MainActor
     func resolveOracleStartExecution(

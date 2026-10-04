@@ -1120,6 +1120,28 @@ package enum MCPDomainCanonicalToolDefinitions {
         return (canonicalize ? definitions.map(canonicalizeGlobalSemantics) : definitions)
             .map(advertiseModelParameters)
             .map(advertiseOracleImageAttachments)
+            .map(advertiseOracleDebugDiagnostics)
+    }
+
+    private static func advertiseOracleDebugDiagnostics(_ definition: MCPDomainToolDefinition) -> MCPDomainToolDefinition {
+        #if DEBUG
+            guard [MCPWindowToolName.askOracle, MCPWindowToolName.oracleSend].contains(definition.name),
+                  case var .object(schema) = definition.inputSchema,
+                  case var .object(properties)? = schema["properties"]
+            else { return definition }
+            properties["debug_primary_only"] = .object([
+                "type": .string("boolean"),
+                "description": .string("DEBUG app only: new_chat=true and no chat_id; run only the resolved primary model for this request, without changing settings. Cannot combine with debug_lane_timeout_seconds. Headless execution rejects this control.")
+            ])
+            properties["debug_lane_timeout_seconds"] = .object([
+                "type": .string("number"), "minimum": .int(1), "maximum": .int(300),
+                "description": .string("DEBUG app only: fresh configured multi-lane request, finite 1–300 second overall deadline per lane including setup and finalization. Not the ticket observer timeout. No persistent setting change. Headless execution and context_builder reject this control.")
+            ])
+            schema["properties"] = .object(properties)
+            return MCPDomainToolDefinition(name: definition.name, description: definition.description + "\n\nDEBUG-only request diagnostics: debug_primary_only=true or debug_lane_timeout_seconds (1–300s) require new_chat=true and no chat_id. They cannot combine; timeout requires multiple configured lanes. App backend only; unsupported backends reject, never ignore. These controls do not change settings or defaults.", inputSchema: .object(schema), annotations: definition.annotations, isEnabledByDefault: definition.isEnabledByDefault)
+        #else
+            return definition
+        #endif
     }
 
     private static let agentSelfDefinition = MCPDomainToolDefinition(
@@ -1398,6 +1420,11 @@ package enum MCPDomainCanonicalToolDefinitions {
                 "type": .string("boolean"),
                 "description": .string("Start a new conversation. Omitted chat_id also selects the start route; false with chat_id continues that conversation.")
             ])
+            properties["op"] = .object(["type": .string("string"), "enum": .array(["start", "poll", "wait", "cancel"].map(Value.string)), "description": .string("App-backed ticket operation. Direct headless rejects ticket arguments. Omit for unchanged blocking execution.")])
+            properties["job_id"] = .object(["type": .string("string"), "description": .string("Job UUID for poll/wait/cancel")])
+            properties["detach"] = .object(["type": .string("boolean"), "description": .string("start only: return immediately")])
+            properties["timeout"] = .object(["type": .string("number"), "description": .string("start/wait observation seconds, using agent_run timeout policy")])
+            schema["required"] = .array([])
             schema["properties"] = .object(properties)
             return MCPDomainToolDefinition(
                 name: definition.name,
@@ -1424,6 +1451,11 @@ package enum MCPDomainCanonicalToolDefinitions {
                 "description": .string("Optional exposed Model Preset name/UUID or available raw primary-model override for an explicit new_chat=true start. Exact preset identity wins a collision; a raw model retains configured additional Oracles. Rejected on continuation."),
                 "maxLength": .int(OracleRosterContract.maximumModelIdentifierLength)
             ])
+            properties["op"] = .object(["type": .string("string"), "enum": .array(["start", "poll", "wait", "cancel"].map(Value.string)), "description": .string("App-backed ticket operation. Direct headless rejects ticket arguments. Omit for unchanged blocking execution.")])
+            properties["job_id"] = .object(["type": .string("string"), "description": .string("Job UUID for poll/wait/cancel")])
+            properties["detach"] = .object(["type": .string("boolean"), "description": .string("start only: return immediately")])
+            properties["timeout"] = .object(["type": .string("number"), "description": .string("start/wait observation seconds, using agent_run timeout policy")])
+            schema["required"] = .array([])
             schema["properties"] = .object(properties)
             return MCPDomainToolDefinition(
                 name: definition.name,
@@ -1451,6 +1483,11 @@ package enum MCPDomainCanonicalToolDefinitions {
                 "pattern": .string("^oracle-pack:sha256:[0-9a-f]{64}$"),
                 "description": .string("Direct-headless only: canonical reference to a resolvable persisted frozen Context Builder package. Raw multi-Oracle instructions remain rejected with context_pack_required.")
             ])
+            properties["op"] = .object(["type": .string("string"), "enum": .array(["start", "poll", "wait", "cancel"].map(Value.string)), "description": .string("App-backed ticket operation. Direct headless rejects ticket arguments. Omit for unchanged blocking execution.")])
+            properties["job_id"] = .object(["type": .string("string"), "description": .string("Job UUID for poll/wait/cancel")])
+            properties["detach"] = .object(["type": .string("boolean"), "description": .string("start only: return immediately")])
+            properties["timeout"] = .object(["type": .string("number"), "description": .string("start/wait observation seconds, using agent_run timeout policy")])
+            schema["required"] = .array([])
             schema["properties"] = .object(properties)
             return MCPDomainToolDefinition(
                 name: definition.name,

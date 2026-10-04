@@ -501,6 +501,16 @@ final class OraclePresetExecutionTests: XCTestCase {
         XCTAssertEqual(persistedPrimary.selectedChatPresetID, chatPreset.id)
         XCTAssertEqual(persistedPrimary.oracleExecutionAuthority, .frozen)
 
+        let historyEncoder = JSONEncoder()
+        historyEncoder.outputFormatting = [.sortedKeys]
+        let groupURL = AppDomainRuntimeComposition.shared.runtime.persistenceCoordinator.oracleStorageRoot
+            .appendingPathComponent("groups/\(groupUUID.uuidString).json")
+        let groupBytes = try Data(contentsOf: groupURL)
+        let sibling = try XCTUnwrap(composition.oracleViewModel.sessions.first(where: {
+            $0.oracleGroupID == groupUUID && $0.oracleLaneIndex == 1
+        }))
+        let siblingURL = try XCTUnwrap(sibling.fileURL)
+        let siblingBytes = try Data(contentsOf: siblingURL)
         let changedProfile = AgentModelsSettingsProfile(
             planningModelRaw: AIModel.gpt54.rawValue,
             additionalOracleModelRaws: []
@@ -509,17 +519,80 @@ final class OraclePresetExecutionTests: XCTestCase {
             args: [
                 "message": .string("Second"),
                 "mode": .string("review"),
-                "chat_id": .string(chatID)
+                "chat_id": .string(chatID),
+                "chat_name": .string("Must not rename historical group")
             ],
             promptVM: composition.promptManager,
             tabContext: context,
             capturedProfile: changedProfile,
             selectionSnapshotOverride: snapshot
         )
-        XCTAssertEqual(continued["oracle_group_id"]?.stringValue, groupID)
-        XCTAssertEqual(continued["oracle_count"]?.intValue, 2)
-        XCTAssertEqual(capturedMessages.count, 4)
+        XCTAssertNil(continued["oracle_group_id"])
+        XCTAssertNil(continued["oracle_count"])
+        XCTAssertEqual(continued["chat_id"]?.stringValue, chatID)
+        XCTAssertEqual(capturedMessages.count, 3)
+        XCTAssertEqual(capturedModels.last, AIModel.gpt54Mini)
         XCTAssertTrue(capturedMessages.allSatisfy { $0.systemPrompt.contains(promptMarker) })
+        await composition.oracleViewModel.drainTrackedAutosaves(for: workspace.id)
+        XCTAssertEqual(try Data(contentsOf: groupURL), groupBytes)
+        XCTAssertEqual(try Data(contentsOf: siblingURL), siblingBytes)
+        let continuedPrimary = try await composition.oracleViewModel.chatData.loadChatSession(from: primaryURL)
+        XCTAssertEqual(continuedPrimary.id, persistedPrimary.id)
+        XCTAssertEqual(continuedPrimary.name, persistedPrimary.name)
+        XCTAssertEqual(try historyEncoder.encode(Array(continuedPrimary.messages.prefix(persistedPrimary.messages.count))), try historyEncoder.encode(persistedPrimary.messages))
+        XCTAssertEqual(continuedPrimary.messages.count, persistedPrimary.messages.count + 2)
+
+        // Cold UUID continuation addresses the other lane, not the primary or its historical group.
+        let primaryBytes = try Data(contentsOf: primaryURL)
+        let persistedSibling = try await composition.oracleViewModel.chatData.loadChatSession(from: siblingURL)
+        for session in composition.oracleViewModel.sessions {
+            composition.oracleViewModel.purgeSessionStorage(session.id)
+        }
+        composition.oracleViewModel.sessions = []
+        composition.oracleViewModel.currentSessionID = nil
+        await composition.oracleViewModel.loadSessionsFromWorkspace()
+        let siblingReply = try await composition.oracleViewModel.tool_chatSendWithConfiguredRoster(
+            args: [
+                "message": .string("Only the second lane"),
+                "mode": .string("review"),
+                "chat_id": .string(sibling.id.uuidString), "chat_name": .string("Must not rename sibling")
+            ],
+            promptVM: composition.promptManager,
+            tabContext: context,
+            capturedProfile: changedProfile,
+            selectionSnapshotOverride: snapshot
+        )
+        XCTAssertNil(siblingReply["oracle_group_id"])
+        XCTAssertEqual(siblingReply["chat_id"]?.stringValue, sibling.shortID)
+        XCTAssertEqual(capturedMessages.count, 4)
+        XCTAssertEqual(capturedModels.last, AIModel.gpt54)
+        await composition.oracleViewModel.drainTrackedAutosaves(for: workspace.id)
+        XCTAssertEqual(try Data(contentsOf: groupURL), groupBytes)
+        XCTAssertEqual(try Data(contentsOf: primaryURL), primaryBytes)
+        let continuedSibling = try await composition.oracleViewModel.chatData.loadChatSession(from: siblingURL)
+        XCTAssertEqual(continuedSibling.id, persistedSibling.id)
+        XCTAssertEqual(continuedSibling.name, persistedSibling.name)
+        XCTAssertEqual(try historyEncoder.encode(Array(continuedSibling.messages.prefix(persistedSibling.messages.count))), try historyEncoder.encode(persistedSibling.messages))
+        XCTAssertEqual(continuedSibling.messages.count, persistedSibling.messages.count + 2)
+
+        // Implicit selected-chat continuation still continues the frozen group roster.
+        composition.workspaceManager.setActiveChatSessionID(primarySession.id, forTabID: tab.id)
+        let implicit = try await composition.oracleViewModel.tool_chatSendWithConfiguredRoster(
+            args: ["message": .string("Continue the selected group"), "mode": .string("review")],
+            promptVM: composition.promptManager,
+            tabContext: context,
+            capturedProfile: changedProfile,
+            selectionSnapshotOverride: snapshot
+        )
+        XCTAssertEqual(implicit["oracle_group_id"]?.stringValue, groupID)
+        XCTAssertEqual(implicit["oracle_count"]?.intValue, 2)
+        await composition.oracleViewModel.drainTrackedAutosaves(for: workspace.id)
+        let implicitPrimary = try await composition.oracleViewModel.chatData.loadChatSession(from: primaryURL)
+        let implicitSibling = try await composition.oracleViewModel.chatData.loadChatSession(from: siblingURL)
+        XCTAssertEqual(implicitPrimary.name, continuedPrimary.name)
+        XCTAssertEqual(implicitSibling.name, continuedSibling.name)
+        XCTAssertEqual(try historyEncoder.encode(Array(implicitPrimary.messages.prefix(continuedPrimary.messages.count))), try historyEncoder.encode(continuedPrimary.messages))
+        XCTAssertEqual(try historyEncoder.encode(Array(implicitSibling.messages.prefix(continuedSibling.messages.count))), try historyEncoder.encode(continuedSibling.messages))
 
         let groupSessionIDs = composition.oracleViewModel.sessions
             .filter { $0.oracleGroupID == groupUUID }
@@ -550,11 +623,30 @@ final class OraclePresetExecutionTests: XCTestCase {
                 .review: chatPreset
             ]
         )
+        let legacyGroupBytes = try Data(contentsOf: groupURL)
+        let legacySiblingBytes = try Data(contentsOf: siblingURL)
+        let upgradedLane = try await composition.oracleViewModel.tool_chatSendWithConfiguredRoster(
+            args: [
+                "message": .string("Legacy lane upgrade"),
+                "mode": .string("review"),
+                "chat_id": .string(chatID)
+            ],
+            promptVM: composition.promptManager,
+            tabContext: context,
+            capturedProfile: changedProfile,
+            selectionSnapshotOverride: legacySnapshot
+        )
+        XCTAssertNil(upgradedLane["oracle_group_id"])
+        XCTAssertEqual(capturedModels.last, AIModel.gpt54Mini, "canonical model wins over stale projection/settings")
+        XCTAssertTrue(try XCTUnwrap(capturedMessages.last).systemPrompt.contains(promptMarker))
+        await composition.oracleViewModel.drainTrackedAutosaves(for: workspace.id)
+        XCTAssertEqual(try Data(contentsOf: groupURL), legacyGroupBytes)
+        XCTAssertEqual(try Data(contentsOf: siblingURL), legacySiblingBytes)
+
         let upgradedLegacyGroup = try await composition.oracleViewModel.tool_chatSendWithConfiguredRoster(
             args: [
                 "message": .string("Legacy group upgrade"),
-                "mode": .string("review"),
-                "chat_id": .string(chatID)
+                "mode": .string("review")
             ],
             promptVM: composition.promptManager,
             tabContext: context,
@@ -596,8 +688,7 @@ final class OraclePresetExecutionTests: XCTestCase {
         _ = try await composition.oracleViewModel.tool_chatSendWithConfiguredRoster(
             args: [
                 "message": .string("Frozen group continuation"),
-                "mode": .string("review"),
-                "chat_id": .string(chatID)
+                "mode": .string("review")
             ],
             promptVM: composition.promptManager,
             tabContext: context,

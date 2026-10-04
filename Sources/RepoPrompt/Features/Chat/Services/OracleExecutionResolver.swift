@@ -109,6 +109,18 @@ struct ResolvedOracleExecution {
         self.selection = selection
     }
 
+    #if DEBUG
+        func primaryOnlyForDiagnostics() throws -> Self {
+            try Self(
+                mode: mode,
+                roster: OracleRoster(primary: roster.primary, additional: []),
+                models: [primaryModel],
+                promptConfiguration: promptConfiguration,
+                selection: selection
+            )
+        }
+    #endif
+
     var primaryModel: AIModel {
         models[0]
     }

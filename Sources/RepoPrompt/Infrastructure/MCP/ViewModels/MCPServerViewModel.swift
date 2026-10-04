@@ -545,6 +545,7 @@ final class MCPServerViewModel: ObservableObject {
         var requestMetadataOverrideForTesting: RequestMetadata?
         var agentRunDispatchOverrideForTesting: AgentExternalMCPRunStarter.DispatchInstruction?
         private var contextBuilderFollowUpOverrideForTesting: MCPAppPhysicalCapabilityAdapters.RunMCPPlanOrQuestion?
+        var contextBuilderExportFileOverrideForTesting: MCPAppPhysicalCapabilityAdapters.WriteGeneratedOracleExportFile?
         private var contextBuilderBeforeFinalReviewAuthorizationForTesting:
             MCPAppPhysicalCapabilityAdapters.BeforeContextBuilderFinalReviewAuthorization?
         private var contextBuilderDidFinalizeReviewForTesting:
@@ -740,6 +741,13 @@ final class MCPServerViewModel: ObservableObject {
             },
             exportOracleResponse: { [self] request in
                 try await exportOracleResponse(request)
+            },
+            jobCenter: WindowStatesManager.shared.longRunningJobs,
+            registerJobExecution: { [self] id, runID, tool, cancel in
+                registerToolExecution(executionID: id, runID: runID, connectionID: nil, toolName: tool, cancel: cancel)
+            },
+            unregisterJobExecution: { [self] id in
+                unregisterToolExecution(executionID: id, countAsEnded: false)
             }
         )
     }
@@ -1499,6 +1507,11 @@ final class MCPServerViewModel: ObservableObject {
         },
         writeGeneratedOracleExportFile: { [weak self] path, content, destination in
             guard let self else { throw MCPError.internalError("Window deallocated while writing Oracle export") }
+            #if DEBUG
+                if let override = await contextBuilderExportFileOverrideForTesting {
+                    return try await override(path, content, destination)
+                }
+            #endif
             return try await writeGeneratedOracleExportFile(path: path, content: content, destination: destination)
         },
         beforeContextBuilderFinalReviewAuthorization: { [weak self] in
@@ -1513,7 +1526,7 @@ final class MCPServerViewModel: ObservableObject {
                 _ = authorization
             #endif
         },
-        runMCPPlanOrQuestion: { [weak self] contextBuilderVM, identity, agentModeSessionID, agentModeRunID, mode, execution, prompt, selection, lookupContext, reviewGitContext, finalReviewAuthorization, progressReporter, activityReporter in
+        runMCPPlanOrQuestion: { [weak self] contextBuilderVM, identity, agentModeSessionID, agentModeRunID, mode, execution, prompt, selection, lookupContext, reviewGitContext, finalReviewAuthorization, progressReporter, activityReporter, jobProgress in
             guard let self else { throw MCPError.internalError("Window deallocated while generating context_builder response") }
             #if DEBUG
                 if let override = contextBuilderFollowUpOverrideForTesting {
@@ -1530,7 +1543,8 @@ final class MCPServerViewModel: ObservableObject {
                         reviewGitContext,
                         finalReviewAuthorization,
                         progressReporter,
-                        activityReporter
+                        activityReporter,
+                        jobProgress
                     )
                 }
             #endif
@@ -1547,7 +1561,8 @@ final class MCPServerViewModel: ObservableObject {
                 reviewGitContext: reviewGitContext,
                 finalReviewAuthorization: finalReviewAuthorization,
                 progressReporter: progressReporter,
-                activityReporter: activityReporter
+                activityReporter: activityReporter,
+                jobProgress: jobProgress
             )
         }
     )
@@ -2140,7 +2155,12 @@ final class MCPServerViewModel: ObservableObject {
                 runtime: windowToolRuntime,
                 execution: windowToolExecutionCapabilities,
                 context: windowToolContextCapabilities,
-                files: windowToolFileCapabilities
+                files: windowToolFileCapabilities,
+                jobs: WindowStatesManager.shared.longRunningJobs,
+                registerJob: { [weak self] id, runID, cancel in
+                    self?.registerToolExecution(executionID: id, runID: runID, connectionID: nil, toolName: MCPWindowToolName.contextBuilder, cancel: cancel)
+                },
+                unregisterJob: { [weak self] id in self?.unregisterToolExecution(executionID: id, countAsEnded: false) }
             ),
             MCPAskUserToolProvider(runtime: windowToolRuntime, execution: windowToolExecutionCapabilities),
             MCPAgentControlToolProvider(runtime: windowToolRuntime, execution: windowToolExecutionCapabilities),

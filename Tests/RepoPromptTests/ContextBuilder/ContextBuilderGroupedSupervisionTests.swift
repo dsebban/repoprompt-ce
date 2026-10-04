@@ -8,6 +8,391 @@ import XCTest
 #if DEBUG
     @MainActor
     final class ContextBuilderGroupedSupervisionTests: XCTestCase {
+        func testTicketCLIExplicitContextSelectorSupportsControlsWithoutWeakeningOwnership() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                driver.streamBody = { runID in
+                    let child = try await driver.connectChild(runID: runID)
+                    try await driver.discover(using: child)
+                }
+                await driver.window.mcpServer.startServer()
+                let initiating = try await driver.connect(name: "RepoPromptCLI-selector-start", purpose: .unknown)
+                @MainActor
+                func call(_ connection: ContextBuilderMultiRootDiscoveryDriver.RoutedConnection, _ args: [String: Value], selector: UUID? = nil) async throws -> (content: [MCP.Tool.Content], isError: Bool?) {
+                    var routed = args
+                    routed["_windowID"] = .int(driver.window.windowID)
+                    routed["context_id"] = .string((selector ?? driver.tabID).uuidString)
+                    routed["_rawJSON"] = .bool(true)
+                    let reply = try await connection.client.callTool(name: "context_builder", arguments: routed)
+                    return (reply.content, reply.isError)
+                }
+                func payload(_ reply: (content: [MCP.Tool.Content], isError: Bool?)) throws -> [String: Any] {
+                    let text = reply.content.compactMap { content -> String? in
+                        if case let .text(text, _, _) = content { return text }
+                        return nil
+                    }.joined(separator: "\n")
+                    XCTAssertNotEqual(reply.isError, true, text)
+                    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                }
+                let started = try await payload(call(initiating, [
+                    "op": .string("start"), "detach": .bool(true),
+                    "instructions": .string("Build one controlled plan"), "response_type": .string("plan"),
+                    "oracle_preset": .string(harness.preset.name)
+                ]))
+                guard let id = started["job_id"] as? String else { return XCTFail("Valid CLI selectors must admit a job") }
+                await initiating.cleanup()
+                try await harness.waitForStreams()
+                let reconnected = try await driver.connect(name: "RepoPromptCLI-selector-reconnect", purpose: .unknown)
+                let poll = try await payload(call(reconnected, ["op": .string("poll"), "job_id": .string(id)]))
+                XCTAssertEqual((poll["job"] as? [String: Any])?["status"] as? String, "running")
+                XCTAssertNil(poll["plan"])
+                let wait = try await payload(call(reconnected, ["op": .string("wait"), "job_id": .string(id), "timeout": .double(0)]))
+                XCTAssertEqual(wait["job_id"] as? String, id)
+                let wrong = try await call(reconnected, ["op": .string("cancel"), "job_id": .string(id)], selector: UUID())
+                XCTAssertEqual(wrong.isError, true)
+                let invoking = try await driver.connectInvokingAgent(driver.resolve())
+                let wrongOwner = try await invoking.client.callTool(name: "context_builder", arguments: ["op": .string("cancel"), "job_id": .string(id)])
+                XCTAssertEqual(wrongOwner.isError, true)
+                XCTAssertEqual(driver.constructed, 1)
+                _ = try await payload(call(reconnected, ["op": .string("cancel"), "job_id": .string(id)]))
+                let terminal = try await payload(call(reconnected, ["op": .string("wait"), "job_id": .string(id), "timeout": .double(5)]))
+                XCTAssertEqual((terminal["job"] as? [String: Any])?["status"] as? String, "cancelled")
+                XCTAssertEqual(driver.constructed, 1)
+                XCTAssertEqual(driver.streamStarts, 1)
+            }
+        }
+
+        func testBuilderRejectsOracleRequestDiagnosticsBeforeDiscovery() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                let context = try await driver.resolve()
+                let connection = try await driver.connectInvokingAgent(context)
+                for diagnostic in ["debug_primary_only", "debug_lane_timeout_seconds"] {
+                    for ticketed in [false, true] {
+                        var args: [String: Value] = [
+                            "instructions": .string("Build one controlled plan"),
+                            "response_type": .string("plan"),
+                            "oracle_preset": .string(harness.preset.name),
+                            diagnostic: diagnostic == "debug_primary_only" ? .bool(true) : .double(3)
+                        ]
+                        if ticketed { args["op"] = .string("start") }
+                        let reply = try await connection.client.callTool(name: "context_builder", arguments: args)
+                        XCTAssertEqual(reply.isError, true)
+                        XCTAssertTrue(reply.content.contains { content in
+                            if case let .text(text, _, _) = content {
+                                return text.contains("Context Builder does not support Oracle request diagnostics")
+                            }
+                            return false
+                        })
+                        XCTAssertEqual(driver.constructed, 0)
+                        XCTAssertEqual(driver.streamStarts, 0)
+                        XCTAssertTrue(harness.registeredModels.isEmpty)
+                    }
+                }
+            }
+        }
+
+        func testOracleRequestPrimaryOnlyDispatchesOneControlledTransport() async throws {
+            try await withHarness { harness in
+                let driver = harness.driver
+                var context = OracleViewModel.OracleSendTabContext(
+                    tabID: driver.tabID,
+                    workspaceID: driver.fixture.workspace.id,
+                    activationPolicy: .background,
+                    packaging: .init(
+                        sourceTabID: driver.tabID,
+                        sourceWorkspaceID: driver.fixture.workspace.id,
+                        sourceSelectionRevision: 0,
+                        sourceAgentSessionID: nil,
+                        sourceAgentRunID: nil,
+                        promptText: "",
+                        selection: StoredSelection(),
+                        lookupContext: .visibleWorkspace,
+                        reviewGitContext: .automaticOnly(),
+                        provenance: .direct
+                    )
+                )
+                context.requestDiagnostics.primaryOnly = true
+                var reply: [String: Value]?
+                harness.start {
+                    reply = try await driver.window.oracleViewModel.tool_chatSendWithConfiguredRoster(
+                        args: ["message": .string("Controlled primary-only"), "new_chat": .bool(true), "model": .string(harness.preset.name)],
+                        promptVM: driver.window.oracleViewModel.promptViewModel, tabContext: context
+                    )
+                }
+                try await harness.waitForStream(.gpt54Mini)
+                harness.complete(.gpt54Mini, text: "only primary")
+                try await harness.wait(harness.settled)
+                XCTAssertNil(harness.error)
+                XCTAssertEqual(reply?["response"], .string("only primary"))
+                XCTAssertNil(reply?["oracle_group_id"])
+                XCTAssertEqual(harness.registeredModels, [.gpt54Mini])
+                XCTAssertEqual(harness.preset.modelStrings, [AIModel.gpt54Mini.rawValue, AIModel.gpt54.rawValue])
+            }
+        }
+
+        func testOracleRequestDiagnosticDeadlineSettlesAndDrainsWithoutLateSuccess() async throws {
+            try await withHarness { harness in
+                let driver = harness.driver
+                var context = OracleViewModel.OracleSendTabContext(
+                    tabID: driver.tabID,
+                    workspaceID: driver.fixture.workspace.id,
+                    activationPolicy: .background,
+                    packaging: .init(
+                        sourceTabID: driver.tabID,
+                        sourceWorkspaceID: driver.fixture.workspace.id,
+                        sourceSelectionRevision: 0,
+                        sourceAgentSessionID: nil,
+                        sourceAgentRunID: nil,
+                        promptText: "",
+                        selection: StoredSelection(),
+                        lookupContext: .visibleWorkspace,
+                        reviewGitContext: .automaticOnly(),
+                        provenance: .direct
+                    )
+                )
+                context.requestDiagnostics.laneTimeout = 3
+                var reply: [String: Value]?
+                harness.start {
+                    reply = try await driver.window.oracleViewModel.tool_chatSendWithConfiguredRoster(
+                        args: ["message": .string("Controlled deadline"), "new_chat": .bool(true), "model": .string(harness.preset.name)],
+                        promptVM: driver.window.oracleViewModel.promptViewModel, tabContext: context
+                    )
+                }
+                try await harness.waitForStreams()
+                harness.complete(.gpt54Mini, text: "completed primary")
+                try await harness.wait(harness.settled)
+                XCTAssertNil(harness.error)
+                let result = try XCTUnwrap(reply?["oracle_results"]?.arrayValue)
+                XCTAssertEqual(result.map { $0.objectValue?["status"]?.stringValue }, ["completed", "failed"])
+                XCTAssertEqual(result[1].objectValue?["error"]?.objectValue?["code"]?.stringValue, "oracle_diagnostic_overall_timeout")
+                let owner = try OracleViewModel.oracleGroupOwner(workspaceID: driver.fixture.workspace.id, tabID: driver.tabID)
+                let groupID = try OracleGroupID(rawValue: XCTUnwrap(reply?["oracle_group_id"]?.stringValue.flatMap(UUID.init(uuidString:))))
+                let store = AppDomainRuntimeComposition.shared.oracleConversationStore
+                let loadedBefore = try await store.load(groupID: groupID, owner: owner)
+                let before = try XCTUnwrap(loadedBefore)
+                let delivery = harness.complete(.gpt54, text: "must not become late success")
+                guard case .terminated? = delivery else { return XCTFail("Timed-out transport was not drained") }
+                await Task.yield()
+                let loadedAfter = try await store.load(groupID: groupID, owner: owner)
+                let after = try XCTUnwrap(loadedAfter)
+                XCTAssertEqual(after, before)
+                XCTAssertEqual(after.turns.last?.results.map(\.status), [.completed, .failed])
+                XCTAssertEqual(harness.registeredModels.count, 2)
+            }
+        }
+
+        func testTicketSurvivesRoutedDisconnectAndExportsOnePipelineExactlyOnce() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                let gate = driver.fixture.makeGate()
+                let entered = XCTestExpectation(description: "ticket discovery started")
+                driver.streamBody = { runID in
+                    entered.fulfill()
+                    await gate.wait()
+                    let child = try await driver.connectChild(runID: runID)
+                    try await driver.discover(using: child)
+                }
+                func payload(_ connection: ContextBuilderMultiRootDiscoveryDriver.RoutedConnection, _ args: [String: Value]) async throws -> [String: Any] {
+                    let reply = try await connection.client.callTool(name: "context_builder", arguments: args.merging(["_rawJSON": .bool(true)]) { _, new in new })
+                    let text = reply.content.compactMap { content -> String? in
+                        if case let .text(text, _, _) = content { return text }
+                        return nil
+                    }.joined(separator: "\n")
+                    XCTAssertNotEqual(reply.isError, true, text)
+                    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                }
+                let context = try await driver.resolve()
+                let initiating = try await driver.connectInvokingAgent(context)
+                let started = try await payload(initiating, [
+                    "op": .string("start"), "detach": .bool(true),
+                    "instructions": .string("Build one controlled plan"), "response_type": .string("plan"),
+                    "oracle_preset": .string(harness.preset.name), "export_response": .bool(true)
+                ])
+                let jobID = try XCTUnwrap(started["job_id"] as? String)
+                try await harness.wait(entered)
+                await initiating.cleanup()
+                let reconnected = try await driver.connectInvokingAgent(context)
+                let observing = try await payload(reconnected, ["op": .string("wait"), "job_id": .string(jobID), "timeout": .double(0)])
+                XCTAssertEqual(observing["job_id"] as? String, jobID)
+                XCTAssertEqual((observing["job"] as? [String: Any])?["status"] as? String, "running")
+                XCTAssertNil(observing["plan"])
+                XCTAssertEqual(driver.constructed, 1)
+                let wrongKind = try await reconnected.client.callTool(name: "ask_oracle", arguments: ["op": .string("cancel"), "job_id": .string(jobID)])
+                XCTAssertEqual(wrongKind.isError, true)
+                XCTAssertTrue(wrongKind.content.contains { content in
+                    if case let .text(text, _, _) = content { return text.contains("belongs to a different tool") }
+                    return false
+                }, "The owning service rejects kind, not tool visibility")
+                let otherOrigin = try await driver.connectInvokingAgent(driver.resolve())
+                let wrongOwner = try await otherOrigin.client.callTool(name: "context_builder", arguments: ["op": .string("cancel"), "job_id": .string(jobID)])
+                XCTAssertEqual(wrongOwner.isError, true)
+                XCTAssertTrue(wrongOwner.content.contains { content in
+                    if case let .text(text, _, _) = content { return text.contains("belongs to a different Agent session/run") }
+                    return false
+                })
+                XCTAssertEqual(driver.constructed, 1, "Control authorization never enters discovery")
+                gate.release()
+                try await harness.waitForStreams()
+                try await harness.emit(.gpt54Mini, text: "primary partial ")
+                let streaming = try await payload(reconnected, ["op": .string("poll"), "job_id": .string(jobID)])
+                XCTAssertFalse(String(describing: streaming).contains("primary partial"), "poll projects lane state, never response bodies")
+                harness.complete(.gpt54, text: "sibling complete")
+                harness.complete(.gpt54Mini, text: "primary complete")
+                let terminal = try await payload(reconnected, ["op": .string("wait"), "job_id": .string(jobID), "timeout": .double(10)])
+                XCTAssertEqual((terminal["job"] as? [String: Any])?["status"] as? String, "completed")
+                let plan = try XCTUnwrap(terminal["plan"] as? [String: Any])
+                let lanes = try XCTUnwrap(plan["oracle_results"] as? [[String: Any]])
+                XCTAssertEqual(lanes.map { $0["status"] as? String }, ["completed", "completed"])
+                XCTAssertEqual(lanes[0]["response"] as? String, "primary partial primary complete")
+                let exportPath = try XCTUnwrap(terminal["oracle_export_path"] as? String)
+                let exportURL = URL(fileURLWithPath: exportPath.hasPrefix("/") ? exportPath : driver.fixture.rootPaths[0] + "/" + exportPath)
+                let exported = try Data(contentsOf: exportURL)
+                XCTAssertFalse(exported.isEmpty)
+                let exports = try FileManager.default.contentsOfDirectory(at: exportURL.deletingLastPathComponent(), includingPropertiesForKeys: nil)
+                XCTAssertEqual(exports.count(where: { $0.pathExtension == "md" }), 1)
+                for op in ["poll", "wait", "cancel"] {
+                    let result = try await payload(reconnected, ["op": .string(op), "job_id": .string(jobID)])
+                    XCTAssertEqual(NSDictionary(dictionary: result), NSDictionary(dictionary: terminal))
+                }
+                XCTAssertEqual(try Data(contentsOf: exportURL), exported)
+                XCTAssertEqual(driver.constructed, 1)
+                XCTAssertEqual(driver.streamStarts, 1)
+                XCTAssertEqual(driver.teardownIDs.count, 1)
+                XCTAssertEqual(harness.registeredModels.count, 2)
+                XCTAssertEqual(Set(harness.registeredModels), Set([.gpt54Mini, .gpt54]))
+            }
+        }
+
+        func testTicketCancellationRetainsPartialFollowUpAndDrainsBothLanes() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                driver.streamBody = { runID in
+                    let child = try await driver.connectChild(runID: runID)
+                    try await driver.discover(using: child)
+                }
+                let context = try await driver.resolve()
+                let connection = try await driver.connectInvokingAgent(context)
+                func call(_ args: [String: Value]) async throws -> [String: Any] {
+                    let reply = try await connection.client.callTool(name: "context_builder", arguments: args.merging(["_rawJSON": .bool(true)]) { _, new in new })
+                    XCTAssertNotEqual(reply.isError, true)
+                    let text = reply.content.compactMap { content -> String? in
+                        if case let .text(text, _, _) = content { return text }
+                        return nil
+                    }.joined(separator: "\n")
+                    return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                }
+                let start = try await call(["op": .string("start"), "detach": .bool(true), "instructions": .string("Controlled cancellation"), "response_type": .string("plan"), "oracle_preset": .string(harness.preset.name), "export_response": .bool(true)])
+                let id = try XCTUnwrap(start["job_id"] as? String)
+                try await harness.waitForStreams()
+                try await harness.emit(.gpt54Mini, text: "retained partial")
+                _ = try await call(["op": .string("cancel"), "job_id": .string(id)])
+                let terminal = try await call(["op": .string("wait"), "job_id": .string(id), "timeout": .double(10)])
+                XCTAssertEqual((terminal["job"] as? [String: Any])?["status"] as? String, "cancelled")
+                let lanes = try XCTUnwrap((terminal["plan"] as? [String: Any])?["oracle_results"] as? [[String: Any]])
+                XCTAssertEqual(lanes.map { $0["status"] as? String }, ["cancelled", "cancelled"])
+                XCTAssertEqual((lanes[0]["error"] as? [String: Any])?["partial_response"] as? String, "retained partial")
+                XCTAssertNotNil(terminal["oracle_export_error"])
+                XCTAssertNil(terminal["oracle_export_path"])
+                XCTAssertFalse(FileManager.default.fileExists(atPath: driver.fixture.rootPaths[0] + "/prompt-exports"))
+                XCTAssertEqual(driver.constructed, 1)
+                XCTAssertEqual(harness.registeredModels.count, 2)
+                try await harness.wait(harness.cancelled[.gpt54Mini]!)
+                try await harness.wait(harness.cancelled[.gpt54]!)
+            }
+        }
+
+        func testTicketRetainsSettledGroupWhenExportFailsOrIsCancelledDuringWrite() async throws {
+            for cancelDuringExport in [false, true] {
+                try await withHarness(routed: true) { harness in
+                    let driver = harness.driver
+                    driver.streamBody = { runID in
+                        let child = try await driver.connectChild(runID: runID)
+                        try await driver.discover(using: child)
+                    }
+                    let entered = XCTestExpectation(description: "writer entered exactly once")
+                    entered.assertForOverFulfill = true
+                    let gate = driver.fixture.makeGate()
+                    driver.window.mcpServer.contextBuilderExportFileOverrideForTesting = { _, _, _ in
+                        entered.fulfill()
+                        await gate.wait()
+                        if cancelDuringExport { try Task.checkCancellation() }
+                        throw NSError(domain: "SENSITIVE_WRITER_FAILURE", code: 1)
+                    }
+                    let context = try await driver.resolve()
+                    let connection = try await driver.connectInvokingAgent(context)
+                    func call(_ args: [String: Value]) async throws -> [String: Any] {
+                        let reply = try await connection.client.callTool(name: "context_builder", arguments: args.merging(["_rawJSON": .bool(true)]) { _, new in new })
+                        let text = reply.content.compactMap { content -> String? in
+                            if case let .text(text, _, _) = content { return text }
+                            return nil
+                        }.joined(separator: "\n")
+                        XCTAssertNotEqual(reply.isError, true, text)
+                        return try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                    }
+                    let start = try await call(["op": .string("start"), "detach": .bool(true), "instructions": .string("One export attempt"), "response_type": .string("plan"), "oracle_preset": .string(harness.preset.name), "export_response": .bool(true)])
+                    let id = try XCTUnwrap(start["job_id"] as? String)
+                    try await harness.waitForStreams()
+                    harness.complete(.gpt54Mini, text: "completed primary")
+                    harness.complete(.gpt54, text: "completed sibling")
+                    try await harness.wait(entered)
+                    if cancelDuringExport { _ = try await call(["op": .string("cancel"), "job_id": .string(id)]) }
+                    gate.release()
+                    let terminal = try await call(["op": .string("wait"), "job_id": .string(id), "timeout": .double(10)])
+                    XCTAssertEqual((terminal["job"] as? [String: Any])?["status"] as? String, cancelDuringExport ? "cancelled" : "completed")
+                    let plan = try XCTUnwrap(terminal["plan"] as? [String: Any])
+                    let lanes = try XCTUnwrap(plan["oracle_results"] as? [[String: Any]])
+                    XCTAssertEqual(lanes.map { $0["status"] as? String }, ["completed", "completed"])
+                    XCTAssertEqual(lanes.map { $0["response"] as? String }, ["completed primary", "completed sibling"])
+                    XCTAssertNotNil(plan["oracle_group_id"])
+                    XCTAssertNotNil(lanes[0]["chat_id"])
+                    XCTAssertNotNil(lanes[1]["chat_id"])
+                    XCTAssertNotNil(terminal["oracle_export_error"])
+                    XCTAssertNil(terminal["oracle_export_path"])
+                    XCTAssertFalse(String(describing: terminal).contains("SENSITIVE_WRITER_FAILURE"))
+                    let value = try JSONDecoder().decode(Value.self, from: JSONSerialization.data(withJSONObject: terminal))
+                    let rendered = ToolOutputFormatter.buildContentBlocks(toolName: "context_builder", args: [:], result: value, emitResources: false)
+                        .compactMap { content -> String? in
+                            if case let .text(text, _, _) = content { return text }
+                            return nil
+                        }.joined(separator: "\n")
+                    XCTAssertTrue(rendered.contains(cancelDuringExport ? "Oracle export cancelled" : "Oracle export failed"))
+                    XCTAssertTrue(rendered.contains("completed primary"))
+                    XCTAssertTrue(rendered.contains("completed sibling"))
+                    let repeated = try await call(["op": .string("poll"), "job_id": .string(id)])
+                    XCTAssertEqual(NSDictionary(dictionary: repeated), NSDictionary(dictionary: terminal))
+                    XCTAssertEqual(driver.constructed, 1)
+                    XCTAssertEqual(harness.registeredModels.count, 2)
+                }
+            }
+        }
+
+        func testLegacyBuilderExportFailureRemainsRequestError() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                driver.streamBody = { runID in
+                    let child = try await driver.connectChild(runID: runID)
+                    try await driver.discover(using: child)
+                }
+                driver.window.mcpServer.contextBuilderExportFileOverrideForTesting = { _, _, _ in
+                    throw NSError(domain: "fixture-export-error", code: 1)
+                }
+                let context = try await driver.resolve()
+                let connection = try await driver.connectInvokingAgent(context)
+                var failed = false
+                harness.start {
+                    let reply = try await connection.client.callTool(name: "context_builder", arguments: ["instructions": .string("Legacy export"), "response_type": .string("plan"), "oracle_preset": .string(harness.preset.name), "export_response": .bool(true)])
+                    failed = reply.isError == true
+                }
+                try await harness.waitForStreams()
+                harness.complete(.gpt54Mini, text: "legacy primary")
+                harness.complete(.gpt54, text: "legacy sibling")
+                try await harness.wait(harness.settled)
+                XCTAssertNil(harness.error)
+                XCTAssertTrue(failed, "Omitted op preserves legacy export failure, not ticket retention")
+            }
+        }
+
         func testUIGroupWaitsForAuthoritativeCompletionAfterInteractiveGrace() async throws {
             try await withHarness { harness in
                 let driver = harness.driver
@@ -862,9 +1247,11 @@ import XCTest
             try await wait(event)
         }
 
-        func complete(_ model: AIModel, text: String, reasoning: String? = nil) {
-            streams[model]?.continuation.yield(.init(text: text, reasoning: reasoning, tokens: .init(), terminalOutcome: .completed))
+        @discardableResult
+        func complete(_ model: AIModel, text: String, reasoning: String? = nil) -> AsyncThrowingStream<ChatStreamOutput, Error>.Continuation.YieldResult? {
+            let delivery = streams[model]?.continuation.yield(.init(text: text, reasoning: reasoning, tokens: .init(), terminalOutcome: .completed))
             streams[model]?.continuation.finish()
+            return delivery
         }
 
         func close() async {
@@ -886,6 +1273,7 @@ import XCTest
                 await driver.window.aiQueriesService.removeControlledStreamForTesting(id: stream.id)
             }
             XCTAssertEqual(producerExits, producers.count, "Controlled producer tasks drained (not a remote provider-disposal claim)")
+            driver.window.mcpServer.contextBuilderExportFileOverrideForTesting = nil
             let oracle = driver.window.oracleViewModel
             // Oracle persistence is separately owned, not part of lane drainage. The fixture
             // must finish its workspace's tracked writes before the driver removes its files.

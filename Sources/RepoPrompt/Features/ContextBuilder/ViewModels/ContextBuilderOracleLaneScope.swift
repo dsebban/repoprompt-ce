@@ -12,16 +12,22 @@ final class ContextBuilderOracleGroupSupervision {
     let configuration: ContextBuilderFollowUpFinalizationConfiguration
     let clock: Clock
     let sleep: Sleep
+    let timeoutOwner: String
+    let timeoutCodePrefix: String
     private var lanes: [ContextBuilderOracleLaneScope] = []
 
     init(
         configuration: ContextBuilderFollowUpFinalizationConfiguration = .production,
         clock: @escaping Clock = { ProcessInfo.processInfo.systemUptime },
-        sleep: @escaping Sleep = { try await Task.sleep(for: .seconds($0)) }
+        sleep: @escaping Sleep = { try await Task.sleep(for: .seconds($0)) },
+        timeoutOwner: String = "Context Builder Oracle",
+        timeoutCodePrefix: String = "context_builder"
     ) {
         self.configuration = configuration
         self.clock = clock
         self.sleep = sleep
+        self.timeoutOwner = timeoutOwner
+        self.timeoutCodePrefix = timeoutCodePrefix
     }
 
     func makeLane(sessionID: UUID) -> ContextBuilderOracleLaneScope {
@@ -72,6 +78,8 @@ final class ContextBuilderOracleLaneScope {
     private let clock: ContextBuilderOracleGroupSupervision.Clock
     private let sleep: ContextBuilderOracleGroupSupervision.Sleep
     private let groupCancellation: ContextBuilderOracleCancellation
+    private let timeoutOwner: String
+    private let timeoutCodePrefix: String
     nonisolated let cancellation = ContextBuilderOracleCancellation()
     private let startedAt: TimeInterval
     private var lastActivityAt: TimeInterval
@@ -108,6 +116,8 @@ final class ContextBuilderOracleLaneScope {
         clock = group.clock
         sleep = group.sleep
         groupCancellation = group.cancellation
+        timeoutOwner = group.timeoutOwner
+        timeoutCodePrefix = group.timeoutCodePrefix
         startedAt = group.clock()
         lastActivityAt = startedAt
     }
@@ -142,8 +152,8 @@ final class ContextBuilderOracleLaneScope {
         if let kind {
             let budget = kind == .overall ? configuration.overallTimeout : configuration.inactivityTimeout
             // Only configured local values and a closed phase enum; typed domain errors do not truncate.
-            let message = "Context Builder Oracle exceeded its \(String(format: "%.0f", budget))s \(kind.rawValue) budget during \(phase.rawValue)."
-            latch(.failure(OracleLaneFailure(code: "context_builder_\(kind.rawValue)_timeout", message: message)))
+            let message = "\(timeoutOwner) exceeded its \(String(format: "%g", budget))s \(kind.rawValue) budget during \(phase.rawValue)."
+            latch(.failure(OracleLaneFailure(code: "\(timeoutCodePrefix)_\(kind.rawValue)_timeout", message: message)))
             return false
         }
         return true

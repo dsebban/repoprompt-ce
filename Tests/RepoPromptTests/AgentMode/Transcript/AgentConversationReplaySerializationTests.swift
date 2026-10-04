@@ -81,6 +81,91 @@ final class AgentConversationReplaySerializationTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testSpartanLogKeepsObservedInputsAndMarksStrippedRestoredInputsUnavailable() async throws {
+        // The five input shapes replaced by summaries in the original cold-restore log diff.
+        let calls: [(String, String)] = [
+            ("workspace_context", #"{"include":["prompt","selection","files"]}"#),
+            ("ask_oracle", #"{"export_response":true,"message":"fixture sum","mode":"chat","new_chat":true}"#),
+            ("get_file_tree", #"{"type":"roots"}"#),
+            ("workspace_context", #"{"include":["prompt","selection","files"]}"#),
+            ("ask_oracle", #"{"chat_id":"fixture-lane","export_response":true,"message":"fixture product","new_chat":false}"#)
+        ]
+        let storage = try makeTestDirectory(name: "SpartanLogRestoreFixture")
+        let workspace = WorkspaceModel(name: "Log restore fixture", repoPaths: [], customStoragePath: storage)
+        for (toolName, args) in calls {
+            let result = #"{"status":"success","summary_only":true,"summary_text":"RESULT_NOT_INPUT"}"#
+            let transcript = AgentTranscriptIO.importLegacyItems([
+                .user("Inspect fixture", sequenceIndex: 0),
+                .toolResult(name: toolName, invocationID: UUID(), argsJSON: args, resultJSON: result, isError: false, sequenceIndex: 1),
+                .assistant("Done", sequenceIndex: 2)
+            ])
+            let before = AgentTranscriptIO.buildSpartanLogXML(from: transcript)
+            XCTAssertTrue(before.contains("<tool_call name=\"\(toolName)\">\(args)</tool_call>"), before)
+            XCTAssertFalse(before.contains("key_paths"), "Derived preview metadata must not be added to observed inputs")
+            let saved = AgentSession(workspaceID: workspace.id, composeTabID: UUID(), name: "Log fixture", transcript: transcript, lastRunState: "completed")
+            let file = try await AgentSessionDataService().saveAgentSession(saved, for: workspace)
+            let durableBefore = try Data(contentsOf: file)
+            let loaded = try await AgentSessionDataService().loadAgentSession(from: file)
+            let restored = try XCTUnwrap(loaded.transcript)
+            XCTAssertTrue(restored.turns.flatMap(\.allActivities).compactMap(\.toolExecution).allSatisfy { $0.argsJSON == nil }, "Current storage/privacy policy is unchanged")
+            let after = AgentTranscriptIO.buildSpartanLogXML(from: restored)
+            XCTAssertTrue(after.contains("<tool_call name=\"\(toolName)\" input_status=\"unavailable\"/>"), after)
+            XCTAssertFalse(after.contains("RESULT_NOT_INPUT"), "Result summaries are not call inputs")
+            XCTAssertEqual(try Data(contentsOf: file), durableBefore, "get_log must not rewrite historical user data")
+            // Compact handoff projection is intentionally separate from faithful log inputs.
+            XCTAssertFalse(AgentTranscriptIO.buildForkTranscriptXML(from: restored).contains("input_status=\"unavailable\""))
+        }
+    }
+
+    @MainActor
+    func testSpartanLogRetainsGroupedAndFailedCallsAfterPersistence() async throws {
+        let storage = try makeTestDirectory(name: "SpartanLogTerminalRestoreFixture")
+        let workspace = WorkspaceModel(name: "Terminal log fixture", repoPaths: [], customStoragePath: storage)
+        let treeArgs = #"{"type":"roots"}"#
+        let failedArgs = #"{"message":"first fixture","new_chat":true}"#
+        let cancelledArgs = #"{"message":"second fixture","new_chat":true}"#
+        var items: [AgentChatItem] = [
+            .user("Inspect fixture", sequenceIndex: 0),
+            .toolResult(name: "get_file_tree", invocationID: UUID(), argsJSON: treeArgs, resultJSON: #"{"status":"success","summary_only":true,"summary_text":"RESULT_NOT_INPUT"}"#, isError: false, sequenceIndex: 1)
+        ]
+        // Nine actual calls reproduce the live owner's collapsed first file-tree row.
+        for index in 0 ..< 6 {
+            items.append(.toolResult(name: "read_file", invocationID: UUID(), argsJSON: #"{"path":"fixture.txt"}"#, resultJSON: #"{"status":"success","summary_only":true}"#, isError: false, sequenceIndex: index + 2))
+        }
+        items += [
+            .assistant("Root verified. Calling first Oracle.", sequenceIndex: 8),
+            .toolResult(name: "ask_oracle", invocationID: UUID(), argsJSON: failedArgs, resultJSON: #"{"status":"failed","summary_only":true}"#, isError: true, sequenceIndex: 9),
+            .assistant("First call failed. Calling second Oracle.", sequenceIndex: 10),
+            .toolResult(name: "oracle_send", invocationID: UUID(), argsJSON: cancelledArgs, resultJSON: #"{"status":"cancelled","summary_only":true}"#, isError: true, sequenceIndex: 11),
+            .assistant("Done", sequenceIndex: 12)
+        ]
+        let transcript = AgentTranscriptIO.importLegacyItems(items)
+        let projection = AgentTranscriptPolicyPipeline.handoffTranscript(from: transcript, upToRowID: nil).projection
+        XCTAssertTrue((projection.archivedBlocks + projection.workingBlocks).contains { $0.kind == .groupedHistory }, "Reproduce the presentation grouping that erased the first file-tree call")
+        let compactHandoff = AgentTranscriptIO.buildForkTranscriptXML(from: transcript)
+        XCTAssertFalse(compactHandoff.contains("<tool_call name=\"ask_oracle\""), compactHandoff)
+        XCTAssertFalse(compactHandoff.contains("<tool_call name=\"oracle_send\""), compactHandoff)
+        for (name, args) in [("get_file_tree", treeArgs), ("ask_oracle", failedArgs), ("oracle_send", cancelledArgs)] {
+            let log = AgentTranscriptIO.buildSpartanLogXML(from: transcript)
+            XCTAssertEqual(log.components(separatedBy: "<tool_call name=\"\(name)\"").count - 1, 1, log)
+            XCTAssertTrue(log.contains("<tool_call name=\"\(name)\">\(args)</tool_call>"), log)
+        }
+        let saved = AgentSession(workspaceID: workspace.id, composeTabID: UUID(), name: "Terminal log fixture", transcript: transcript, lastRunState: "cancelled")
+        let file = try await AgentSessionDataService().saveAgentSession(saved, for: workspace)
+        let durableBefore = try Data(contentsOf: file)
+        let loaded = try await AgentSessionDataService().loadAgentSession(from: file)
+        let restored = try XCTUnwrap(loaded.transcript)
+        let log = AgentTranscriptIO.buildSpartanLogXML(from: restored)
+        for name in ["get_file_tree", "ask_oracle", "oracle_send"] {
+            XCTAssertEqual(log.components(separatedBy: "<tool_call name=\"\(name)\"").count - 1, 1, log)
+            XCTAssertTrue(log.contains("<tool_call name=\"\(name)\" input_status=\"unavailable\"/>"), log)
+        }
+        XCTAssertFalse(log.contains("RESULT_NOT_INPUT"), log)
+        XCTAssertEqual(try Data(contentsOf: file), durableBefore, "Faithful monitoring must not rewrite the saved transcript")
+        XCTAssertEqual(AgentTranscriptIO.buildForkTranscriptXML(from: transcript), compactHandoff, "Compact handoff behavior stays independent of faithful monitoring")
+    }
+
     func testEquivalentModeMatchesLegacyBytesAndCategoryMetrics() throws {
         let invocationID = try XCTUnwrap(UUID(uuidString: "AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA"))
         let items: [AgentChatItem] = [

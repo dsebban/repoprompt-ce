@@ -34,6 +34,91 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
         }
     }
 
+    func testCancelledShutdownDrainsProviderTerminalPartBeforeClosingTransport() async throws {
+        let workspace = try makeTemporaryDirectory()
+        let record = workspace.appendingPathComponent("requests.jsonl")
+        let part = workspace.appendingPathComponent("native-tool-part.json")
+        let request = makeRunRequest(agentKind: .openCode, workspacePath: workspace.path)
+        let provider = try FakeACPProvider(
+            providerID: .openCode,
+            commandPath: makeFakeACPServerScript().path,
+            environment: ["ACP_RECORD_PATH": record.path, "ACP_CANCEL_PART_PATH": part.path]
+        )
+        let controller = try ACPAgentSessionController(
+            provider: provider,
+            runRequest: request,
+            allowsProviderProcessLaunchForTesting: true
+        )
+        _ = try await controller.bootstrap()
+        let stream = await controller.currentEventsStream()
+        let prompt = Task { try await controller.prompt(AgentMessage(userMessage: "cancel fixture")) }
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: part.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: part.path))
+        await controller.cancelPrompt()
+        let shutdown = Task {
+            // Real stop/teardown can inherit cancellation from its owning run.
+            withUnsafeCurrentTask { $0?.cancel() }
+            await controller.shutdown()
+        }
+        await shutdown.value
+        _ = try? await prompt.value
+        let native = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: part)) as? [String: Any])
+        XCTAssertEqual(native["status"] as? String, "error")
+        XCTAssertNotNil(native["end"] as? Double)
+        XCTAssertEqual(native["output"] as? String, "Tool execution aborted")
+        var terminalOutputs: [String] = []
+        var runningCalls = 0
+        for await event in stream {
+            if case let .stream(result) = event, let tool = AgentToolStreamEvent.from(result),
+               case .toolCall = tool { runningCalls += 1 }
+
+            if case let .stream(result) = event, let tool = AgentToolStreamEvent.from(result),
+               case let .toolResult(result) = tool { terminalOutputs.append(result.resultJSON) }
+        }
+        XCTAssertEqual(runningCalls, 1)
+        XCTAssertEqual(terminalOutputs.count, 1, "Late terminal content must be delivered before readers close")
+        XCTAssertTrue(terminalOutputs.first?.contains("Tool execution aborted") == true)
+        let requests = try String(contentsOf: record, encoding: .utf8)
+        XCTAssertEqual(requests.components(separatedBy: "session/cancel").count - 1, 2)
+    }
+
+    func testUnresponsiveProviderStopUsesOneBoundedSettlementDrain() async throws {
+        let workspace = try makeTemporaryDirectory()
+        let part = workspace.appendingPathComponent("native-tool-part.json")
+        let provider = try FakeACPProvider(
+            providerID: .openCode, commandPath: makeFakeACPServerScript().path,
+            environment: ["ACP_CANCEL_PART_PATH": part.path, "ACP_IGNORE_CANCEL": "1"]
+        )
+        let controller = try ACPAgentSessionController(
+            provider: provider,
+            runRequest: makeRunRequest(agentKind: .openCode, workspacePath: workspace.path),
+            requestTimeouts: .init(bootstrapSeconds: 5, cancellationSettlementSeconds: 0.25),
+            allowsProviderProcessLaunchForTesting: true
+        )
+        _ = try await controller.bootstrap()
+        let prompt = Task { try await controller.prompt(AgentMessage(userMessage: "unresponsive fixture")) }
+        let deadline = Date().addingTimeInterval(5)
+        while !FileManager.default.fileExists(atPath: part.path), Date() < deadline {
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: part.path))
+        let beforeCancel = Date()
+        await controller.cancelPrompt()
+        XCTAssertLessThan(Date().timeIntervalSince(beforeCancel), 0.2, "Cancellation alone must not wait on provider settlement")
+        let shutdown = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            await controller.shutdown()
+        }
+        await shutdown.value
+        _ = try? await prompt.value
+        XCTAssertLessThan(Date().timeIntervalSince(beforeCancel), 3, "An unresponsive provider cannot stall teardown indefinitely")
+        let waiterCount = await controller.debugPromptSettlementWaiterCount()
+        XCTAssertEqual(waiterCount, 0)
+    }
+
     func testCursorNewSessionPublishesRuntimeIDAsVerifiedLoadID() async throws {
         let workspace = try makeTemporaryDirectory()
         let scriptURL = try makeFakeACPServerScript()
@@ -316,6 +401,7 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
         import json
         import os
         import sys
+        import time
 
         record_path = os.environ.get("ACP_RECORD_PATH")
         runtime_session_id = os.environ.get("ACP_RUNTIME_SESSION_ID", "runtime-session-id")
@@ -336,6 +422,9 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
             else:
                 payload["result"] = result or {}
             print(json.dumps(payload), flush=True)
+
+        pending_prompt = None
+        part_path = os.environ.get("ACP_CANCEL_PART_PATH")
 
         for line in sys.stdin:
             try:
@@ -358,7 +447,24 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
                     respond(request.get("id"), error={"code": load_error_code, "message": message})
                 else:
                     respond(request.get("id"), {"sessionId": session_id})
+            elif method == "session/cancel" and part_path and pending_prompt is not None:
+                if os.environ.get("ACP_IGNORE_CANCEL"):
+                    continue
+                # Provider owns its durable terminal state; the client must let cleanup finish.
+                time.sleep(0.25)
+                terminal = {"status":"error", "end":time.time(), "output":"Tool execution aborted"}
+                with open(part_path, "w") as handle:
+                    json.dump(terminal, handle)
+                print(json.dumps({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":runtime_session_id, "update":{"sessionUpdate":"tool_call_update", "toolCallId":"cancelled-oracle", "status":"failed", "rawOutput":{"error":terminal["output"]}}}}), flush=True)
+                respond(pending_prompt, {"stopReason":"cancelled"})
+                pending_prompt = None
             elif method == "session/prompt":
+                if part_path:
+                    pending_prompt = request.get("id")
+                    with open(part_path, "w") as handle:
+                        json.dump({"status":"running", "start":time.time()}, handle)
+                    print(json.dumps({"jsonrpc":"2.0", "method":"session/update", "params":{"sessionId":runtime_session_id, "update":{"sessionUpdate":"tool_call", "toolCallId":"cancelled-oracle", "title":"ask_oracle", "status":"in_progress", "rawInput":{"message":"fixture"}}}}), flush=True)
+                    continue
                 if os.environ.get("ACP_FAIL_PROMPT"):
                     respond(request.get("id"), error={"code":-32603, "message":"real RPC failure"})
                     continue
@@ -448,7 +554,7 @@ private struct FakeACPProvider: ACPAgentProvider {
         _ payload: [String: Any],
         sessionID: String
     ) -> [NormalizedAgentRuntimeEvent] {
-        []
+        environment["ACP_CANCEL_PART_PATH"] == nil ? [] : ACPDefaultSessionUpdateNormalizer.normalize(payload, providerID: providerID)
     }
 
     func normalizeError(_ error: Error) -> Error {

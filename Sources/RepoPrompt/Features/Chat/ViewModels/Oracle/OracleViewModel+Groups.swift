@@ -25,6 +25,7 @@ struct AppOracleGroupExecutionCallbacks {
 private struct AppOracleConfiguredRosterSelection {
     let group: OracleGroupDocument?
     let singleSessionID: UUID?
+    var singleSessionModelRaw: String?
 
     static let none = AppOracleConfiguredRosterSelection(group: nil, singleSessionID: nil)
 }
@@ -186,7 +187,7 @@ extension OracleViewModel {
         case .continuation:
             false
         }
-        let startExecution = beginsNewConversation
+        var startExecution = beginsNewConversation
             ? try resolvedStartExecution ?? resolveOracleStartExecution(
                 mode: args["mode"]?.stringValue ?? "chat",
                 modelParam: args["model"]?.stringValue,
@@ -195,13 +196,41 @@ extension OracleViewModel {
                 snapshotOverride: selectionSnapshotOverride
             )
             : nil
-        let singleExecution: ResolvedOracleExecution? = if let startExecution {
-            startExecution
+        var supervision = contextBuilderSupervision
+        #if DEBUG
+            if let diagnostics = tabContext?.requestDiagnostics {
+                if diagnostics.primaryOnly || diagnostics.laneTimeout != nil {
+                    guard beginsNewConversation, let execution = startExecution else {
+                        throw ChatToolError.invalidParams("Oracle diagnostics require a fresh conversation.")
+                    }
+                    if diagnostics.primaryOnly {
+                        startExecution = try execution.primaryOnlyForDiagnostics()
+                    }
+                    if let timeout = diagnostics.laneTimeout {
+                        guard execution.roster.count > 1 else {
+                            throw ChatToolError.invalidParams("debug_lane_timeout_seconds requires a configured multi-lane roster.")
+                        }
+                        supervision = ContextBuilderOracleGroupSupervision(
+                            configuration: .init(overallTimeout: timeout, inactivityTimeout: timeout, checkInterval: min(1, timeout)),
+                            timeoutOwner: "Oracle diagnostic", timeoutCodePrefix: "oracle_diagnostic"
+                        )
+                    }
+                }
+            }
+        #endif
+        let singleExecution: ResolvedOracleExecution?
+        if let startExecution {
+            singleExecution = startExecution
         } else if let sessionID = selection.singleSessionID,
-                  let session = sessions.first(where: { $0.id == sessionID })
+                  var session = sessions.first(where: { $0.id == sessionID })
         {
-            if session.oracleExecutionAuthority == .frozen {
-                try resolveOracleConversationExecution(
+            if let modelRaw = selection.singleSessionModelRaw {
+                // Canonical member identity owns the model, including legacy projections.
+                session.preferredAIModel = modelRaw
+                if session.oracleExecutionAuthority == nil { session.selectedChatPresetID = nil }
+            }
+            if session.oracleExecutionAuthority == .frozen || selection.singleSessionModelRaw != nil {
+                singleExecution = try resolveOracleConversationExecution(
                     session: session,
                     mode: args["mode"]?.stringValue ?? "chat",
                     profile: profile,
@@ -209,7 +238,7 @@ extension OracleViewModel {
                     snapshotOverride: selectionSnapshotOverride
                 )
             } else {
-                try resolveOracleStartExecution(
+                singleExecution = try resolveOracleStartExecution(
                     mode: args["mode"]?.stringValue ?? "chat",
                     modelParam: nil,
                     profile: profile,
@@ -218,13 +247,18 @@ extension OracleViewModel {
                 )
             }
         } else {
-            nil
+            singleExecution = nil
         }
         guard (startExecution?.roster.count ?? selection.group?.roster.count ?? 1) > 1 else {
             switch singleFallback {
             case .executeSingleMCPValue:
+                var singleArgs = args
+                if selection.singleSessionModelRaw != nil {
+                    // Group member continuation is append-only; rename owns a separate group mutation.
+                    singleArgs.removeValue(forKey: "chat_name")
+                }
                 let value = try await tool_chatSend(
-                    args: args,
+                    args: singleArgs,
                     promptVM: promptVM,
                     tabContext: tabContext,
                     resolvedExecution: singleExecution,
@@ -247,7 +281,7 @@ extension OracleViewModel {
             existingGroup: selection.group,
             frozenInput: frozenInput,
             callbacks: callbacks,
-            contextBuilderSupervision: contextBuilderSupervision
+            contextBuilderSupervision: supervision
         )
         return .groupedCompletion(completion)
     }
@@ -267,26 +301,35 @@ extension OracleViewModel {
         case .start:
             return .none
         case let .continuation(chatID):
-            let group = try await store.load(
-                member: OracleMemberLookup(publicChatID: chatID),
-                owner: owner
-            )
-            guard let group else {
-                if sessions.contains(where: { Self.isOracleProjection($0, addressedBy: chatID) }) {
-                    throw ChatToolError.internalError("Canonical Oracle group was not found.")
-                }
-                let session = try await resolveSessionForExplicitContinuation(
-                    id: chatID,
-                    tabID: tabID,
-                    agentModeSessionID: tabContext?.agentModeSessionID,
-                    agentModeRunID: tabContext?.agentModeRunID
+            let aliasGroup = try await store.load(member: OracleMemberLookup(publicChatID: chatID), owner: owner)
+            if let group = aliasGroup,
+               let member = group.members.first(where: { $0.publicChatID == chatID })
+            {
+                _ = try validatedOracleProjectionIndex(
+                    member: member, group: group, workspaceID: workspaceID, tabID: tabID
                 )
-                guard session.oracleGroupID == nil else {
-                    throw ChatToolError.internalError("Canonical Oracle group was not found.")
-                }
+            }
+            let session = try await resolveSessionForExplicitContinuation(
+                id: chatID,
+                tabID: tabID,
+                agentModeSessionID: tabContext?.agentModeSessionID,
+                agentModeRunID: tabContext?.agentModeRunID
+            )
+            if aliasGroup != nil, session.oracleGroupID == nil {
+                throw ChatToolError.internalError("Oracle group projection identity conflict.")
+            }
+            guard let groupID = session.oracleGroupID else {
                 return AppOracleConfiguredRosterSelection(group: nil, singleSessionID: session.id)
             }
-            guard let member = group.members.first(where: { $0.publicChatID == chatID }) else {
+            let resolvedGroup = if let aliasGroup {
+                aliasGroup
+            } else {
+                try await store.load(groupID: OracleGroupID(rawValue: groupID), owner: owner)
+            }
+            guard let group = resolvedGroup else {
+                throw ChatToolError.internalError("Canonical Oracle group was not found.")
+            }
+            guard let member = group.members.first(where: { $0.memberID.rawValue == session.id }) else {
                 throw ChatToolError.internalError("Canonical Oracle group member was not found.")
             }
             _ = try validatedOracleProjectionIndex(
@@ -295,7 +338,11 @@ extension OracleViewModel {
                 workspaceID: workspaceID,
                 tabID: tabID
             )
-            return AppOracleConfiguredRosterSelection(group: group, singleSessionID: nil)
+            // Explicit chat IDs address one conversation. Keep its historical group and
+            // siblings unchanged; only implicit selection resumes the whole group.
+            return AppOracleConfiguredRosterSelection(
+                group: nil, singleSessionID: session.id, singleSessionModelRaw: member.model.modelID
+            )
         case .implicitContinuation:
             let candidate = resolveImplicitOracleContinuationCandidate(
                 tabID: tabID,
@@ -408,6 +455,7 @@ extension OracleViewModel {
                     startExecution: startExecution
                 )
                 if let turn = document.turns.last {
+                    await tabContext?.jobProgress?.prepared(group: document.group.id, turn: turn.id, members: document.members)
                     try await callbacks?.prepared(document.group.id, turn.id, document.members)
                     await tabContext?.toolSettlement?.prepared(document.group.id, turn.id)
                 }
@@ -429,6 +477,7 @@ extension OracleViewModel {
             progress: { [weak self] event in
                 await self?.receiveOracleGroupProgress(event, owner: owner)
                 await callbacks?.progress(event)
+                await tabContext?.jobProgress?.progress(event)
             }
         )
 
@@ -488,6 +537,7 @@ extension OracleViewModel {
             if let turn = completion.terminalDocument.turns.last {
                 tabContext?.toolSettlement?.settled(completion.result, turn.id)
             }
+            await tabContext?.jobProgress?.settled(.object(OracleGroupMCPCodec.groupFields(completion.result)))
             return completion
         } catch {
             await finishOracleGroupPresentation(invocationID: invocationID)
@@ -496,12 +546,6 @@ extension OracleViewModel {
             }
             throw error
         }
-    }
-
-    private static func isOracleProjection(_ session: ChatSession, addressedBy chatID: String) -> Bool {
-        guard session.oracleGroupID != nil else { return false }
-        return session.shortID == chatID
-            || session.id.uuidString.caseInsensitiveCompare(chatID) == .orderedSame
     }
 
     @MainActor
@@ -569,19 +613,13 @@ extension OracleViewModel {
     ) async throws {
         for member in group.members {
             let expectedName = Self.oracleProjectionName(base: group.name, laneIndex: member.laneID.index)
-            if let index = try validatedOracleProjectionIndex(
+            if try validatedOracleProjectionIndex(
                 member: member,
                 group: group,
                 workspaceID: workspaceID,
                 tabID: tabID
-            ) {
-                guard sessions[index].name != expectedName else { continue }
-                sessions[index].name = expectedName
-                let savedURL = try await autosaveSession(sessions[index])
-                if let refreshed = sessions.firstIndex(where: { $0.id == member.memberID.rawValue }) {
-                    sessions[refreshed].fileURL = savedURL
-                    sessions[refreshed].savedAt = Date()
-                }
+            ) != nil {
+                // Existing names can be user- or response-derived. Restoration is not rename.
                 continue
             }
             // The app sends from ChatSession history, not the canonical result log.

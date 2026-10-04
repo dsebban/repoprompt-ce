@@ -1351,6 +1351,20 @@ import XCTest
             }
         }
 
+        func testTicketControlsUseBoundedObservationDeadlinesWithoutChangingExplicitClientPolicies() async {
+            let session = makeUnconnectedSession()
+            for tool in ["oracle_send", "ask_oracle", "context_builder"] {
+                let poll = await session.test_resolvedToolCallTimeout(toolName: tool, arguments: ["op": .string("poll")])
+                XCTAssertEqual(poll, 30)
+                let wait = await session.test_resolvedToolCallTimeout(toolName: tool, arguments: ["op": .string("wait"), "timeout": .int(600)])
+                XCTAssertEqual(wait, 630)
+                let detached = await session.test_resolvedToolCallTimeout(toolName: tool, arguments: ["op": .string("start"), "detach": .bool(true)])
+                XCTAssertEqual(detached, 30)
+                let explicit = await session.test_resolvedToolCallTimeout(.seconds(90), toolName: tool, arguments: ["op": .string("poll")])
+                XCTAssertEqual(explicit, 90)
+            }
+        }
+
         func testOracleSendDefaultDeadlineDoesNotAbandonPaidLanes() async {
             let session = makeUnconnectedSession()
             let defaultTimeout = await session.test_resolvedToolCallTimeout(toolName: "oracle_send")

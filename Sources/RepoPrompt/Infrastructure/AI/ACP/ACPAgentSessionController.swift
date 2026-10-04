@@ -9,10 +9,12 @@ actor ACPAgentSessionController {
     struct RequestTimeouts {
         let bootstrapSeconds: TimeInterval
         let operationalSeconds: TimeInterval
+        let cancellationSettlementSeconds: TimeInterval
 
-        init(bootstrapSeconds: TimeInterval, operationalSeconds: TimeInterval = 30) {
+        init(bootstrapSeconds: TimeInterval, operationalSeconds: TimeInterval = 30, cancellationSettlementSeconds: TimeInterval = 15) {
             self.bootstrapSeconds = bootstrapSeconds
             self.operationalSeconds = operationalSeconds
+            self.cancellationSettlementSeconds = cancellationSettlementSeconds
         }
 
         static let `default` = RequestTimeouts(
@@ -1554,14 +1556,19 @@ actor ACPAgentSessionController {
         }
     }
 
-    func cancelPrompt() async {
-        guard sessionID != nil else { return }
+    @discardableResult
+    func cancelPrompt() async -> Bool {
+        guard sessionID != nil else { return false }
+        let sent: Bool
         do {
             try sendSessionCancelNotification()
+            sent = true
         } catch {
             log("ACP cancel send failed: \(error.localizedDescription)")
+            sent = false
         }
         cancelPendingPermissionRequestsLocally()
+        return sent
     }
 
     #if DEBUG
@@ -1745,7 +1752,20 @@ actor ACPAgentSessionController {
         promptImagesSupported = false
         log("Shutting down ACP controller")
 
-        await cancelPrompt()
+        if await cancelPrompt(), let turnID = activePromptTurnID {
+            // session/cancel is a notification, not an acknowledgement. Keep readers and
+            // the process alive until the provider settles its prompt and persists terminal
+            // tool parts. Drain once, only at teardown and after a successful cancel write.
+            // A stopped run's cancellation must not abort this bounded transport drain.
+            let drain = Task { [self] in
+                do {
+                    try await waitForPromptSettlement(turnID: turnID, timeoutSeconds: requestTimeouts.cancellationSettlementSeconds)
+                } catch {
+                    log("ACP cancellation settlement drain failed: \(error.localizedDescription)")
+                }
+            }
+            await drain.value
+        }
         failAllPromptSettlementWaiters(with: ControllerError.transportClosed)
         failPendingRequests(with: ControllerError.transportClosed)
 
