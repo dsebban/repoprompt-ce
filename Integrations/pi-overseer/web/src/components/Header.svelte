@@ -14,7 +14,8 @@
 <style>
   header {
     display: flex; align-items: center; gap: 10px;
-    padding: calc(10px + env(safe-area-inset-top)) 16px 10px;
+    padding: calc(10px + var(--sat)) var(--gutter-r) 10px var(--gutter-l);
+    min-height: calc(52px + var(--sat));
     border-bottom: 1px solid var(--line); background: var(--bg);
   }
   strong { margin-right: auto; font-size: 17px; }

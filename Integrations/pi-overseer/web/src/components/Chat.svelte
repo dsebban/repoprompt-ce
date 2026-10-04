@@ -84,7 +84,7 @@
 </form>
 
 <style>
-  .log { padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .log { padding: 12px var(--gutter-r) 12px var(--gutter-l); display: flex; flex-direction: column; gap: 8px; }
   .empty { text-align: center; margin: auto; max-width: 260px; }
   .bubble {
     max-width: 88%; padding: 8px 12px; border-radius: var(--radius); background: var(--card);
@@ -94,9 +94,9 @@
   .bubble.live { white-space: pre-wrap; }
   .note { align-self: center; font-size: 12px; color: var(--muted); text-align: center; max-width: 95%; }
   .note.error { color: var(--bad); }
-  .chips { display: flex; gap: 6px; overflow-x: auto; padding: 8px 16px 0; scrollbar-width: none; }
+  .chips { display: flex; gap: 6px; overflow-x: auto; padding: 8px var(--gutter-r) 0 var(--gutter-l); scrollbar-width: none; flex: none; }
   .chips::-webkit-scrollbar { display: none; }
-  form { display: flex; gap: 8px; padding: 8px 16px; align-items: flex-end; }
-  textarea { flex: 1; resize: none; border: 1px solid var(--line); border-radius: 18px; padding: 9px 14px; background: var(--card); max-height: 140px; }
-  form .btn { padding: 9px 14px; border-radius: 18px; }
+  form { display: flex; gap: 8px; padding: 8px var(--gutter-r) 8px var(--gutter-l); align-items: flex-end; flex: none; }
+  textarea { flex: 1; resize: none; border: 1px solid var(--line); border-radius: 22px; padding: 10px 16px; min-height: var(--tap); background: var(--card); max-height: 140px; }
+  form .btn { border-radius: 22px; }
 </style>

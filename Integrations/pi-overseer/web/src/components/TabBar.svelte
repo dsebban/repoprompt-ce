@@ -28,9 +28,10 @@
   nav {
     display: grid; grid-template-columns: repeat(4, 1fr);
     border-top: 1px solid var(--line); background: var(--bg);
-    padding-bottom: env(safe-area-inset-bottom);
+    padding: 0 var(--sar) var(--sab) var(--sal);
   }
-  button { position: relative; border: 0; background: none; padding: 8px 0 6px; display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 11px; }
+  :global(.keyboard-open) nav { display: none; }
+  button { position: relative; border: 0; background: none; min-height: 49px; padding: 6px 0 4px; display: flex; flex-direction: column; align-items: center; gap: 2px; color: var(--muted); font-size: 11px; }
   button.active { color: var(--accent); }
   svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
   b { position: absolute; top: 4px; left: calc(50% + 6px); background: var(--bad); color: #fff; font-size: 10px; border-radius: 999px; padding: 0 5px; }

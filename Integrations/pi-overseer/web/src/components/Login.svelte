@@ -18,9 +18,9 @@
 </form>
 
 <style>
-  form { margin: auto; width: min(100%, 420px); padding: 24px 16px; display: flex; flex-direction: column; gap: 12px; align-items: stretch; text-align: center; }
+  form { margin: auto; width: min(100%, 420px); padding: calc(24px + var(--sat)) var(--gutter-r) calc(24px + var(--sab)) var(--gutter-l); display: flex; flex-direction: column; gap: 12px; align-items: stretch; text-align: center; }
   img { align-self: center; border-radius: 16px; }
   h1 { margin: 0; font-size: 24px; }
   p { margin: 0; }
-  button { padding: 12px; }
+  button { min-height: 50px; }
 </style>

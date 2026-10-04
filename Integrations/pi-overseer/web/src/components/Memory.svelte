@@ -74,7 +74,7 @@
 </div>
 
 <style>
-  .body { padding: 12px 16px 16px; display: flex; flex-direction: column; gap: 20px; }
+  .body { padding: 12px var(--gutter-r) 16px var(--gutter-l); display: flex; flex-direction: column; gap: 20px; }
   h3 { margin: 0 0 8px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
   p { margin: 0; }
   ul { list-style: none; margin: 0; padding: 0; }
@@ -84,6 +84,7 @@
   .memories { margin-top: 8px; }
   .memories li { display: flex; gap: 8px; align-items: flex-start; padding: 10px 0; border-bottom: 1px solid var(--line); }
   .memories li > div { flex: 1; min-width: 0; }
+  .memories .btn { min-width: var(--tap); padding: 0; }
   .memories p { font-size: 14px; color: var(--muted); overflow-wrap: anywhere; }
   .tag { font-size: 11px; text-transform: uppercase; color: var(--accent); margin-right: 6px; }
   .error { color: var(--bad); }

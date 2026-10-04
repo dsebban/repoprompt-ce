@@ -74,11 +74,11 @@
 {/if}
 
 <style>
-  .bar { display: flex; gap: 6px; padding: 10px 16px; overflow-x: auto; }
+  .bar { display: flex; gap: 6px; padding: 10px var(--gutter-r) 10px var(--gutter-l); overflow-x: auto; flex: none; }
   .refresh { margin-left: auto; min-width: 40px; }
-  ul { list-style: none; margin: 0; padding: 0 16px 16px; }
+  ul { list-style: none; margin: 0; padding: 0 var(--gutter-r) 16px var(--gutter-l); }
   li + li { border-top: 1px solid var(--line); }
-  li button { width: 100%; display: flex; align-items: center; gap: 12px; padding: 12px 2px; border: 0; background: none; text-align: left; }
+  li button { width: 100%; display: flex; align-items: center; gap: 12px; min-height: 60px; padding: 10px 2px; border: 0; background: none; text-align: left; }
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
   .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
   .sub, .time { font-size: 13px; }

@@ -38,6 +38,17 @@ The direct screens skip the model, so they respond in roughly one network round-
 
 The app reconnects its socket and resyncs whenever it comes back to the foreground, because phones suspend background sockets. Assistant Markdown goes through a small renderer that escapes everything first, so transcript text can't inject HTML.
 
+### iPhone (built for iPhone Air)
+
+Open the URL in Safari, then **Share → Add to Home Screen**. On iOS 26 it then runs as its own app. The token is stored separately from Safari's, so you enter it once more inside the installed app.
+
+- **Layout:** sized for the iPhone Air's 420×912 pt screen in portrait and landscape. Insets clear the home indicator and the Dynamic Island side, and the status bar stays legible in light and dark.
+- **Keyboard:** the app follows Safari's visual viewport, so the composer stays above the keyboard and the tab bar hides while you type.
+- **Touch:** tap targets are at least 44 pt, inputs are at least 16 px so Safari never zooms on focus, and buttons have no long-press callouts.
+- **Icons:** PNG home-screen icons (iOS ignores SVG). Regenerate them with `node scripts/make-icons.mjs` after editing `public/icon.svg`.
+- **Resume:** the app resyncs when iOS resumes it (`visibilitychange` and `pageshow`).
+- **Notifications:** come through the ntfy iOS app.
+
 ## How it uses the overseer feature
 
 RepoPrompt only lets an **Agent session** be an overseer. `agent_session_link` requires an Agent-origin caller, and links are granted by the user in the app. An external MCP client like this bridge can't hold links itself, and it shouldn't. So Pi Overseer works in two tiers:
@@ -123,14 +134,14 @@ cd web    && npm run verify      # full-stack browser verification (below)
 
 For UI work, run `npm run dev` in `worker/` (wrangler on :8787) and `npm run dev` in `web/` (Vite with hot reload, proxying `/api` and `/phone` to wrangler).
 
-**Full-stack verification:** `web/test/verify-ui.mjs` boots `wrangler dev` with fresh state and the keyless faux model, plus the real bridge and the fake RepoPrompt MCP server. It then drives the built app in headless Chromium at iPhone 14 size, in light and dark mode:
+**Full-stack verification:** `web/test/verify-ui.mjs` boots `wrangler dev` with fresh state and the keyless faux model, plus the real bridge and the fake RepoPrompt MCP server. It then drives the built app in headless Chromium at iPhone Air size (420 pt wide, 3×, iOS 26 Safari user agent) in portrait light, portrait dark and landscape, with the safe-area insets simulated:
 - login
 - all 14 agent tools through chat
 - the Sessions filter, a one-tap approval, steer and log
 - switching workspaces
 - memory search
 
-It asserts that every `/api/rp` call and every MCP call reaching RepoPrompt succeeded, that the bridge refused nothing, that there were no console errors, and that overseer digests and needs-input events reached the activity log. Screenshots go to `web/test/screenshots/`. If Playwright's bundled browser isn't installed, set `CHROMIUM_PATH`.
+On every screen it checks for horizontal overflow, 44 pt tap targets, inputs of 16 px or more and clear safe areas, and it runs a simulated-keyboard layout check. It also asserts that every `/api/rp` call and every MCP call reaching RepoPrompt succeeded, that the bridge refused nothing, that there were no console errors, and that overseer digests and needs-input events reached the activity log. Screenshots go to `web/test/screenshots/`. If Playwright's bundled browser isn't installed, set `CHROMIUM_PATH`. This is Chromium emulating the device, not WebKit, so do a final check on a real iPhone.
 
 The bridge e2e test runs the real bridge between a fake cloud socket and a fake RepoPrompt MCP server (`bridge/test/fake-rp-server.ts`). It covers call relay, `_windowID` routing, policy refusal, overseer-turn digests, and needs-input events. The worker tests cover transcript repair and resume, compaction boundaries, and the memory SQL (through a `node:sqlite` shim).
 

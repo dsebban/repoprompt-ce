@@ -12,8 +12,14 @@
   onMount(() => {
     void app.start().catch(() => {});
     const onVisibility = () => document.visibilityState === "visible" && app.onVisible();
+    // iOS restores a suspended home-screen app from the back/forward cache: pageshow, not load.
+    const onPageShow = (e: PageTransitionEvent) => e.persisted && app.onVisible();
     document.addEventListener("visibilitychange", onVisibility);
-    return () => document.removeEventListener("visibilitychange", onVisibility);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("pageshow", onPageShow);
+    };
   });
 </script>
 

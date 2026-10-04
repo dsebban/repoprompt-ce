@@ -69,8 +69,8 @@
 </div>
 
 <style>
-  .bar { display: flex; align-items: center; justify-content: space-between; padding: 10px 16px; }
-  ul { list-style: none; margin: 0; padding: 0 16px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; padding: 10px var(--gutter-r) 10px var(--gutter-l); flex: none; }
+  ul { list-style: none; margin: 0; padding: 0 var(--gutter-r) 0 var(--gutter-l); }
   li { display: flex; align-items: center; gap: 12px; padding: 12px 2px; }
   li + li { border-top: 1px solid var(--line); }
   .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -79,6 +79,6 @@
   .sub { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .msg { padding: 24px 16px; text-align: center; margin: 0; }
   .error { color: var(--bad); }
-  .raw { margin: 0 16px; white-space: pre-wrap; }
+  .raw { margin: 0 var(--gutter-r) 0 var(--gutter-l); white-space: pre-wrap; }
   .foot { padding: 16px; display: flex; justify-content: center; }
 </style>

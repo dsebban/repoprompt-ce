@@ -9,7 +9,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { chromium, devices } from "playwright";
+import { chromium } from "playwright";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, "../..");
@@ -21,6 +21,52 @@ const OVERSEER = "11111111-1111-1111-1111-111111111111";
 const tmp = mkdtempSync(path.join(os.tmpdir(), "pi-overseer-verify-"));
 const rpLog = path.join(tmp, "rp-calls.jsonl");
 const children = [];
+
+// iPhone Air: 420×912pt at 3×. As a home-screen web app (status bar style "default") the
+// page starts below the status bar, so ~850pt tall with the 34pt home-indicator inset.
+// Insets are approximate; Chromium has no safe areas, so they are injected (see below).
+const IOS_UA =
+  "Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1";
+const PROFILES = [
+  { id: "air", label: "iPhone Air, portrait, light (full flow)", scheme: "light", full: true,
+    viewport: { width: 420, height: 850 }, insets: { sat: 0, sab: 34, sal: 0, sar: 0 } },
+  { id: "air-dark", label: "iPhone Air, portrait, dark", scheme: "dark", full: false,
+    viewport: { width: 420, height: 850 }, insets: { sat: 0, sab: 34, sal: 0, sar: 0 } },
+  { id: "air-landscape", label: "iPhone Air, landscape (Dynamic Island side)", scheme: "light", full: false,
+    viewport: { width: 912, height: 420 }, insets: { sat: 0, sab: 21, sal: 62, sar: 62 } },
+];
+
+/** Problems an iPhone user would hit on the current screen. */
+async function layoutIssues(page, profile) {
+  return page.evaluate((insets) => {
+    const issues = [];
+    const vw = innerWidth;
+    if (document.scrollingElement.scrollWidth > vw + 1) issues.push("page scrolls horizontally");
+    for (const el of document.querySelectorAll(".scroll")) {
+      if (el.scrollWidth > el.clientWidth + 1) issues.push("content wider than its scroll area");
+    }
+    for (const b of document.querySelectorAll("button")) {
+      const r = b.getBoundingClientRect();
+      if (r.width && r.height && r.height < 44) issues.push(`tap target ${Math.round(r.height)}pt: ${b.textContent.trim() || b.getAttribute("aria-label")}`);
+    }
+    for (const i of document.querySelectorAll("input, textarea")) {
+      if (parseFloat(getComputedStyle(i).fontSize) < 16) issues.push(`input under 16px zooms on focus: ${i.placeholder}`);
+    }
+    for (const el of document.querySelectorAll("header, nav, form")) {
+      const r = el.getBoundingClientRect();
+      if (r.width && (r.bottom > innerHeight + 1 || r.right > vw + 1 || r.left < -1)) issues.push(`${el.tagName.toLowerCase()} off screen`);
+    }
+    const nav = document.querySelector("nav");
+    if (nav) {
+      const cs = getComputedStyle(nav);
+      if (Math.abs(parseFloat(cs.paddingBottom) - insets.sab) > 1) issues.push("tab bar does not clear the home indicator");
+      if (Math.abs(parseFloat(cs.paddingLeft) - insets.sal) > 1) issues.push("tab bar does not clear the left inset");
+    }
+    const header = document.querySelector("header");
+    if (header && parseFloat(getComputedStyle(header).paddingLeft) < 16 + insets.sal - 1) issues.push("header under the left inset");
+    return issues;
+  }, profile.insets);
+}
 const failures = [];
 
 function check(ok, what) {
@@ -97,6 +143,15 @@ async function main() {
   });
   check(refused.status === 403, "direct call refuses workspace delete before it reaches the Mac");
 
+  console.log("Home-screen install (iOS)");
+  const touchIcon = await fetch(`${BASE}/apple-touch-icon.png`);
+  check(touchIcon.ok && touchIcon.headers.get("content-type") === "image/png", "apple-touch-icon.png served as PNG (iOS ignores SVG)");
+  const manifest = await (await fetch(`${BASE}/manifest.webmanifest`)).json();
+  const pngSizes = manifest.icons.filter((i) => i.type === "image/png").map((i) => i.sizes);
+  check(manifest.display === "standalone" && pngSizes.includes("192x192") && pngSizes.includes("512x512"), "manifest: standalone with 192/512 PNG icons");
+  const html = await (await fetch(BASE)).text();
+  check(/viewport-fit=cover/.test(html) && /apple-mobile-web-app-status-bar-style" content="default"/.test(html), "viewport-fit=cover and a legible status bar style");
+
   const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
   const shots = [];
   let currentPage = null;
@@ -107,10 +162,32 @@ async function main() {
     shots.push(file);
   }
 
-  for (const scheme of ["light", "dark"]) {
-    console.log(`UI (${scheme})`);
-    const context = await browser.newContext({ ...devices["iPhone 14"], colorScheme: scheme });
+  for (const profile of PROFILES) {
+    const { scheme, full } = profile;
+    console.log(`UI: ${profile.label}`);
+    const context = await browser.newContext({
+      viewport: profile.viewport,
+      screen: profile.viewport,
+      deviceScaleFactor: 3,
+      isMobile: true,
+      hasTouch: true,
+      userAgent: IOS_UA,
+      colorScheme: scheme,
+    });
+    // Chromium has no safe areas; feed the app iPhone Air insets through its CSS vars.
+    await context.addInitScript((insets) => {
+      document.addEventListener("DOMContentLoaded", () => {
+        const style = document.createElement("style");
+        style.textContent = `:root{--sat:${insets.sat}px!important;--sab:${insets.sab}px!important;--sal:${insets.sal}px!important;--sar:${insets.sar}px!important}`;
+        document.head.appendChild(style);
+      });
+    }, profile.insets);
     const page = await context.newPage();
+    const layout = new Map();
+    const inspect = async (screen) => {
+      for (const issue of await layoutIssues(page, profile)) layout.set(`${screen}: ${issue}`, true);
+      layout.set(`__screens:${screen}`, false);
+    };
     currentPage = page;
     globalThis.__page = page;
     const consoleErrors = [];
@@ -124,9 +201,10 @@ async function main() {
     });
 
     await page.goto(BASE);
-    if (scheme === "light") {
+    if (profile.id === "air") {
       await page.getByPlaceholder("Phone token").waitFor();
-      await shoot(page, "01-login");
+      await inspect("login");
+      await shoot(page, "air-01-login");
     }
     if (await page.getByPlaceholder("Phone token").isVisible().catch(() => false)) {
       await page.getByPlaceholder("Phone token").fill("pt");
@@ -143,7 +221,7 @@ async function main() {
       await page.waitForFunction((n) => document.querySelectorAll(".bubble:not(.user)").length > 0 && document.querySelectorAll(".bubble").length >= n + 2, before);
       await page.waitForFunction(() => !document.querySelector(".working"));
     };
-    if (scheme === "light") {
+    if (full) {
       const toolPrompts = [
         `/tool overseer_setup {"adopt_session_id":"${OVERSEER}"}`,
         `/tool rp_workspaces {"action":"list"}`,
@@ -166,20 +244,43 @@ async function main() {
       await send("What's running and what's waiting on me?");
       check(await page.locator(".bubble", { hasText: "faux: What's running" }).count() === 1, "plain prompt streams a reply");
     }
-    await shoot(page, `02-chat-${scheme}`);
+    await inspect("chat");
+    await shoot(page, `${profile.id}-02-chat`);
+    if (full) {
+      // Chromium can't raise an iOS keyboard; reproduce what main.ts does when the
+      // visual viewport shrinks to ~576pt (keyboard up) and check the composer stays usable.
+      const kb = await page.evaluate(() => {
+        const root = document.documentElement;
+        const visible = innerHeight - 336;
+        root.style.setProperty("--vv-height", `${visible}px`);
+        root.classList.add("keyboard-open");
+        const composer = document.querySelector("form textarea").getBoundingClientRect();
+        const nav = document.querySelector("nav");
+        return { composerBottom: composer.bottom, visible, navHidden: !nav || getComputedStyle(nav).display === "none" };
+      });
+      check(kb.composerBottom <= kb.visible && kb.navHidden, "keyboard up (simulated): composer stays above it, tab bar hides");
+      await shoot(page, `${profile.id}-08-keyboard`);
+      await page.evaluate(() => {
+        const root = document.documentElement;
+        root.classList.remove("keyboard-open");
+        root.style.setProperty("--vv-height", `${visualViewport.height}px`);
+      });
+    }
 
     // --- Sessions: list, approve, steer, log ----------------------------------
     await page.getByRole("button", { name: "Sessions" }).click();
     await page.getByText("Lane B").first().waitFor();
-    await shoot(page, `03-sessions-${scheme}`);
-    if (scheme === "light") {
+    await inspect("sessions");
+    await shoot(page, `${profile.id}-03-sessions`);
+    if (full) {
       await page.getByRole("button", { name: "Needs me" }).click();
       await page.waitForTimeout(400);
       check((await page.locator("li").count()) === 1, "'Needs me' filter shows only the waiting session");
       await page.getByText("Lane B").click();
       await page.getByText("Needs your input").waitFor();
       check(await page.getByRole("button", { name: "Allow" }).isVisible(), "approval options rendered from the interaction");
-      await shoot(page, "04-approval");
+      await inspect("approval");
+      await shoot(page, `${profile.id}-04-approval`);
       await page.getByRole("button", { name: "Allow" }).click();
       await page.getByText("running", { exact: false }).first().waitFor();
       check(!(await page.getByText("Needs your input").isVisible()), "approval answered; session running");
@@ -188,31 +289,39 @@ async function main() {
       await page.waitForTimeout(500);
       await page.getByRole("button", { name: "Read log" }).click();
       await page.locator("pre.log").waitFor();
-      await shoot(page, "05-session-running");
+      await inspect("session detail");
+      await shoot(page, `${profile.id}-05-session-running`);
       await page.getByRole("button", { name: "‹ Sessions" }).click();
     }
 
     // --- Workspaces -----------------------------------------------------------
     await page.getByRole("button", { name: "Workspaces" }).click();
     await page.locator(".name", { hasText: "pi-durable-rp" }).waitFor();
-    if (scheme === "light") {
+    if (full) {
       await page.getByRole("button", { name: "Open" }).click();
       await page.waitForTimeout(500);
       check(!(await page.locator(".error").count()), "switching workspace succeeded");
     }
-    await shoot(page, `06-workspaces-${scheme}`);
+    await inspect("workspaces");
+    await shoot(page, `${profile.id}-06-workspaces`);
 
     // --- Memory ---------------------------------------------------------------
     await page.getByRole("button", { name: "Memory" }).click();
     await page.locator(".memories", { hasText: "Main Swift app" }).waitFor();
-    if (scheme === "light") {
+    if (full) {
       await page.getByPlaceholder("Search memory…").fill("terse");
       await page.waitForTimeout(500);
       check((await page.locator(".memories li").count()) === 1, "memory search filters");
       await page.getByPlaceholder("Search memory…").fill("");
       await page.waitForTimeout(500);
     }
-    await shoot(page, `07-memory-${scheme}`);
+    await inspect("memory");
+    await shoot(page, `${profile.id}-07-memory`);
+
+    const screens = [...layout.keys()].filter((k) => k.startsWith("__screens:")).length;
+    const issues = [...layout.keys()].filter((k) => !k.startsWith("__screens:"));
+    check(issues.length === 0,
+      `layout on ${screens} screens: no horizontal overflow, ≥44pt tap targets, ≥16px inputs, safe areas clear${issues.length ? `\n      ${issues.join("\n      ")}` : ""}`);
 
     check(directCalls.length > 0 && directCalls.every((c) => c.status === 200 && !c.isError),
       `${directCalls.length} direct /api/rp calls from the UI all succeeded`);

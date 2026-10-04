@@ -125,8 +125,8 @@
 </div>
 
 <style>
-  .top { display: flex; justify-content: space-between; padding: 10px 16px; }
-  .body { padding: 0 16px 16px; display: flex; flex-direction: column; gap: 12px; }
+  .top { display: flex; justify-content: space-between; padding: 10px var(--gutter-r) 10px var(--gutter-l); flex: none; }
+  .body { padding: 0 var(--gutter-r) 16px var(--gutter-l); display: flex; flex-direction: column; gap: 12px; }
   h2 { margin: 4px 0 0; font-size: 20px; overflow-wrap: anywhere; }
   h3 { margin: 0 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
   .status { margin: 0; display: flex; align-items: center; gap: 8px; color: var(--muted); }
