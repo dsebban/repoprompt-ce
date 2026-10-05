@@ -8,6 +8,114 @@ import XCTest
 #if DEBUG
     @MainActor
     final class ContextBuilderGroupedSupervisionTests: XCTestCase {
+        func testCancelledAdmissionReleasesBuilderControlForNextRoutedRun() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                let jobs = WindowStatesManager.shared.longRunningJobs
+                let context = try await driver.resolve()
+                let connection = try await driver.connectInvokingAgent(context)
+                let admitted = XCTestExpectation(description: "builder ticket registered before worker entry")
+                let gate = driver.fixture.makeGate()
+                var jobID: UUID?
+                jobs.admissionDidRegister = { id in
+                    jobID = id
+                    admitted.fulfill()
+                    await gate.wait()
+                }
+                defer {
+                    jobs.admissionDidRegister = nil
+                    gate.release()
+                }
+                var startError: Error?
+                let starting = driver.fixture.startOwnedTask {
+                    do {
+                        _ = try await connection.client.callTool(name: "context_builder", arguments: [
+                            "op": .string("start"), "detach": .bool(true),
+                            "instructions": .string("Cancelled before discovery"), "_rawJSON": .bool(true)
+                        ])
+                    } catch { startError = error }
+                }
+                try await harness.wait(admitted)
+                let id = try XCTUnwrap(jobID)
+                jobs.cancel(id: id)
+                jobs.admissionDidRegister = nil
+                gate.release()
+                await starting.value
+                if let startError { throw startError }
+                let cancelled = await jobs.store.wait(id: id, timeout: 5)
+                XCTAssertEqual(cancelled?.status, .cancelled)
+                XCTAssertEqual(driver.constructed, 0)
+
+                // Exercise the real preparation/token acquisition again, not just the job's busy slot.
+                driver.streamBody = { runID in
+                    let child = try await driver.connectChild(runID: runID)
+                    try await driver.discover(using: child)
+                }
+                let next = try await connection.client.callTool(name: "context_builder", arguments: [
+                    "op": .string("start"), "timeout": .int(5),
+                    "instructions": .string("Discovery after abandoned admission"), "_rawJSON": .bool(true)
+                ])
+                let text = next.content.compactMap { content -> String? in
+                    if case let .text(text, _, _) = content { return text }
+                    return nil
+                }.joined(separator: "\n")
+                XCTAssertNotEqual(next.isError, true, text)
+                if next.isError != true {
+                    let fields = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+                    XCTAssertEqual((fields["job"] as? [String: Any])?["status"] as? String, "completed", text)
+                }
+                XCTAssertEqual(driver.constructed, 1)
+                XCTAssertEqual(driver.streamStarts, 1)
+            }
+        }
+
+        func testOwningRunCancellationDuringAdmissionPreventsRoutedDiscovery() async throws {
+            try await withHarness(routed: true) { harness in
+                let driver = harness.driver
+                let jobs = WindowStatesManager.shared.longRunningJobs
+                let context = try await driver.resolve()
+                let connection = try await driver.connectInvokingAgent(context)
+                let runID = try XCTUnwrap(context.frozenTabContext.runID)
+                let admitted = XCTestExpectation(description: "owning run has admitting ticket")
+                let gate = driver.fixture.makeGate()
+                var jobID: UUID?
+                jobs.admissionDidRegister = { id in
+                    jobID = id
+                    admitted.fulfill()
+                    await gate.wait()
+                }
+                defer {
+                    jobs.admissionDidRegister = nil
+                    gate.release()
+                }
+                driver.streamBody = { runID in
+                    let child = try await driver.connectChild(runID: runID)
+                    try await driver.discover(using: child)
+                }
+                var startError: Error?
+                let starting = driver.fixture.startOwnedTask {
+                    do {
+                        _ = try await connection.client.callTool(name: "context_builder", arguments: [
+                            "op": .string("start"), "detach": .bool(true),
+                            "instructions": .string("Must not outlive cancelled owner"), "_rawJSON": .bool(true)
+                        ])
+                    } catch { startError = error }
+                }
+                try await harness.wait(admitted)
+                let id = try XCTUnwrap(jobID)
+                XCTAssertGreaterThan(driver.window.mcpServer.cancelActiveToolsForRun(runID: runID, reason: "admission regression"), 0)
+                jobs.admissionDidRegister = nil
+                gate.release()
+                await starting.value
+                if let startError { throw startError }
+                let terminal = await jobs.store.wait(id: id, timeout: 5)
+                XCTAssertEqual(terminal?.status, .cancelled)
+                XCTAssertEqual(driver.constructed, 0)
+                XCTAssertEqual(driver.streamStarts, 0)
+                XCTAssertFalse(driver.window.mcpServer.hasActiveToolExecutions(runID: runID))
+            }
+        }
+
         func testTicketCLIExplicitContextSelectorSupportsControlsWithoutWeakeningOwnership() async throws {
             try await withHarness(routed: true) { harness in
                 let driver = harness.driver

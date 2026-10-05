@@ -476,16 +476,10 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         guard case let .start(detach, timeout) = operation else {
             return try await performContextBuilderRun(prepared, dependencies: dependencies).toMCPValue()
         }
-        let snapshot: MCPLongRunningJobCenter.Snapshot
-        do {
-            snapshot = try await dependencies.jobs.start(tool: MCPWindowToolName.contextBuilder, owner: prepared.owner, register: { id, cancel in
-                dependencies.registerJob(id, prepared.owner.runID, cancel)
-            }, unregister: dependencies.unregisterJob) { progress in
-                try await performContextBuilderRun(prepared, dependencies: dependencies, jobProgress: progress).toMCPValue()
-            }
-        } catch {
-            prepared.abandon()
-            throw error
+        let snapshot = try await dependencies.jobs.start(tool: MCPWindowToolName.contextBuilder, owner: prepared.owner, register: { id, cancel in
+            dependencies.registerJob(id, prepared.owner.runID, cancel)
+        }, unregister: dependencies.unregisterJob, onNotStarted: { prepared.abandon() }) { progress in
+            try await performContextBuilderRun(prepared, dependencies: dependencies, jobProgress: progress).toMCPValue()
         }
         if detach { return snapshot.value() }
         return await dependencies.jobs.store.wait(id: snapshot.id, timeout: timeout)?.value() ?? MCPLongRunningJobCenter.expired(id: snapshot.id)

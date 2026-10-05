@@ -32,30 +32,52 @@ final class MCPLongRunningJobCenter {
         self.store = store
     }
 
-    func start(tool: String, owner: Owner, register: (UUID, @escaping () -> Void) -> Void = { _, _ in }, unregister: @escaping (UUID) -> Void = { _ in }, body: @escaping Body) async throws -> Snapshot {
+    func start(tool: String, owner: Owner, register: (UUID, @escaping () -> Void) -> Void = { _, _ in }, unregister: @escaping (UUID) -> Void = { _ in }, onNotStarted: @escaping @MainActor () -> Void = {}, body: @escaping Body) async throws -> Snapshot {
+        let id = UUID()
+        var handedOff = false
+        var registered = false
+        var cleanupPending = true
+        func abandonPreparation() {
+            guard cleanupPending else { return }
+            cleanupPending = false
+            onNotStarted()
+        }
+        defer {
+            admitting.removeValue(forKey: id)
+            if !handedOff {
+                abandonPreparation()
+                if registered { unregister(id) }
+            }
+        }
         guard !closingWindows.contains(owner.windowID) else { throw MCPError.invalidRequest("Window is closing") }
         try Task.checkCancellation()
-        let id = UUID()
         // Registration can publish the ticket before this actor installs its worker.
         // Keep cancellation intent through that handoff, including owner teardown.
         admitting[id] = Admission(owner: owner)
-        defer { admitting.removeValue(forKey: id) }
+        // Run cancellation must see admission too; connection cancellation intentionally does not.
+        register(id) { [weak self] in self?.cancel(id: id) }
+        registered = true
         let snapshot = try await store.register(id: id, tool: tool, owner: owner)
         #if DEBUG
             await admissionDidRegister?(id)
         #endif
         if admitting[id]?.cancelled == true {
+            abandonPreparation()
             await store.finish(id: id, error: "Cancelled during admission", cancelled: true)
             return await store.snapshot(id: id) ?? snapshot
         }
         guard !closingWindows.contains(owner.windowID) else {
+            abandonPreparation()
             await store.finish(id: id, error: "Window closed during admission", cancelled: true)
             throw MCPError.invalidRequest("Window is closing")
         }
         // No request-owned await between ownership commit and launching this unstructured task.
         let progress = MCPLongRunningJobProgress(id: id, store: store)
         let task = Task { [self] in
+            var enteredBody = false
             do {
+                try Task.checkCancellation()
+                enteredBody = true
                 let result = try await body(progress)
                 await progress.settled(result)
                 let fields = result.objectValue ?? [:]
@@ -68,13 +90,14 @@ final class MCPLongRunningJobCenter {
                 unregister(id)
                 await store.finish(id: id, result: result, cancelled: cancelled)
             } catch {
+                if !enteredBody { onNotStarted() }
                 workers.removeValue(forKey: id)
                 unregister(id)
                 await store.finish(id: id, error: String(error.localizedDescription.prefix(2000)), cancelled: Task.isCancelled || error is CancellationError)
             }
         }
+        handedOff = true
         workers[id] = Worker(owner: owner, task: task)
-        register(id) { [weak self] in self?.cancel(id: id) }
         return snapshot
     }
 
