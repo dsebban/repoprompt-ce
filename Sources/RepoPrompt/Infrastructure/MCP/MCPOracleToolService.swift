@@ -41,6 +41,7 @@ struct MCPOracleToolService {
     let rawExplicitTabID: (_ args: [String: Value]) -> String?
     let sendStageProgress: (_ connectionID: UUID?, _ tool: String, _ stage: String, _ message: String) async -> Void
     let withHeartbeat: (_ connectionID: UUID?, _ tool: String, _ stage: String, _ message: String, _ operation: @escaping ChatSendOperation) async throws -> [String: Value]
+    let resolveStartExecution: @MainActor (String, String?, UUID?) throws -> ResolvedOracleExecution
     let sendChat: SendChat
     let exportOracleResponse: ExportOracleResponse
     var jobCenter: MCPLongRunningJobCenter = WindowStatesManager.shared.longRunningJobs
@@ -300,6 +301,9 @@ struct MCPOracleToolService {
 
         let capturedChatArgs = chatArgs
         if case let .start(detach, timeout) = operation {
+            if isStartRoute {
+                tabContext.resolvedStartExecution = try resolveStartExecution(modeRaw, modelOverride, tabContext.workspaceID)
+            }
             let jobOwner = MCPLongRunningJobCenter.Owner(windowID: targetWindow.windowID, workspaceID: tabContext.workspaceID, tabID: tabID, sessionID: ticketPurpose == .agentModeRun ? virtualContext?.activeAgentSessionID : nil, runID: ticketPurpose == .agentModeRun ? virtualContext?.runID : nil)
             let snapshot = try await jobCenter.start(tool: askOracleToolName, owner: jobOwner, register: { id, cancel in
                 registerJobExecution(id, jobOwner.runID, askOracleToolName, cancel)
@@ -390,9 +394,10 @@ struct MCPOracleToolService {
             throw MCPError.invalidParams("Ticket admission requires the active Agent session/run context")
         }
         var capturedArgs = executionArgs
+        var implicitSessionID: UUID?
         if case .implicitContinuation = route {
             if let candidate = oracleVM.resolveImplicitOracleContinuationCandidate(tabID: context.tabID, activateInUI: false, agentModeSessionID: purpose == .agentModeRun ? context.activeAgentSessionID : nil, agentModeRunID: purpose == .agentModeRun ? context.runID : nil) {
-                capturedArgs["chat_id"] = .string(candidate.shortID)
+                implicitSessionID = candidate.id
             } else {
                 capturedArgs["new_chat"] = .bool(true)
             }
@@ -403,12 +408,16 @@ struct MCPOracleToolService {
             AgentOracleOwner(agentSessionID: nil, runID: nil, worktreeBindingState: .notApplicable)
         }
         let mode = executionArgs["mode"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "chat"
-        let sendContext = try await oracleSendTabContext(
+        var sendContext = try await oracleSendTabContext(
             from: context,
             owner: resolvedOwner,
             origin: .oracleSend,
             mode: mode
         )
+        sendContext.implicitContinuationSessionID = implicitSessionID
+        if capturedArgs["new_chat"]?.boolValue == true {
+            sendContext.resolvedStartExecution = try resolveStartExecution(mode, capturedArgs["model"]?.stringValue, sendContext.workspaceID)
+        }
         let exportDestination: OracleExportDestination? = if try parseExportResponseFlag(executionArgs) {
             try MCPServerViewModel.makeOracleExportDestination(
                 workspace: window.workspaceManager.workspaces.first(where: { $0.id == sendContext.workspaceID }),
@@ -417,7 +426,7 @@ struct MCPOracleToolService {
                 lookupContext: sendContext.packaging.lookupContext ?? .visibleWorkspace
             )
         } else { nil }
-        let prepared = PreparedOracleSend(context: sendContext, window: window, purpose: purpose, exportDestination: exportDestination)
+        let prepared = PreparedOracleSend(context: sendContext, exportDestination: exportDestination)
         let owner = MCPLongRunningJobCenter.Owner(windowID: window.windowID, workspaceID: context.workspaceID, tabID: context.tabID, sessionID: purpose == .agentModeRun ? context.activeAgentSessionID : nil, runID: purpose == .agentModeRun ? context.runID : nil)
         let frozenArgs = capturedArgs
         let snapshot = try await jobCenter.start(tool: oracleSendToolName, owner: owner, register: { id, cancel in
@@ -432,8 +441,6 @@ struct MCPOracleToolService {
 
     private struct PreparedOracleSend {
         let context: OracleViewModel.OracleSendTabContext
-        let window: WindowState
-        let purpose: MCPRunPurpose
         let exportDestination: OracleExportDestination?
     }
 
@@ -492,16 +499,12 @@ struct MCPOracleToolService {
         }
 
         let connectionID = prepared == nil ? invocationContext.connectionID : nil
-        let runPurpose: MCPRunPurpose = if let prepared {
-            prepared.purpose
-        } else if let connectionID {
+        let runPurpose: MCPRunPurpose = if let connectionID {
             await liveRunPurpose(connectionID)
         } else {
             .unknown
         }
-        let targetWindow: WindowState? = if let prepared {
-            prepared.window
-        } else if exportResponse || runPurpose == .agentModeRun {
+        let targetWindow: WindowState? = if prepared == nil, exportResponse || runPurpose == .agentModeRun {
             try requireTargetWindow()
         } else {
             nil

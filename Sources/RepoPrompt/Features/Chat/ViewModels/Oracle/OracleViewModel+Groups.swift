@@ -188,7 +188,7 @@ extension OracleViewModel {
             false
         }
         var startExecution = beginsNewConversation
-            ? try resolvedStartExecution ?? resolveOracleStartExecution(
+            ? try resolvedStartExecution ?? tabContext?.resolvedStartExecution ?? resolveOracleStartExecution(
                 mode: args["mode"]?.stringValue ?? "chat",
                 modelParam: args["model"]?.stringValue,
                 profile: profile,
@@ -344,12 +344,31 @@ extension OracleViewModel {
                 group: nil, singleSessionID: session.id, singleSessionModelRaw: member.model.modelID
             )
         case .implicitContinuation:
-            let candidate = resolveImplicitOracleContinuationCandidate(
-                tabID: tabID,
-                activateInUI: shouldActivateOracleSendSession(tabContext: tabContext, promptVM: promptVM),
-                agentModeSessionID: tabContext?.agentModeSessionID,
-                agentModeRunID: tabContext?.agentModeRunID
-            )
+            let candidate: ChatSession?
+            if let capturedID = tabContext?.implicitContinuationSessionID {
+                // Resolve the captured identity with the existing owner checks, but retain
+                // implicit selection's whole-group semantics. Never fall back to current UI.
+                do {
+                    candidate = try await resolveSessionForExplicitContinuation(
+                        id: capturedID.uuidString,
+                        tabID: tabID,
+                        agentModeSessionID: tabContext?.agentModeSessionID,
+                        agentModeRunID: tabContext?.agentModeRunID
+                    )
+                } catch let error as ChatToolError where error.code == .invalidParams {
+                    // The caller never supplied this ID; report the captured selection instead.
+                    throw ChatToolError.invalidParams(
+                        "The Oracle chat selected when this ticket was admitted is no longer available. Pass chat_id or new_chat=true."
+                    )
+                }
+            } else {
+                candidate = resolveImplicitOracleContinuationCandidate(
+                    tabID: tabID,
+                    activateInUI: shouldActivateOracleSendSession(tabContext: tabContext, promptVM: promptVM),
+                    agentModeSessionID: tabContext?.agentModeSessionID,
+                    agentModeRunID: tabContext?.agentModeRunID
+                )
+            }
             guard let candidate else { return .none }
             if let rawGroupID = candidate.oracleGroupID {
                 guard let group = try await store.load(

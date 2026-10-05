@@ -908,6 +908,21 @@ import XCTest
                     guard contextAvailable() else { throw OracleBoundaryTestStop.afterRoute }
                     return try await operation()
                 },
+                resolveStartExecution: { mode, model, _ in
+                    let snapshot = OracleSelectionSnapshot(
+                        origin: .mcp,
+                        agentModelsProfile: .init(planningModelRaw: AIModel.gpt54Mini.rawValue),
+                        modelPresets: [], modelPresetsExposed: false, modelPresetsTemporarilyDisabled: false,
+                        chatPresets: [ChatPreset.BuiltIn.chat, ChatPreset.BuiltIn.plan, ChatPreset.BuiltIn.review],
+                        defaultChatPresets: [.chat: ChatPreset.BuiltIn.chat, .plan: ChatPreset.BuiltIn.plan, .review: ChatPreset.BuiltIn.review]
+                    )
+                    return try OracleExecutionResolver(
+                        resolveModel: AIModel.fromModelName, isModelAvailable: { _ in true },
+                        capturePromptConfiguration: { preset, mode in
+                            try window.promptManager.captureOraclePromptConfiguration(chatPreset: preset, mode: mode)
+                        }
+                    ).resolve(choice: model.map(OracleStartChoice.oracleSend) ?? .automatic, mode: mode, snapshot: snapshot)
+                },
                 sendChat: { args, _, tabContext in
                     sendRecorder.record(args)
                     sendRecorder.progressContexts.append(tabContext?.jobProgress != nil)
