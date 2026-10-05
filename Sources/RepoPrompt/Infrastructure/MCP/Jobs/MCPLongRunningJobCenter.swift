@@ -16,7 +16,16 @@ final class MCPLongRunningJobCenter {
         let task: Task<Void, Never>
     }
 
+    private struct Admission {
+        let owner: Owner
+        var cancelled = false
+    }
+
+    private var admitting: [UUID: Admission] = [:]
     private var workers: [UUID: Worker] = [:]
+    #if DEBUG
+        var admissionDidRegister: ((UUID) async -> Void)?
+    #endif
     private var closingWindows: Set<Int> = []
 
     init(store: DomainLongRunningJobStore = DomainLongRunningJobStore()) {
@@ -27,7 +36,18 @@ final class MCPLongRunningJobCenter {
         guard !closingWindows.contains(owner.windowID) else { throw MCPError.invalidRequest("Window is closing") }
         try Task.checkCancellation()
         let id = UUID()
+        // Registration can publish the ticket before this actor installs its worker.
+        // Keep cancellation intent through that handoff, including owner teardown.
+        admitting[id] = Admission(owner: owner)
+        defer { admitting.removeValue(forKey: id) }
         let snapshot = try await store.register(id: id, tool: tool, owner: owner)
+        #if DEBUG
+            await admissionDidRegister?(id)
+        #endif
+        if admitting[id]?.cancelled == true {
+            await store.finish(id: id, error: "Cancelled during admission", cancelled: true)
+            return await store.snapshot(id: id) ?? snapshot
+        }
         guard !closingWindows.contains(owner.windowID) else {
             await store.finish(id: id, error: "Window closed during admission", cancelled: true)
             throw MCPError.invalidRequest("Window is closing")
@@ -59,12 +79,16 @@ final class MCPLongRunningJobCenter {
     }
 
     func cancel(id: UUID) {
+        if admitting[id] != nil { admitting[id]?.cancelled = true }
         guard let worker = workers[id] else { return }
         worker.task.cancel()
         Task { await store.cancelling(id: id) }
     }
 
     func cancel(where predicate: (Owner) -> Bool) {
+        for (id, admission) in admitting where predicate(admission.owner) {
+            cancel(id: id)
+        }
         for (id, worker) in workers where predicate(worker.owner) {
             cancel(id: id)
         }

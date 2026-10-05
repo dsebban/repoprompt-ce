@@ -332,6 +332,126 @@ import XCTest
             XCTAssertTrue(fixture.sendRecorder.calls.isEmpty)
         }
 
+        func testTicketCancellationDuringAdmissionNeverExecutesBody() async throws {
+            for cancelByOwner in [false, true] {
+                let center = MCPLongRunningJobCenter()
+                let owner = DomainLongRunningJobStore.Owner(windowID: 1, workspaceID: UUID(), tabID: UUID(), sessionID: nil, runID: nil)
+                let admitted = expectation(description: "ticket registered before worker installation")
+                let gate = AsyncStream<Void>.makeStream()
+                var ticketID: UUID?
+                var executed = false
+                center.admissionDidRegister = { id in
+                    ticketID = id
+                    admitted.fulfill()
+                    for await _ in gate.stream {
+                        break
+                    }
+                }
+                let start = Task {
+                    try await center.start(tool: "oracle_send", owner: owner) { _ in
+                        executed = true
+                        return .object(["response": .string("must not run")])
+                    }
+                }
+                await fulfillment(of: [admitted], timeout: 2)
+                let id = try XCTUnwrap(ticketID)
+                if cancelByOwner {
+                    center.cancel { $0 == owner }
+                } else {
+                    let acknowledgement = try await center.control(operation: .cancel(id), tool: "oracle_send", authorize: { _ in })
+                    XCTAssertEqual(acknowledgement.objectValue?["job"]?.objectValue?["status"], .string("cancelling"))
+                }
+                gate.continuation.yield(())
+                gate.continuation.finish()
+                _ = try await start.value
+                let terminal = await center.store.wait(id: id, timeout: 5)
+                XCTAssertEqual(terminal?.status, .cancelled)
+                XCTAssertFalse(executed)
+                // Admission cancellation must release the context's busy slot.
+                try await center.store.checkAdmission(owner: owner)
+            }
+        }
+
+        func testOracleSendPreparesInputsBeforeTicketAdmission() async throws {
+            var prepared = false
+            var preparations = 0
+            var exported = false
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("frozen-export-\(UUID())")
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fixture = makeOracleSendFixture(stopAfterRoute: false, exportOperation: { request in
+                XCTAssertEqual(request.destination?.primaryRootPath, root.path)
+                exported = true
+                return OracleExportFile(path: "/tmp/frozen-export.md", instruction: "read fixture")
+            }, sendOperation: { _, _, context in
+                XCTAssertTrue(prepared)
+                XCTAssertEqual(preparations, 1)
+                XCTAssertNotNil(context?.jobProgress)
+                return ["chat_id": .string("frozen-chat"), "response": .string("answer")]
+            }, stabilizeContext: { context in
+                preparations += 1
+                prepared = true
+                return context
+            })
+            defer {
+                fixture.service.jobCenter.admissionDidRegister = nil
+                fixture.cleanup()
+            }
+            await fixture.window.workspaceManager.awaitInitialized()
+            let workspace = try WorkspaceModel(id: XCTUnwrap(fixture.context.workspaceID), name: "Frozen export destination", repoPaths: [root.path], ephemeralFlag: true)
+            fixture.window.workspaceManager.workspaces = [workspace]
+            fixture.window.workspaceManager.activeWorkspace = workspace
+            fixture.service.jobCenter.admissionDidRegister = { _ in
+                XCTAssertTrue(prepared, "Packaging must finish before a ticket becomes observable")
+                // A post-admission workspace change must not redirect or invalidate export.
+                fixture.window.workspaceManager.workspaces = []
+                fixture.window.workspaceManager.activeWorkspace = nil
+            }
+            let start = try await fixture.service.executeOracleSend(args: ["op": .string("start"), "detach": .bool(true), "new_chat": .bool(true), "mode": .string("review"), "message": .string("review admission inputs"), "export_response": .bool(true)], invocationContext: fixture.invocationContext)
+            XCTAssertTrue(prepared)
+            let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue.flatMap(UUID.init(uuidString:)))
+            let terminal = await fixture.service.jobCenter.store.wait(id: id, timeout: 5)
+            XCTAssertEqual(terminal?.status, .completed)
+            XCTAssertEqual(preparations, 1)
+            XCTAssertTrue(exported)
+            XCTAssertEqual(terminal?.result?.objectValue?["oracle_export_path"], .string("/tmp/frozen-export.md"))
+        }
+
+        func testSingleOracleTicketRetainsSettledResponseWhenExportIsCancelled() async throws {
+            for ask in [false, true] {
+                let exporting = expectation(description: "single reply settled and export entered")
+                let root = FileManager.default.temporaryDirectory.appendingPathComponent("single-cancel-export-\(UUID())")
+                try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+                defer { try? FileManager.default.removeItem(at: root) }
+                let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), exportOperation: { _ in
+                    exporting.fulfill()
+                    try await Task.sleep(for: .seconds(60))
+                    throw CancellationError()
+                }, settledReply: ["chat_id": .string("single-completed"), "response": .string("  retained answer\n")])
+                defer { fixture.cleanup() }
+                await fixture.window.workspaceManager.awaitInitialized()
+                let workspace = try WorkspaceModel(id: XCTUnwrap(fixture.context.workspaceID), name: "Single export cancellation", repoPaths: [root.path], ephemeralFlag: true)
+                fixture.window.workspaceManager.workspaces = [workspace]
+                fixture.window.workspaceManager.activeWorkspace = workspace
+                let args: [String: Value] = ["op": .string("start"), "detach": .bool(true), "new_chat": .bool(true), "message": .string("fixture"), "export_response": .bool(true)]
+                let start = if ask {
+                    try await fixture.service.executeAskOracle(args: args, invocationContext: fixture.invocationContext)
+                } else {
+                    try await fixture.service.executeOracleSend(args: args, invocationContext: fixture.invocationContext)
+                }
+                let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue.flatMap(UUID.init(uuidString:)))
+                await fulfillment(of: [exporting], timeout: 2)
+                fixture.service.jobCenter.cancel(id: id)
+                let terminal = await fixture.service.jobCenter.store.wait(id: id, timeout: 5)
+                XCTAssertEqual(terminal?.status, .cancelled)
+                XCTAssertEqual(terminal?.result?.objectValue?["response"], .string("  retained answer\n"))
+                XCTAssertEqual(terminal?.result?.objectValue?["chat_id"], .string("single-completed"))
+                XCTAssertNotNil(terminal?.result?.objectValue?["oracle_export_error"])
+                XCTAssertNil(terminal?.result?.objectValue?["oracle_export_path"])
+                XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
+            }
+        }
+
         func testOracleSendTicketExecutesOnceAndPollingDoesNotRebindOrSend() async throws {
             let fixture = makeOracleSendFixture(stopAfterRoute: false)
             defer { fixture.cleanup() }
@@ -735,7 +855,8 @@ import XCTest
             exportOperation: MCPOracleToolService.ExportOracleResponse? = nil,
             settledReply: [String: Value]? = nil,
             sendOperation: MCPOracleToolService.SendChat? = nil,
-            contextAvailable: @escaping @MainActor () -> Bool = { true }
+            contextAvailable: @escaping @MainActor () -> Bool = { true },
+            stabilizeContext: @escaping MCPOracleToolService.StabilizedVirtualContext = { $0 }
         ) -> OracleSendBoundaryFixture {
             let previousAutoStart = GlobalSettingsStore.shared.mcpAutoStart()
             GlobalSettingsStore.shared.setMCPAutoStart(false, commit: false)
@@ -776,7 +897,7 @@ import XCTest
                     if stopAfterRoute || !contextAvailable() { throw OracleBoundaryTestStop.afterRoute }
                     return snapshot
                 },
-                stabilizedVirtualContext: { $0 },
+                stabilizedVirtualContext: stabilizeContext,
                 resolveDelegatedReviewPackaging: { _, _, _, _ in nil },
                 rebindChatSessionIfNeeded: { _, chatID in recorder.record(chatID) },
                 resolveTabIDForAgentMode: { _, _ in snapshot.tabID },

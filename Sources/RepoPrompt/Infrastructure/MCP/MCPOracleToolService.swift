@@ -315,7 +315,7 @@ struct MCPOracleToolService {
                         sourceTool: askOracleToolName, mode: modeRaw, message: message,
                         chatID: result["chat_id"]?.stringValue ?? continuationChatID,
                         response: result["response"]?.stringValue, groupResult: groupResult, destination: exportDestination
-                    ))
+                    ), ticketBacked: true)
                 }
                 return .object(result)
             }
@@ -397,7 +397,27 @@ struct MCPOracleToolService {
                 capturedArgs["new_chat"] = .bool(true)
             }
         }
-        let prepared = PreparedOracleSend(context: context, window: window, purpose: purpose)
+        let resolvedOwner = if purpose == .agentModeRun {
+            await resolveAgentOracleOwner(tabID: context.tabID, targetWindow: window, tabContext: context)
+        } else {
+            AgentOracleOwner(agentSessionID: nil, runID: nil, worktreeBindingState: .notApplicable)
+        }
+        let mode = executionArgs["mode"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "chat"
+        let sendContext = try await oracleSendTabContext(
+            from: context,
+            owner: resolvedOwner,
+            origin: .oracleSend,
+            mode: mode
+        )
+        let exportDestination: OracleExportDestination? = if try parseExportResponseFlag(executionArgs) {
+            try MCPServerViewModel.makeOracleExportDestination(
+                workspace: window.workspaceManager.workspaces.first(where: { $0.id == sendContext.workspaceID }),
+                windowID: window.windowID,
+                tabID: sendContext.tabID,
+                lookupContext: sendContext.packaging.lookupContext ?? .visibleWorkspace
+            )
+        } else { nil }
+        let prepared = PreparedOracleSend(context: sendContext, window: window, purpose: purpose, exportDestination: exportDestination)
         let owner = MCPLongRunningJobCenter.Owner(windowID: window.windowID, workspaceID: context.workspaceID, tabID: context.tabID, sessionID: purpose == .agentModeRun ? context.activeAgentSessionID : nil, runID: purpose == .agentModeRun ? context.runID : nil)
         let frozenArgs = capturedArgs
         let snapshot = try await jobCenter.start(tool: oracleSendToolName, owner: owner, register: { id, cancel in
@@ -411,9 +431,10 @@ struct MCPOracleToolService {
     }
 
     private struct PreparedOracleSend {
-        let context: TabContextSnapshot
+        let context: OracleViewModel.OracleSendTabContext
         let window: WindowState
         let purpose: MCPRunPurpose
+        let exportDestination: OracleExportDestination?
     }
 
     private func authorizeJob(_ owner: MCPLongRunningJobCenter.Owner, tool: String, invocationContext: ToolInvocationContext) async throws {
@@ -493,21 +514,25 @@ struct MCPOracleToolService {
             try rebindChatSessionIfNeeded(metadata, continuationChatID)
         }
 
-        let context: TabContextSnapshot = if let prepared { prepared.context } else { try await requireCurrentTabContext(oracleSendToolName) }
-        if runPurpose == .agentModeRun, let targetWindow {
-            let owner = await resolveAgentOracleOwner(tabID: context.tabID, targetWindow: targetWindow, tabContext: context)
-            tabContext = try await oracleSendTabContext(
-                from: context,
-                owner: owner,
-                origin: .oracleSend,
-                mode: modeRaw
-            )
+        if let prepared {
+            tabContext = prepared.context
         } else {
-            tabContext = try await oracleSendTabContext(
-                from: context,
-                origin: .oracleSend,
-                mode: modeRaw
-            )
+            let context = try await requireCurrentTabContext(oracleSendToolName)
+            if runPurpose == .agentModeRun, let targetWindow {
+                let owner = await resolveAgentOracleOwner(tabID: context.tabID, targetWindow: targetWindow, tabContext: context)
+                tabContext = try await oracleSendTabContext(
+                    from: context,
+                    owner: owner,
+                    origin: .oracleSend,
+                    mode: modeRaw
+                )
+            } else {
+                tabContext = try await oracleSendTabContext(
+                    from: context,
+                    origin: .oracleSend,
+                    mode: modeRaw
+                )
+            }
         }
 
         if prepared == nil, runPurpose == .agentModeRun, let targetWindow, let invocationID = metadata.invocationID {
@@ -517,9 +542,11 @@ struct MCPOracleToolService {
         #if DEBUG
             tabContext.requestDiagnostics = diagnostics
         #endif
-        let exportDestination: OracleExportDestination? = if exportResponse, let targetWindow {
+        let exportDestination: OracleExportDestination? = if let prepared {
+            prepared.exportDestination
+        } else if exportResponse, let targetWindow {
             try MCPServerViewModel.makeOracleExportDestination(
-                workspace: prepared.map { target in target.window.workspaceManager.workspaces.first(where: { $0.id == target.context.workspaceID }) } ?? targetWindow.workspaceManager.activeWorkspace,
+                workspace: targetWindow.workspaceManager.activeWorkspace,
                 windowID: targetWindow.windowID,
                 tabID: tabContext.tabID,
                 lookupContext: tabContext.packaging.lookupContext ?? .visibleWorkspace
@@ -565,7 +592,7 @@ struct MCPOracleToolService {
                 response: result["response"]?.stringValue,
                 groupResult: groupResult,
                 destination: exportDestination
-            ))
+            ), ticketBacked: prepared != nil)
         }
 
         await sendStageProgress(connectionID, oracleSendToolName, "complete", "Oracle complete")
@@ -575,15 +602,15 @@ struct MCPOracleToolService {
     // MARK: - Shared helpers
 
     /// Optional export failures must not discard an already-settled Oracle response.
-    /// Non-group cancellation retains its request-owned cancellation contract.
+    /// Blocking non-group cancellation retains its request-owned cancellation contract.
     func exportSettledOracleResponse(
-        _ reply: [String: Value], request: OracleExportRequest
+        _ reply: [String: Value], request: OracleExportRequest, ticketBacked: Bool = false
     ) async throws -> [String: Value] {
         var result = reply
         let cancellationNotice = Value.string(
-            "Oracle export cancelled; output may remain. Recover the settled result using the returned lane chat IDs."
+            "Oracle export cancelled; output may remain. Recover the settled result using the returned chat IDs."
         )
-        if Task.isCancelled, request.groupResult != nil {
+        if Task.isCancelled, ticketBacked || request.groupResult != nil {
             result["oracle_export_error"] = cancellationNotice
             return result
         }
@@ -592,7 +619,7 @@ struct MCPOracleToolService {
             result["oracle_export_path"] = .string(export.path)
             result["oracle_export_instruction"] = .string(export.instruction)
         } catch is CancellationError {
-            guard request.groupResult != nil else { throw CancellationError() }
+            guard ticketBacked || request.groupResult != nil else { throw CancellationError() }
             result["oracle_export_error"] = cancellationNotice
         } catch {
             // Export may have written output before failing. Keep response truth and
