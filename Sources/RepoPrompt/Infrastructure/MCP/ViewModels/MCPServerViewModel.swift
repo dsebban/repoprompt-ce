@@ -727,6 +727,9 @@ final class MCPServerViewModel: ObservableObject {
                     operation: operation
                 )
             },
+            resolveStartExecution: { [self] mode, model, workspaceID in
+                try oracleVM.resolveMCPFollowUpExecution(mode: mode, modelParam: model, workspaceID: workspaceID)
+            },
             sendChat: { [self] args, promptVM, tabContext in
                 #if DEBUG
                     if let override = oracleChatSendOverrideForTesting {

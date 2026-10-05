@@ -122,6 +122,10 @@ extension OracleViewModel {
         let activationPolicy: OracleSendActivationPolicy
         let packaging: OracleSendPackagingContext
         let transientImages: [AITransientImage]
+        /// Ticket-only capture: preserve implicit group intent without injecting a public chat_id.
+        var implicitContinuationSessionID: UUID?
+        /// Fresh ticket authority is resolved before admission, not from later mutable settings.
+        var resolvedStartExecution: ResolvedOracleExecution?
         var jobProgress: MCPLongRunningJobProgress?
         var toolSettlement: OracleToolSettlementCallbacks?
         #if DEBUG
