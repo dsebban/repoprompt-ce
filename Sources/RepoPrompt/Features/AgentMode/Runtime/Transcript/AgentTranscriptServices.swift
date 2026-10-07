@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import OSLog
+import RepoPromptDomainRuntime
 import RepoPromptInstrumentation
 
 enum AgentConversationReplayMode: String, Equatable {
@@ -1606,6 +1607,9 @@ enum AgentTranscriptToolNormalizer {
                 let nativeStatus = AgentTranscriptToolStatusSemantics.normalizedStatusWord(stringValue(resultObject, keys: ["status", "result", "outcome", "state"]))
                 return nativeStatus == "cancelled" ? .cancelled : .failed
             }
+            if let nativeStatus = settledNativeObservationStatus(for: item) {
+                return nativeStatus
+            }
             if normalizedToolName == "context_builder" {
                 // The existing transcript status owns the effective operation outcome,
                 // even when optional lane detail cannot fit the persisted summary.
@@ -1657,6 +1661,62 @@ enum AgentTranscriptToolNormalizer {
             return toolIsError ? .failed : .success
         }
         return .unknown
+    }
+
+    /// Returned native facts settle the control observation, not the app-owned job.
+    /// Provider lifecycle annotations and run termination must not erase that observation.
+    static func settledNativeObservationStatus(for item: AgentChatItem) -> AgentTranscriptToolStatus? {
+        guard item.kind == .toolResult, let raw = item.toolResultJSON else { return nil }
+        switch normalizedToolName(item.toolName) {
+        case "ask_oracle", "oracle_send":
+            if let data = ToolResultDTOs.ChatSendDTO.nativeOracleReplyJSONData(from: raw) {
+                if let group = try? JSONDecoder().decode(OracleGroupResult.self, from: data) {
+                    switch group.status {
+                    case .completed: return .success
+                    case .partialFailure: return .warning
+                    case .failed: return .failed
+                    }
+                }
+                guard let reply = try? JSONDecoder().decode(ToolResultDTOs.ChatSendDTO.self, from: data) else { return nil }
+                if item.toolIsError == true || !(reply.errors ?? []).isEmpty { return .failed }
+                let outcome = AgentTranscriptToolStatusSemantics.transcriptStatus(
+                    fromNormalizedStatusWord: AgentTranscriptToolStatusSemantics.normalizedStatusWord(reply.status)
+                )
+                // Bounded native summaries retain terminal outcome, not provider call liveness.
+                switch outcome {
+                case .pending, .running, .unknown: return .success
+                default: return outcome
+                }
+            }
+            guard ToolResultDTOs.LongRunningJobTicketDTO.nativeJSONData(from: raw) != nil else { return nil }
+            // Returning a control snapshot settles the observation, not its job status.
+            return item.toolIsError == true ? .failed : .success
+        case "context_builder":
+            guard let data = ToolResultDTOs.LongRunningJobTicketDTO.nativeJSONData(from: raw),
+                  let dto = try? JSONDecoder().decode(ToolResultDTOs.ContextBuilderDTO.self, from: data),
+                  dto.ticket != nil
+            else { return nil }
+            let outcome = AgentTranscriptToolStatusSemantics.transcriptStatus(
+                fromNormalizedStatusWord: AgentTranscriptToolStatusSemantics.normalizedStatusWord(dto.status)
+            )
+            if item.toolIsError == true { return outcome == .cancelled ? .cancelled : .failed }
+            if outcome == .success,
+               let branch = ContextBuilderFollowUpBranch.select(responseType: dto.responseType),
+               let reply = branch == .plan ? dto.plan : dto.review, (reply.oracleCount ?? 0) > 1
+            {
+                switch reply.status {
+                case "partial_failure": return .warning
+                case "failed": return .failed
+                default: break
+                }
+            }
+            switch outcome {
+            case .pending, .running, .unknown: return .success
+            default: return outcome
+            }
+        default:
+            return nil
+        }
     }
 
     static func isSummaryOnly(raw: String?) -> Bool {
@@ -2727,7 +2787,9 @@ enum AgentTranscriptIO {
                 finalizedCount += 1
                 consecutiveNonToolItems = 0
             case .toolResult:
-                guard runningToolResultStatusWord(from: items[index].toolResultJSON) != nil else {
+                guard runningToolResultStatusWord(from: items[index].toolResultJSON) != nil,
+                      AgentTranscriptToolNormalizer.settledNativeObservationStatus(for: items[index]) == nil
+                else {
                     consecutiveNonToolItems = 0
                     continue
                 }

@@ -68,8 +68,7 @@ enum AgentOracleToolRouting {
 struct ContextBuilderCardContext {
     let tabID: UUID?
     let contextBuilderAgentVM: ContextBuilderAgentViewModel
-    let activeContextBuilderCallItemID: UUID?
-    let activeContextBuilderResultItemID: UUID?
+    let transcriptMetadata: ContextBuilderTranscriptMetadata
     let oracleOpenContext: AgentOracleOpenContext?
     let showRunScopedToolCancel: Bool
     let cancelActiveToolsAction: (() -> Void)?
@@ -77,16 +76,14 @@ struct ContextBuilderCardContext {
     init(
         tabID: UUID?,
         contextBuilderAgentVM: ContextBuilderAgentViewModel,
-        activeContextBuilderCallItemID: UUID?,
-        activeContextBuilderResultItemID: UUID?,
         oracleOpenContext: AgentOracleOpenContext?,
         showRunScopedToolCancel: Bool = false,
-        cancelActiveToolsAction: (() -> Void)? = nil
+        cancelActiveToolsAction: (() -> Void)? = nil,
+        transcriptMetadata: ContextBuilderTranscriptMetadata = .init()
     ) {
         self.tabID = tabID
         self.contextBuilderAgentVM = contextBuilderAgentVM
-        self.activeContextBuilderCallItemID = activeContextBuilderCallItemID
-        self.activeContextBuilderResultItemID = activeContextBuilderResultItemID
+        self.transcriptMetadata = transcriptMetadata
         self.oracleOpenContext = oracleOpenContext
         self.showRunScopedToolCancel = showRunScopedToolCancel
         self.cancelActiveToolsAction = cancelActiveToolsAction

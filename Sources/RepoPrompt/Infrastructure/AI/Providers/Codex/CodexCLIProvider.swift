@@ -373,6 +373,11 @@ final class CodexCLIProvider: AIProvider {
             } catch is CancellationError {
                 throw CancellationError()
             } catch let failure as StreamAttemptFailure {
+                if case let CodexAppServerClient.ClientError.requestFailed(requestFailure) = failure.underlying,
+                   requestFailure.isInputTooLarge
+                {
+                    throw AIProviderError.apiError(source: failure.underlying)
+                }
                 let detail = appServerErrorDetail(from: failure.underlying)
 
                 if failure.emittedOutput,
@@ -431,6 +436,11 @@ final class CodexCLIProvider: AIProvider {
 
                 throw mapAppServerFailure(error: failure.underlying, detail: detail, timeoutValue: defaultRequestTimeout)
             } catch {
+                if case let CodexAppServerClient.ClientError.requestFailed(requestFailure) = error,
+                   requestFailure.isInputTooLarge
+                {
+                    throw AIProviderError.apiError(source: error)
+                }
                 let detail = appServerErrorDetail(from: error)
                 if !didRetryManagedAuthRecovery,
                    CodexManagedAuthRecoveryClassifier.isRecoverable(message: detail)
@@ -1157,6 +1167,11 @@ final class CodexCLIProvider: AIProvider {
         }
         if lower.contains("overload") || lower.contains("overloaded") || lower.contains("busy") || lower.contains("503") {
             return AIProviderError.invalidConfiguration(detail: "Codex servers look overloaded. We attempted retries; please try again shortly.")
+        }
+        // Keep method/code/data on the existing typed failure, without copying arbitrary data
+        // into user-facing text or a second NSError representation.
+        if case CodexAppServerClient.ClientError.requestFailed = error {
+            return AIProviderError.apiError(source: error)
         }
         if detail.isEmpty {
             return AIProviderError.apiError(source: error)

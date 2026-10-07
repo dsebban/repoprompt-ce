@@ -316,6 +316,8 @@ actor ACPAgentSessionController {
     private var pendingPermissionRequests: [String: PendingPermissionRequest] = [:]
     private var recentDevinToolCalls: [String: [String: Any]] = [:]
     private var recentDevinToolCallIDs: [String] = []
+    /// Request-local display identity only; never permission/authorization evidence.
+    private var promptToolNames: [String: String] = [:]
     private var activePromptTurnID: UUID?
     private var activePromptOpenCodeStderrError: String?
     #if DEBUG
@@ -808,6 +810,7 @@ actor ACPAgentSessionController {
         suppressSessionLoadReplayUpdates = false
         recentDevinToolCalls.removeAll()
         recentDevinToolCallIDs.removeAll()
+        promptToolNames.removeAll()
         let promptTurnID = UUID()
         activePromptTurnID = promptTurnID
         resetActivePromptTrace()
@@ -2015,7 +2018,10 @@ actor ACPAgentSessionController {
             )
         #endif
         guard let update = params["update"] as? [String: Any] else { return }
-        let sessionID = (params["sessionId"] as? String) ?? sessionID ?? ""
+        let updateSessionID = params["sessionId"] as? String
+        // Late updates for another session must not enter either semantic output or activity.
+        if let updateSessionID, let sessionID, updateSessionID != sessionID { return }
+        let sessionID = updateSessionID ?? sessionID ?? ""
         #if DEBUG
             captureRawACPEvent(
                 kind: "session.update.raw",
@@ -2083,7 +2089,54 @@ actor ACPAgentSessionController {
             }
         }
 
-        let normalizedEvents = provider.normalizeSessionUpdate(update, sessionID: sessionID)
+        let isActiveRequest = activePromptTurnID != nil && updateSessionID == self.sessionID && !sessionID.isEmpty
+        let updateKind = (update["sessionUpdate"] as? String)?.lowercased()
+        let toolCallID = (update["toolCallId"] as? String).flatMap { raw in
+            raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : raw
+        }
+        let knownToolName = toolCallID.flatMap { promptToolNames[$0] }
+        var normalizationPayload = update
+        let normalizedEvents: [NormalizedAgentRuntimeEvent]
+        if isActiveRequest, provider.providerID == .cursor, updateKind == "tool_call_update", let knownToolName {
+            if ["tool", "other"].contains(ACPRuntimeEventParsing.normalizedToolName(from: update).lowercased()) {
+                normalizationPayload["toolName"] = knownToolName
+            }
+            // A meaningful initial call established this request-local ID, even if its
+            // display name remained generic. Attribution is not a wire payload flag.
+            normalizedEvents = CursorACPEventNormalizer.normalize(
+                normalizationPayload, toolUpdateAdmission: .establishedInActiveRequest
+            )
+        } else {
+            normalizedEvents = provider.normalizeSessionUpdate(normalizationPayload, sessionID: sessionID)
+        }
+        // Only accepted, attributed request events certify nonsemantic progress. Session-load
+        // replay was excluded above; unknown updates and local timers never reach this seam.
+        if isActiveRequest {
+            let hasToolEvent = normalizedEvents.contains { event in
+                guard case let .stream(result) = event else { return false }
+                return result.type == "tool_call" || result.type == "tool_result"
+            }
+            if updateKind == "tool_call", let toolCallID, !toolCallID.isEmpty, hasToolEvent {
+                promptToolNames[toolCallID] = normalizedEvents.compactMap { event in
+                    if case let .stream(result) = event { return result.toolName }
+                    return nil
+                }.first
+            }
+            let isToolActivity = hasToolEvent && toolCallID?.isEmpty == false && (updateKind == "tool_call" || knownToolName != nil)
+            let isUsageActivity = updateKind == "usage_update" && normalizedEvents.contains { event in
+                if case let .stream(result) = event { return result.type == "usage" }
+                return false
+            }
+            if isToolActivity || isUsageActivity {
+                emit(.stream(AIStreamResult(type: AIStreamResult.transportActivityType, text: nil)))
+            }
+            if updateKind == "tool_call_update", let toolCallID,
+               let status = (update["status"] as? String)?.lowercased(),
+               ["completed", "failed", "cancelled"].contains(status)
+            {
+                promptToolNames.removeValue(forKey: toolCallID)
+            }
+        }
         #if DEBUG
             captureNormalizedACPEvents(normalizedEvents, sessionID: sessionID, sourceUpdate: update)
         #endif

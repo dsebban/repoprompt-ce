@@ -271,6 +271,11 @@ extension OracleViewModel {
                 )
             }
         }
+        // One ticket lifetime owns every lane and its wrapper, including background lanes
+        // whose context intentionally carries no UI/progress authority. Ordinary policy stays interactive.
+        if supervision == nil, tabContext?.jobProgress != nil {
+            supervision = ContextBuilderOracleGroupSupervision(configuration: nil)
+        }
         let completion = try await tool_chatSendGroupCompletion(
             args: args,
             promptVM: promptVM,

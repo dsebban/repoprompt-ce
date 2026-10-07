@@ -2027,6 +2027,7 @@ final class ACPIntegratedAgentModeRunner {
                 existing: updated.toolResultJSON,
                 incoming: resultJSON,
                 incomingIsError: isError,
+                existingIsError: updated.toolIsError,
                 requireObjectReplacement: true
             ) {
                 updated.toolResultJSON = payload
@@ -2559,6 +2560,7 @@ final class ACPIntegratedAgentModeRunner {
                     existing: updated.toolResultJSON,
                     incoming: result.resultJSON,
                     incomingIsError: result.isError,
+                    existingIsError: updated.toolIsError,
                     requireObjectReplacement: true
                 ) {
                     updated.toolResultJSON = payload

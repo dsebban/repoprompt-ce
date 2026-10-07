@@ -884,11 +884,13 @@ extension ToolOutputFormatter {
                 var payload = object
                 payload.removeValue(forKey: "job")
                 payload.removeValue(forKey: "job_id")
-                return buildContentBlocks(toolName: toolName, args: args, result: .object(payload), emitResources: emitResources)
+                let header = "## Long-running job\n- **Job ID**: `\(object["job_id"]?.stringValue ?? "")`\n- **Status**: \(status)\n\n"
+                return [.text(header)] + buildContentBlocks(toolName: toolName, args: args, result: .object(payload), emitResources: emitResources)
             }
             var lines = ["## Long-running job", "- **Job ID**: `\(object["job_id"]?.stringValue ?? "")`", "- **Status**: \(job["status"]?.stringValue ?? "unknown")"]
             if let phase = job["phase"]?.stringValue { lines.append("- **Phase**: \(phase)") }
             if let context = job["context_id"]?.stringValue { lines.append("- **Context ID**: `\(context)`") }
+            if let chat = job["chat_id"]?.stringValue { lines.append("- **Oracle chat**: `\(chat)`") }
             if case let .array(lanes)? = job["oracle_lanes"] {
                 for lane in lanes {
                     let fields = lane.objectValue ?? [:]

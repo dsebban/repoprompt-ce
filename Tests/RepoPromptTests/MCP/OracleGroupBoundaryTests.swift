@@ -1457,9 +1457,10 @@ final class OracleGroupDeliveryContractTests: XCTestCase {
         let text = try XCTUnwrap(preamble)
         XCTAssertTrue(text.contains(
             "3 independent answers to the same request follow. Lane order is not a ranking; "
-                + "the first lane supplies the top-level continuation handle, and a successful follow-up through any lane's chat ID re-runs every lane."
+                + "the first lane supplies the top-level continuation handle."
         ), text)
-        XCTAssertFalse(text.contains("only the chat that follow-ups continue"), text)
+        XCTAssertFalse(text.contains("re-runs every lane"), text)
+        XCTAssertFalse(text.contains("continues only the addressed Oracle lane"), text)
         XCTAssertTrue(text.contains("Read every lane through the end-of-group marker (`End of Oracle group: 3 lanes above.`)"), text)
         XCTAssertTrue(text.contains("read-only `oracle_chat_log` with that lane's chat ID"), text)
         XCTAssertTrue(text.contains("Do not start a follow-up just to retrieve prior text."), text)
@@ -1603,7 +1604,7 @@ final class OracleGroupDeliveryContractTests: XCTestCase {
         XCTAssertTrue(grouped.contains("read through the \"End of Oracle group\" marker"), grouped)
     }
 
-    func testGroupedFollowUpHintIsNeutralAndSingleLaneHintIsUnchanged() {
+    func testGroupedAppFollowUpHintIsLaneLocalAndSingleLaneHintIsUnchanged() {
         let continuation = "Continue this plan conversation with ask_oracle(chat_id: \"chat-0\", new_chat: false)"
         for count in [nil, 1] as [Int?] {
             XCTAssertEqual(
@@ -1614,7 +1615,61 @@ final class OracleGroupDeliveryContractTests: XCTestCase {
 
         let grouped = MCPContextBuilderToolProvider.generatedResponseFollowUpHint(modeLabel: "plan", chatID: "chat-0", oracleCount: 3)
         XCTAssertTrue(grouped.hasPrefix("The 3 Oracle lanes above are independent answers"), grouped)
+        XCTAssertTrue(grouped.contains("This explicit chat_id continues only the addressed Oracle lane; other lanes are not re-run."), grouped)
         XCTAssertTrue(grouped.hasSuffix("\n\nOptional later follow-up: " + continuation), grouped)
+    }
+
+    func testTerminalTicketHeaderPreservesPayloadBlocksPartialResultsAndRawBypass() throws {
+        let group = try OracleGroupMCPCodec.groupFields(OracleGroupResult(
+            groupID: OracleGroupID(rawValue: UUID()), status: .partialFailure, oracleResults: [
+                lane(index: 0, response: "Paid primary answer"),
+                OracleLaneResult(
+                    laneIndex: 1, chatID: "chat-1", providerID: "provider-1", modelID: "model-1",
+                    status: .failed, error: OracleLaneError(
+                        code: "provider_error", message: "Provider stopped", partialResponse: "Paid partial answer"
+                    )
+                )
+            ]
+        ))
+        let id = UUID().uuidString
+        for tool in ["ask_oracle", "oracle_send", "context_builder"] {
+            var payload = tool == "context_builder" ? [
+                "status": Value.string("success"), "prompt": .string("Frozen prompt"),
+                "response_type": .string("review"), "review": .object(group),
+                "oracle_export_error": .string("Oracle export cancelled; recover settled results.")
+            ] : group
+            payload["oracle_export_path"] = .string("/tmp/oracle.md")
+            payload["diffs"] = .array([.object(["path": .string("file.swift"), "patch": .string("+ retained patch")])])
+            for status in ["completed", "cancelled"] {
+                var ticket = payload
+                ticket["job_id"] = .string(id)
+                ticket["job"] = .object(["id": .string(id), "status": .string(status)])
+                for resources in [false, true] {
+                    let expected = ToolOutputFormatter.buildContentBlocks(
+                        toolName: tool, args: [:], result: .object(payload), emitResources: resources
+                    )
+                    let blocks = ToolOutputFormatter.buildContentBlocks(
+                        toolName: tool, args: [:], result: .object(ticket), emitResources: resources
+                    )
+                    XCTAssertEqual(texts(Array(blocks.prefix(1))), [
+                        "## Long-running job\n- **Job ID**: `\(id)`\n- **Status**: \(status)\n\n"
+                    ])
+                    XCTAssertEqual(String(describing: Array(blocks.dropFirst())), String(describing: expected))
+                    let text = joinedText(blocks)
+                    XCTAssertTrue(text.contains("Paid primary answer"), text)
+                    XCTAssertTrue(text.contains("Paid partial answer"), text)
+                    if tool == "context_builder" {
+                        XCTAssertTrue(text.contains("Oracle export cancelled; recover settled results."), text)
+                    } else if resources {
+                        XCTAssertTrue(text.contains("Patch for `file.swift`"), text)
+                    }
+                    let raw = ToolOutputFormatter.buildContentBlocks(
+                        toolName: tool, args: ["_rawJSON": .bool(true)], result: .object(ticket), emitResources: resources
+                    )
+                    XCTAssertEqual(texts(raw), [ToolOutputFormatter.rawJSONString(.object(ticket))])
+                }
+            }
+        }
     }
 
     // MARK: - Helpers
@@ -1886,8 +1941,19 @@ final class MCPToolHeartbeatTests: XCTestCase {
             let snapshot = await store.snapshot(id: id)
             let json = try ToolOutputFormatter.rawJSONString(XCTUnwrap(snapshot?.value()))
             XCTAssertFalse(json.contains("secret early response"))
-            XCTAssertTrue(json.contains("completed"))
+            XCTAssertEqual(snapshot?.progress["oracle_lanes"]?.arrayValue?.first?.objectValue?["status"], .string("settled"))
+            XCTAssertFalse(json.contains("completed"))
             XCTAssertFalse(json.contains("streaming"))
+            await progress.progress(.init(kind: .laneStarted, groupID: group, turnID: turn, laneID: member.laneID, sequence: 3))
+            let stillSettled = await store.snapshot(id: id)
+            XCTAssertEqual(stillSettled?.progress["oracle_lanes"], snapshot?.progress["oracle_lanes"])
+            await progress.settled(.object(["oracle_results": .array([.object([
+                "lane_index": .int(0), "chat_id": .string("lane-0"), "status": .string("failed"),
+                "error": .object(["code": .string("provider_error")])
+            ])])]))
+            await progress.progress(.init(kind: .laneStarted, groupID: group, turnID: turn, laneID: member.laneID, sequence: 4))
+            let published = await store.snapshot(id: id)
+            XCTAssertEqual(published?.progress["oracle_lanes"]?.arrayValue?.first?.objectValue?["status"], .string("failed"))
         }
 
         func testTerminalRecordsAreImmutableAndBoundedByRetention() async throws {

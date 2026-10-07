@@ -1143,7 +1143,7 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         guard let reminder = OracleGroupDeliveryContract.followUpReminder(laneCount: oracleCount ?? 0) else {
             return continuation
         }
-        return reminder + "\n\nOptional later follow-up: " + continuation
+        return reminder + "\nThis explicit chat_id continues only the addressed Oracle lane; other lanes are not re-run.\n\nOptional later follow-up: " + continuation
     }
 
     nonisolated static func responseDisposition(

@@ -747,10 +747,10 @@ final class MCPServerViewModel: ObservableObject {
             },
             jobCenter: WindowStatesManager.shared.longRunningJobs,
             registerJobExecution: { [self] id, runID, tool, cancel in
-                registerToolExecution(executionID: id, runID: runID, connectionID: nil, toolName: tool, cancel: cancel)
+                registerToolExecution(executionID: id, runID: runID, connectionID: nil, toolName: tool, role: .appOwnedJob, cancel: cancel)
             },
             unregisterJobExecution: { [self] id in
-                unregisterToolExecution(executionID: id, countAsEnded: false)
+                unregisterToolExecution(executionID: id)
             }
         )
     }
@@ -2161,9 +2161,9 @@ final class MCPServerViewModel: ObservableObject {
                 files: windowToolFileCapabilities,
                 jobs: WindowStatesManager.shared.longRunningJobs,
                 registerJob: { [weak self] id, runID, cancel in
-                    self?.registerToolExecution(executionID: id, runID: runID, connectionID: nil, toolName: MCPWindowToolName.contextBuilder, cancel: cancel)
+                    self?.registerToolExecution(executionID: id, runID: runID, connectionID: nil, toolName: MCPWindowToolName.contextBuilder, role: .appOwnedJob, cancel: cancel)
                 },
-                unregisterJob: { [weak self] id in self?.unregisterToolExecution(executionID: id, countAsEnded: false) }
+                unregisterJob: { [weak self] id in self?.unregisterToolExecution(executionID: id) }
             ),
             MCPAskUserToolProvider(runtime: windowToolRuntime, execution: windowToolExecutionCapabilities),
             MCPAgentControlToolProvider(runtime: windowToolRuntime, execution: windowToolExecutionCapabilities),
@@ -2333,10 +2333,13 @@ final class MCPServerViewModel: ObservableObject {
 
     // MARK: - - Cancellation support
 
-    /// Token-primary active tool execution tracking. Run ID is a secondary index;
-    /// executions remain connection-owned and cancellable even when no run resolves.
+    /// One token-primary lifetime registry. Run/connection indexes retain cancellation ownership;
+    /// only provider invocations participate in steering idle and provider-result ACK gates.
     @MainActor
     private struct ActiveToolExecution {
+        enum Role { case providerInvocation, appOwnedJob }
+
+        let role: Role
         let executionID: UUID
         let runID: UUID?
         let connectionID: UUID?
@@ -2484,10 +2487,12 @@ final class MCPServerViewModel: ObservableObject {
         runID: UUID?,
         connectionID: UUID?,
         toolName: String,
+        role: ActiveToolExecution.Role,
         lifecycleCorrelation: EditFlowPerf.LifecycleCorrelation? = nil,
         cancel: @escaping () -> Void
     ) {
         let execution = ActiveToolExecution(
+            role: role,
             executionID: executionID,
             runID: runID,
             connectionID: connectionID,
@@ -2532,15 +2537,17 @@ final class MCPServerViewModel: ObservableObject {
 
         if let runID = execution.runID {
             activeToolExecutionIDsByRunID[runID]?.remove(executionID)
-            if countAsEnded {
+            if countAsEnded, execution.role == .providerInvocation {
                 toolEndedCountByRunID[runID, default: 0] += 1
             }
             if activeToolExecutionIDsByRunID[runID]?.isEmpty == true {
                 activeToolExecutionIDsByRunID.removeValue(forKey: runID)
                 steeringDebugLog("[AgentRunSteeringWake] MCP tool unregister drained runID=\(runID) executionID=\(executionID) tool=\(execution.toolName) endedCount=\(toolEndedCountByRunID[runID] ?? 0)")
-                resumeAllToolIdleWaiters(forRunID: runID, lifecycleCorrelation: execution.lifecycleCorrelation)
             } else {
                 steeringDebugLog("[AgentRunSteeringWake] MCP tool unregister runID=\(runID) executionID=\(executionID) tool=\(execution.toolName) remaining=\(debugActiveTools(for: runID)) endedCount=\(toolEndedCountByRunID[runID] ?? 0)")
+            }
+            if !hasActiveToolExecutions(runID: runID) {
+                resumeAllToolIdleWaiters(forRunID: runID, lifecycleCorrelation: execution.lifecycleCorrelation)
             }
         }
 
@@ -2554,10 +2561,12 @@ final class MCPServerViewModel: ObservableObject {
         toolEndedCountByRunID[runID] ?? 0
     }
 
-    /// Returns whether the given run currently has any active RepoPrompt MCP tool executions.
+    /// Provider invocations only: app-owned jobs remain cancellable/close-owned without vetoing steering.
     @MainActor
     func hasActiveToolExecutions(runID: UUID) -> Bool {
-        !(activeToolExecutionIDsByRunID[runID]?.isEmpty ?? true)
+        (activeToolExecutionIDsByRunID[runID] ?? []).contains {
+            activeToolExecutionsByID[$0]?.role == .providerInvocation
+        }
     }
 
     /// Returns whether the given parent run is currently blocked in an `agent_run` wait.
@@ -2577,7 +2586,7 @@ final class MCPServerViewModel: ObservableObject {
 
     // MARK: - Tool Idle Waiting (Steering Safety)
 
-    /// Waits until the given runID has zero active MCP tool executions.
+    /// Waits until the given runID has zero active provider MCP invocations, not zero detached jobs.
     /// Returns immediately if already idle. Supports cooperative cancellation
     /// via structured concurrency — if the calling Task is cancelled the
     /// continuation is cleaned up and a `CancellationError` is thrown.
@@ -2585,8 +2594,7 @@ final class MCPServerViewModel: ObservableObject {
     func awaitNoActiveToolExecutions(runID: UUID) async throws {
         try Task.checkCancellation()
         // Fast path: already idle
-        let executions = activeToolExecutionIDsByRunID[runID]
-        if executions == nil || executions!.isEmpty {
+        if !hasActiveToolExecutions(runID: runID) {
             steeringDebugLog("[AgentRunSteeringWake] MCP idle wait fast-idle runID=\(runID)")
             return
         }
@@ -2600,8 +2608,7 @@ final class MCPServerViewModel: ObservableObject {
             await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
                 // Double-check under the same MainActor turn — tools may have
                 // drained between the fast-path check and here.
-                let stillActive = activeToolExecutionIDsByRunID[runID]
-                if Task.isCancelled || stillActive == nil || stillActive!.isEmpty {
+                if Task.isCancelled || !hasActiveToolExecutions(runID: runID) {
                     steeringDebugLog("[AgentRunSteeringWake] MCP idle wait drained before parking runID=\(runID) waiterID=\(waiterID)")
                     continuation.resume()
                     return
@@ -2658,7 +2665,11 @@ final class MCPServerViewModel: ObservableObject {
             return false
         }
         execution.cancel()
-        unregisterToolExecution(executionID: executionID)
+        // A job's feature owner unregisters only after admission/worker cleanup has drained.
+        // Provider calls retain their existing immediate cancellation/ACK accounting.
+        if execution.role == .providerInvocation {
+            unregisterToolExecution(executionID: executionID)
+        }
         return true
     }
 
@@ -2926,6 +2937,7 @@ final class MCPServerViewModel: ObservableObject {
                 runID: indexedRunID,
                 connectionID: connectionID,
                 toolName: toolName,
+                role: .providerInvocation,
                 cancel: cancel
             )
             return (executionID, indexedRunID)
@@ -3920,6 +3932,7 @@ final class MCPServerViewModel: ObservableObject {
                 runID: indexedRunID,
                 connectionID: capturedConnectionID,
                 toolName: name,
+                role: .providerInvocation,
                 lifecycleCorrelation: lifecycleCorrelation,
                 cancel: { task.cancel() }
             )
