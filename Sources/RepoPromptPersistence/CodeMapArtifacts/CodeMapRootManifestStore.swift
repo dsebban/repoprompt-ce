@@ -2474,9 +2474,8 @@ package actor CodeMapRootManifestStore {
                summary.identity == identity,
                summary.validatedContentChecksum == validatedContentChecksum
             {
-                guard summary.namespaceShard == shardName,
-                      summary.recordCount <= policy.maximumRecordCountPerManifest
-                else { return .corrupt }
+                // Summaries are only recorded for snapshots that already passed the shard and
+                // record-count checks below, and `policy` is immutable.
                 return .valid(summary, identity)
             }
             #if DEBUG
@@ -3282,7 +3281,6 @@ private struct ManifestReconciliationOutcome {
 private struct ManifestScanSummary {
     let identity: ManifestFileIdentity
     let validatedContentChecksum: Data
-    let namespaceShard: String
     let recordCount: Int
     let lastAccessEpochSeconds: UInt64
     let manifestGeneration: UInt64
@@ -3290,7 +3288,6 @@ private struct ManifestScanSummary {
     init(identity: ManifestFileIdentity, snapshot: CodeMapRootManifestSnapshot, validatedContentChecksum: Data) {
         self.identity = identity
         self.validatedContentChecksum = validatedContentChecksum
-        namespaceShard = snapshot.namespace.shard
         recordCount = snapshot.records.count
         lastAccessEpochSeconds = snapshot.lastAccessEpochSeconds
         manifestGeneration = snapshot.manifestGeneration
