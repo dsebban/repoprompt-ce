@@ -429,7 +429,18 @@ private extension Data {
     }
 
     var lowercaseHex: String {
-        map { String(format: "%02x", $0) }.joined()
+        let digits: StaticString = "0123456789abcdef"
+        return String(unsafeUninitializedCapacity: count * 2) { buffer in
+            digits.withUTF8Buffer { table in
+                var index = 0
+                for byte in self {
+                    buffer[index] = table[Int(byte >> 4)]
+                    buffer[index + 1] = table[Int(byte & 0x0F)]
+                    index += 2
+                }
+                return index
+            }
+        }
     }
 
     mutating func appendBigEndian(_ value: UInt32) {

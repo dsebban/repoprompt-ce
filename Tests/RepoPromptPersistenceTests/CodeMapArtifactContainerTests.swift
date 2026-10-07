@@ -677,6 +677,30 @@ private extension NSLock {
             )
         }
 
+        func testFullScanDoesNotRedecodeStoreLargerThanDecodedCacheBudget() async throws {
+            let fixture = try await makeFixture(recordCount: 2)
+            _ = try await fixture.publish()
+            let limited = try CodeMapRootManifestStore(rootURL: fixture.root, policy: policy(cacheBytes: 1))
+            let initial = try await limited.accounting()
+            XCTAssertEqual(initial.manifestCount, 1)
+            let decodesAfterFirstScan = await limited.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterFirstScan, 1)
+            let entries = await limited.decodedManifestCacheEntryCountForTesting()
+            XCTAssertEqual(entries, 0)
+
+            for _ in 0 ..< 3 {
+                let accounting = try await limited.accounting()
+                XCTAssertEqual(accounting, initial)
+            }
+            let decodesAfterRescans = await limited.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterRescans, 1)
+
+            _ = try await fixture.publish(using: limited)
+            _ = try await limited.accounting()
+            let decodesAfterRepublish = await limited.scanDecodeCountForTesting()
+            XCTAssertEqual(decodesAfterRepublish, 1)
+        }
+
         func testTargetLargerThanCacheBudgetIsDecodedWithoutRetention() async throws {
             let fixture = try await makeFixture()
             _ = try await fixture.publish()
