@@ -651,7 +651,7 @@ final class AgentOraclePillRoutingTests: XCTestCase {
                 laneID: prepared.members[1].laneID, sequence: 1, text: canonicalStatus.rawValue
             ), owner: prepared.owner)
             vm.receiveOracleGroupProgress(started, owner: prepared.owner)
-            XCTAssertEqual(vm.oracleMemberPresentation(for: member).status, .unknown, "settled progress is not publication")
+            XCTAssertEqual(vm.oracleMemberPresentation(for: member).status, .settled, "settled progress is provisional until canonical publication")
 
             let terminal = try terminalGroup(prepared, secondaryStatus: canonicalStatus)
             vm.recordOracleGroupPresentation(terminal)

@@ -224,12 +224,12 @@ final class MCPLongRunningJobProgress {
               sequences[index].map({ sequence > $0 }) ?? true,
               let position = lanes.firstIndex(where: { $0["lane_index"]?.intValue == index }) else { return }
         sequences[index] = sequence
-        guard !["completed", "failed", "cancelled", "timed_out"].contains(lanes[position]["status"]?.stringValue ?? "") else { return }
+        guard !["settled", "completed", "failed", "cancelled", "timed_out"].contains(lanes[position]["status"]?.stringValue ?? "") else { return }
         switch event.kind {
         case .laneStarted: lanes[position]["status"] = .string("streaming")
         case .laneSettled:
-            let status = event.text ?? "settled"
-            lanes[position]["status"] = .string(["completed", "failed", "cancelled", "timed_out"].contains(status) ? status : "settled")
+            // Progress is provisional; only settled(_:) publishes canonical lane outcomes.
+            lanes[position]["status"] = .string("settled")
         default: return
         }
         await store.update(id: id, fields: ["oracle_lanes": .array(lanes.map(Value.object))])
