@@ -11,6 +11,12 @@
 #   --install        link the result as ~/.local/share/rp-pi-durable/current/bin/rp-pi-durable, a path
 #                    RepoPrompt's Pi Durable locator searches
 #   --conformance    run the translator checks and the faux-model ACP conformance script against the result
+#   --checkout-only  stop after preparing the pi checkout (tests)
+#   --pin-file FILE  pin file to use instead of Vendor/PiDurable/rp-pi-durable/pi-pin.json (tests)
+#
+# A checkout the script clones itself is materialized at the pin. An existing --pi-dir is never
+# overwritten: it is checked out to the pin only when its tracked files are clean, and a dirty
+# or incomplete one is refused.
 #
 # Requires git, node/npm, and Bun >= 1.4 (1.3 lacks node:sqlite).
 set -euo pipefail
@@ -23,6 +29,7 @@ OUT_DIR=""
 TARGET=""
 INSTALL=0
 CONFORMANCE=0
+CHECKOUT_ONLY=0
 
 fail(){ echo "ERROR: $*" >&2; exit 1; }
 
@@ -33,39 +40,60 @@ while (( $# > 0 )); do
         --target) TARGET="${2:?--target needs a value}"; shift ;;
         --install) INSTALL=1 ;;
         --conformance) CONFORMANCE=1 ;;
-        --help|-h) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --checkout-only) CHECKOUT_ONLY=1 ;;
+        --pin-file) PIN_FILE="${2:?--pin-file needs a value}"; shift ;;
+        --help|-h) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) fail "Unknown option: $1" ;;
     esac
     shift
 done
 
-for tool in git node npm bun; do
+required_tools=(git python3)
+(( CHECKOUT_ONLY )) || required_tools+=(node npm bun)
+for tool in "${required_tools[@]}"; do
     command -v "$tool" >/dev/null 2>&1 || fail "missing required tool '$tool'"
 done
 
-pin_field(){ node -e 'const pin = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")); process.stdout.write(String(pin[process.argv[2]]));' "$PIN_FILE" "$1"; }
+pin_field(){ python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])' "$PIN_FILE" "$1"; }
 PI_REPOSITORY="$(pin_field repository)"
 PI_COMMIT="$(pin_field commit)"
 MINIMUM_BUN="$(pin_field minimumBunVersion)"
 
-bun_version="$(bun --version)"
-node -e 'const [a, b] = process.argv.slice(1).map((v) => v.split(".").map(Number)); for (let i = 0; i < 3; i++) { if ((a[i] ?? 0) !== (b[i] ?? 0)) process.exit((a[i] ?? 0) > (b[i] ?? 0) ? 0 : 1); }' \
-    "$bun_version" "$MINIMUM_BUN" || fail "Bun $bun_version is older than $MINIMUM_BUN (node:sqlite is required)"
+if (( ! CHECKOUT_ONLY )); then
+    bun_version="$(bun --version)"
+    node -e 'const [a, b] = process.argv.slice(1).map((v) => v.split(".").map(Number)); for (let i = 0; i < 3; i++) { if ((a[i] ?? 0) !== (b[i] ?? 0)) process.exit((a[i] ?? 0) > (b[i] ?? 0) ? 0 : 1); }' \
+        "$bun_version" "$MINIMUM_BUN" || fail "Bun $bun_version is older than $MINIMUM_BUN (node:sqlite is required)"
+fi
 
-cloned=0
+ensure_pin_commit(){
+    git -C "$PI_DIR" cat-file -e "$PI_COMMIT^{commit}" 2>/dev/null || git -C "$PI_DIR" fetch origin "$PI_COMMIT"
+}
+
 if [[ ! -d "$PI_DIR/.git" ]]; then
     echo "==> Cloning $PI_REPOSITORY"
     mkdir -p "$(dirname "$PI_DIR")"
     git clone --filter=blob:none --no-checkout "$PI_REPOSITORY" "$PI_DIR"
-    cloned=1
-fi
-# A `--no-checkout` clone has no working tree even when its HEAD already is the pin, so a fresh
-# clone (or a checkout missing its lockfile) is always materialized.
-if (( cloned )) || [[ ! -f "$PI_DIR/package-lock.json" ]] \
-    || [[ "$(git -C "$PI_DIR" rev-parse HEAD 2>/dev/null || true)" != "$PI_COMMIT" ]]; then
+    # A `--no-checkout` clone has no working tree even when its HEAD already is the pin. This clone
+    # is the script's own, so forcing the checkout cannot discard anyone's work.
     echo "==> Checking out pi $PI_COMMIT"
-    git -C "$PI_DIR" cat-file -e "$PI_COMMIT^{commit}" 2>/dev/null || git -C "$PI_DIR" fetch origin "$PI_COMMIT"
+    ensure_pin_commit
     git -C "$PI_DIR" checkout --quiet --force --detach "$PI_COMMIT"
+else
+    # An existing checkout may hold a developer's work: never overwrite it.
+    [[ -f "$PI_DIR/package-lock.json" ]] \
+        || fail "$PI_DIR is an incomplete pi checkout (no package-lock.json). Remove it to let this script clone a fresh one, or pass a populated --pi-dir."
+    if [[ "$(git -C "$PI_DIR" rev-parse HEAD)" != "$PI_COMMIT" ]]; then
+        [[ -z "$(git -C "$PI_DIR" status --porcelain --untracked-files=no)" ]] \
+            || fail "$PI_DIR has uncommitted changes to tracked files and is not at the pinned commit $PI_COMMIT. Commit or stash them, or pass another --pi-dir."
+        echo "==> Checking out pi $PI_COMMIT"
+        ensure_pin_commit
+        git -C "$PI_DIR" checkout --quiet --detach "$PI_COMMIT"
+    fi
+fi
+
+if (( CHECKOUT_ONLY )); then
+    echo "==> pi checkout ready at $PI_COMMIT"
+    exit 0
 fi
 
 lock_stamp="$PI_DIR/node_modules/.rp-pi-durable-lock"

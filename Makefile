@@ -145,6 +145,7 @@ conductor-selftest:
 	python3 Scripts/test_ci_app_test_runner.py
 	python3 Scripts/test_conductor_diagnostics.py
 	python3 Scripts/test_contribution_preflight.py
+	python3 Scripts/test_build_rp_pi_durable.py
 	python3 Scripts/test_modularization_metrics.py
 	python3 Scripts/test_modularization_tooling.py
 	python3 Scripts/test_modularization_t0.py
