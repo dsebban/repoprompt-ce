@@ -14,10 +14,10 @@ const storageRoot = mkdtempSync(join(tmpdir(), "rp-pi-durable-conformance-"));
 const workspace = mkdtempSync(join(tmpdir(), "rp-pi-durable-workspace-"));
 
 class Client {
-	constructor(args = []) {
+	constructor(args = [], env = {}) {
 		this.child = spawn(binary, ["acp", "--storage-root", storageRoot, ...args], {
 			cwd: workspace,
-			env: { ...process.env, RP_PI_DURABLE_FAUX: "1" },
+			env: { ...process.env, RP_PI_DURABLE_FAUX: "1", ...env },
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		this.nextId = 1;
@@ -302,6 +302,46 @@ await check("kill -9 mid-tool: the next load abandons the interrupted run (child
 	assert.equal(survivor.text(), "faux: fresh");
 	assert.ok(!survivor.updates.some((update) => update.sessionUpdate === "tool_call"), "the interrupted tool is not resumed");
 	await survivor.close();
+});
+
+await check("a slowly streamed answer arrives whole (populated first partial)", async () => {
+	// Pi commits the first partial after its 100 ms progress throttle, so it starts populated.
+	const slow = new Client([], { RP_PI_DURABLE_FAUX_TPS: "40" });
+	await slow.request("initialize", { protocolVersion: 1 });
+	const created = await slow.request("session/new", { cwd: workspace, mcpServers: [] });
+	const prompt = `stream ${"many words ".repeat(30)}end`;
+	const result = await slow.request("session/prompt", { sessionId: created.sessionId, prompt: [{ type: "text", text: prompt }] });
+	assert.equal(result.stopReason, "end_turn");
+	assert.ok(slow.updates.filter((update) => update.sessionUpdate === "agent_message_chunk").length > 1, "streamed in pieces");
+	assert.equal(slow.text(), `faux: ${prompt}`);
+	await slow.close();
+});
+
+await check("/compact that summarizes ends the turn; a failed compaction is an RPC error", async () => {
+	for (const fail of [false, true]) {
+		const client = new Client([], {
+			RP_PI_DURABLE_FAUX_KEEP_TOKENS: "1",
+			...(fail ? { RP_PI_DURABLE_FAUX_FAIL_COMPACTION: "1" } : {}),
+		});
+		await client.request("initialize", { protocolVersion: 1 });
+		const created = await client.request("session/new", { cwd: workspace, mcpServers: [] });
+		for (const word of ["one", "two", "three"]) {
+			await client.request("session/prompt", { sessionId: created.sessionId, prompt: [{ type: "text", text: `${word} ${"x".repeat(200)}` }] });
+		}
+		const compact = client.request("session/prompt", { sessionId: created.sessionId, prompt: [{ type: "text", text: "/compact" }] });
+		if (fail) {
+			await assert.rejects(compact, (error) => {
+				assert.equal(error.data.kind, "run_failed");
+				assert.match(error.message, /^Compaction failed: /u);
+				assert.notEqual(error.code, -32602);
+				return true;
+			});
+		} else {
+			assert.equal((await compact).stopReason, "end_turn");
+			assert.ok(client.updates.some((update) => update.sessionUpdate === "session_info_update" && update.title === "Context compacted"));
+		}
+		await client.close();
+	}
 });
 
 await check("--ephemeral discovery writes no session directories", async () => {

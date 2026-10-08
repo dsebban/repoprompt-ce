@@ -26,7 +26,10 @@ rp-pi-durable acp [--storage-root <dir>] [--ephemeral] [--log-level debug|info|w
 
 ```bash
 node test/conformance.mjs <path-to-rp-pi-durable>   # faux-model ACP contract, no credentials needed
-bun --conditions=source test/phase0-probe.ts all    # from the staged package inside the pi checkout
+bun --conditions=source test/translate-check.ts     # event translation; from the staged package inside the pi checkout
+bun --conditions=source test/phase0-probe.ts all    # Phase 0 contract facts; same location
 ```
 
-`RP_PI_DURABLE_FAUX=1` replaces the host models with a deterministic faux model: `run: <command>` calls `bash`, anything else is echoed as `faux: <text>`.
+`RP_PI_DURABLE_FAUX=1` replaces the host models with a deterministic faux model: `run: <command>` calls `bash`, anything else is echoed as `faux: <text>`. `RP_PI_DURABLE_FAUX_TPS` streams it at that many tokens per second; `RP_PI_DURABLE_FAUX_KEEP_TOKENS` and `RP_PI_DURABLE_FAUX_FAIL_COMPACTION=1` exercise compaction.
+
+Model-data hydration fetches the providers' live catalogs (for example NVIDIA's `integrate.api.nvidia.com/v1/models`), so the build needs that network access.

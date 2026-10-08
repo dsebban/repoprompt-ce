@@ -87,11 +87,16 @@ export async function createHostModels(cwd: string): Promise<HostModels> {
 	};
 }
 
+/** pi-durable's fixed summarization prompt, which follows the serialized `<conversation>` (`harness/compaction.ts`). */
+const SUMMARIZATION_REQUEST = "The messages above are a conversation to summarize";
+
 /**
  * Deterministic test model (`RP_PI_DURABLE_FAUX=1`). It decides from the transcript, so it behaves the same after a
  * restart:
  * - `run: <command>` calls `bash` with the command, then answers `ran: <first output line>`;
  * - anything else answers `faux: <text>`.
+ * Test knobs: `RP_PI_DURABLE_FAUX_TPS` streams at that many tokens per second;
+ * `RP_PI_DURABLE_FAUX_KEEP_TOKENS` and `RP_PI_DURABLE_FAUX_FAIL_COMPACTION=1` exercise compaction.
  */
 export function createFauxHostModels(): HostModels {
 	const faux = fauxProvider({ tokensPerSecond: Number(process.env.RP_PI_DURABLE_FAUX_TPS ?? "0") || undefined });
@@ -99,6 +104,10 @@ export function createFauxHostModels(): HostModels {
 		const messages = context.messages;
 		const lastUser = messages.findLastIndex((message) => message.role === "user");
 		const text = textOf(messages[lastUser]?.content).trim();
+		if (text.includes(SUMMARIZATION_REQUEST) && process.env.RP_PI_DURABLE_FAUX_FAIL_COMPACTION === "1") {
+			// A non-retryable summarization failure: the compaction task fails with `model_error`.
+			return fauxAssistantMessage([], { stopReason: "length" });
+		}
 		const results = messages.slice(lastUser + 1).filter((message) => message.role === "toolResult");
 		if (text.startsWith("run:")) {
 			if (results.length === 0) {
@@ -123,7 +132,13 @@ export function createFauxHostModels(): HostModels {
 			const first = options()[0];
 			return first === undefined ? {} : { model: first.ref };
 		},
-		settings: () => undefined,
+		// `RP_PI_DURABLE_FAUX_KEEP_TOKENS` shrinks the verbatim window so `/compact` actually summarizes.
+		settings: () => {
+			const keepRecentTokens = Number(process.env.RP_PI_DURABLE_FAUX_KEEP_TOKENS);
+			return Number.isFinite(keepRecentTokens) && keepRecentTokens > 0
+				? { compaction: { keepRecentTokens } }
+				: undefined;
+		},
 		clampThinking: (option, level) => clamp(models, option, level),
 	};
 }

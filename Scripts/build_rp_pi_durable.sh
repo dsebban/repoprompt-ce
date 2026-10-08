@@ -10,7 +10,7 @@
 #                    build each target natively where possible (plan §4).
 #   --install        link the result as ~/.local/share/rp-pi-durable/current/bin/rp-pi-durable, a path
 #                    RepoPrompt's Pi Durable locator searches
-#   --conformance    run the faux-model ACP conformance script against the result
+#   --conformance    run the translator checks and the faux-model ACP conformance script against the result
 #
 # Requires git, node/npm, and Bun >= 1.4 (1.3 lacks node:sqlite).
 set -euo pipefail
@@ -52,15 +52,20 @@ bun_version="$(bun --version)"
 node -e 'const [a, b] = process.argv.slice(1).map((v) => v.split(".").map(Number)); for (let i = 0; i < 3; i++) { if ((a[i] ?? 0) !== (b[i] ?? 0)) process.exit((a[i] ?? 0) > (b[i] ?? 0) ? 0 : 1); }' \
     "$bun_version" "$MINIMUM_BUN" || fail "Bun $bun_version is older than $MINIMUM_BUN (node:sqlite is required)"
 
+cloned=0
 if [[ ! -d "$PI_DIR/.git" ]]; then
     echo "==> Cloning $PI_REPOSITORY"
     mkdir -p "$(dirname "$PI_DIR")"
     git clone --filter=blob:none --no-checkout "$PI_REPOSITORY" "$PI_DIR"
+    cloned=1
 fi
-if [[ "$(git -C "$PI_DIR" rev-parse HEAD 2>/dev/null || true)" != "$PI_COMMIT" ]]; then
+# A `--no-checkout` clone has no working tree even when its HEAD already is the pin, so a fresh
+# clone (or a checkout missing its lockfile) is always materialized.
+if (( cloned )) || [[ ! -f "$PI_DIR/package-lock.json" ]] \
+    || [[ "$(git -C "$PI_DIR" rev-parse HEAD 2>/dev/null || true)" != "$PI_COMMIT" ]]; then
     echo "==> Checking out pi $PI_COMMIT"
     git -C "$PI_DIR" cat-file -e "$PI_COMMIT^{commit}" 2>/dev/null || git -C "$PI_DIR" fetch origin "$PI_COMMIT"
-    git -C "$PI_DIR" checkout --quiet --detach "$PI_COMMIT"
+    git -C "$PI_DIR" checkout --quiet --force --detach "$PI_COMMIT"
 fi
 
 lock_stamp="$PI_DIR/node_modules/.rp-pi-durable-lock"
@@ -95,6 +100,7 @@ binary="$OUT_DIR/rp-pi-durable"
 if [[ -z "$TARGET" || "$TARGET" == "$host_target" ]]; then
     echo "==> Smoke: $("$binary" --version --json)"
     if (( CONFORMANCE )); then
+        (cd "$PI_DIR/packages/rp-pi-durable" && bun --conditions=source test/translate-check.ts)
         node "$PACKAGE_DIR/test/conformance.mjs" "$binary"
     fi
 fi

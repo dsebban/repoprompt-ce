@@ -25,8 +25,8 @@ export class EventTranslator {
 	#runId: string | undefined;
 	#messageSeq = 0;
 	#messageId: string | undefined;
-	#streamedText = "";
-	#streamedThinking = "";
+	/** Text already forwarded for each content block of the in-flight message, by content index. */
+	#sentByBlock = new Map<number, { kind: "text" | "thinking"; text: string }>();
 	#lastUsed: number | undefined;
 	#lastCost: number | undefined;
 	readonly #requestIdBySubmission = new Map<SubmissionId, string>();
@@ -90,66 +90,49 @@ export class EventTranslator {
 				return [update];
 			}
 			case "message_start": {
-				if (event.message.role === "assistant") this.#messageId = `m${++this.#messageSeq}`;
-				this.#streamedText = "";
-				this.#streamedThinking = "";
-				return [];
+				if (event.message.role !== "assistant") return [];
+				this.#messageId = `m${++this.#messageSeq}`;
+				this.#sentByBlock.clear();
+				// Pi commits the first partial after its progress throttle, so the message can start populated.
+				return this.#forwardMessage(event.message as AssistantMessage);
 			}
 			case "message_update": {
 				const updates: SessionUpdate[] = [];
 				for (const change of event.changes) {
-					if (change.type === "text_delta" && change.delta.length > 0) {
-						this.#streamedText += change.delta;
-						updates.push({
-							sessionUpdate: "agent_message_chunk",
-							content: { type: "text", text: change.delta },
-							...(this.#messageId === undefined ? {} : { messageId: this.#messageId }),
-							_meta: this.#meta(),
-						});
-					} else if (change.type === "thinking_delta" && change.delta.length > 0) {
-						this.#streamedThinking += change.delta;
-						updates.push({
-							sessionUpdate: "agent_thought_chunk",
-							content: { type: "text", text: change.delta },
-							_meta: this.#meta(),
-						});
+					switch (change.type) {
+						case "text_delta":
+							updates.push(...this.#forwardDelta(change.contentIndex, "text", change.delta));
+							break;
+						case "thinking_delta":
+							updates.push(...this.#forwardDelta(change.contentIndex, "thinking", change.delta));
+							break;
+						case "text_start":
+						case "thinking_start":
+						case "toolcall_start":
+						case "block":
+							// A start or a replacement can carry content; forward only what was not sent yet.
+							updates.push(...this.#forwardBlock(change.contentIndex, change.block));
+							break;
+						case "message":
+							updates.push(...this.#forwardMessage(change.message));
+							break;
+						case "toolcall_delta":
+							break;
 					}
 				}
 				return updates;
 			}
 			case "message_end": {
 				const message = event.entry.model?.[0];
-				const messageId = this.#messageId;
-				this.#messageId = undefined;
 				if (message?.role !== "assistant") return [];
 				const assistant = message as AssistantMessage;
-				const updates: SessionUpdate[] = [];
+				const entryId = idOf(event.entry.id);
 				// A message committed whole (or partly streamed before a restart) sends what was not streamed yet.
-				const thinking = assistant.content
-					.flatMap((block) => (block.type === "thinking" ? [block.thinking] : []))
-					.join("");
-				const thinkingRest = remainder(thinking, this.#streamedThinking);
-				if (thinkingRest.length > 0) {
-					updates.push({
-						sessionUpdate: "agent_thought_chunk",
-						content: { type: "text", text: thinkingRest },
-						_meta: this.#meta(idOf(event.entry.id)),
-					});
-				}
-				const text = assistant.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
-				const textRest = remainder(text, this.#streamedText);
-				if (textRest.length > 0) {
-					updates.push({
-						sessionUpdate: "agent_message_chunk",
-						content: { type: "text", text: textRest },
-						...(messageId === undefined ? {} : { messageId }),
-						_meta: this.#meta(idOf(event.entry.id)),
-					});
-				}
-				this.#streamedText = "";
-				this.#streamedThinking = "";
+				const updates = this.#forwardMessage(assistant, entryId);
+				this.#messageId = undefined;
+				this.#sentByBlock.clear();
 				this.#lastUsed = contextTokens(assistant.usage);
-				updates.push(this.#usageUpdate(idOf(event.entry.id)));
+				updates.push(this.#usageUpdate(entryId));
 				return updates;
 			}
 			case "tool_execution_start": {
@@ -221,6 +204,45 @@ export class EventTranslator {
 		}
 	}
 
+	#forwardMessage(message: AssistantMessage, entryId?: string): SessionUpdate[] {
+		return message.content.flatMap((block, index) => this.#forwardBlock(index, block, entryId));
+	}
+
+	/** Forwards the part of a block's full text that extends what was already sent for it. */
+	#forwardBlock(index: number, block: AssistantMessage["content"][number], entryId?: string): SessionUpdate[] {
+		if (block.type !== "text" && block.type !== "thinking") return [];
+		const kind = block.type;
+		const full = block.type === "text" ? block.text : block.thinking;
+		const sent = this.#sentByBlock.get(index);
+		const previous = sent?.kind === kind ? sent.text : "";
+		// A block whose content no longer extends what was sent cannot be retracted; keep the sent prefix.
+		if (!full.startsWith(previous)) return [];
+		this.#sentByBlock.set(index, { kind, text: full });
+		return this.#chunk(kind, full.slice(previous.length), entryId);
+	}
+
+	#forwardDelta(index: number, kind: "text" | "thinking", delta: string): SessionUpdate[] {
+		const sent = this.#sentByBlock.get(index);
+		const previous = sent?.kind === kind ? sent.text : "";
+		this.#sentByBlock.set(index, { kind, text: previous + delta });
+		return this.#chunk(kind, delta);
+	}
+
+	#chunk(kind: "text" | "thinking", text: string, entryId?: string): SessionUpdate[] {
+		if (text.length === 0) return [];
+		if (kind === "thinking") {
+			return [{ sessionUpdate: "agent_thought_chunk", content: { type: "text", text }, _meta: this.#meta(entryId) }];
+		}
+		return [
+			{
+				sessionUpdate: "agent_message_chunk",
+				content: { type: "text", text },
+				...(this.#messageId === undefined ? {} : { messageId: this.#messageId }),
+				_meta: this.#meta(entryId),
+			},
+		];
+	}
+
 	#requestIds(inputs: readonly SubmissionId[]): string[] {
 		return inputs.flatMap((input) => {
 			const requestId = this.#requestIdBySubmission.get(input) ?? this.#hooks.requestIdFor(input);
@@ -243,12 +265,6 @@ export class EventTranslator {
 /** pi ids are ordered branded numbers; they travel as decimal strings on the wire. */
 function idOf(id: number | undefined): string | undefined {
 	return id === undefined ? undefined : String(id);
-}
-
-/** The part of `full` not yet sent as `streamed`; everything when they diverged. */
-function remainder(full: string, streamed: string): string {
-	if (streamed.length === 0) return full;
-	return full.startsWith(streamed) ? full.slice(streamed.length) : "";
 }
 
 /** Tokens the last request put in the context window. */

@@ -329,11 +329,7 @@ export class SessionHost {
 	// MARK: - Prompt and cancel
 
 	async prompt(text: string, requestId: string | undefined): Promise<{ stopReason: string }> {
-		if (text.trim() === "/compact") {
-			const id = await this.#root.compact(undefined, context);
-			const receipt = await this.#harness.waitForTask(id, context);
-			return { stopReason: receipt.state.outcome.status === "aborted" ? "cancelled" : "end_turn" };
-		}
+		if (text.trim() === "/compact") return this.#compact();
 		const resolvedRequestId = requestId ?? `rp-${randomUUID()}`;
 		this.#cancelRequested = false;
 		this.#activePrompts++;
@@ -353,6 +349,29 @@ export class SessionHost {
 			throw rpcError("run_failed", `The run ended without an answer: ${settled.reason}${detail}`);
 		} finally {
 			this.#activePrompts--;
+		}
+	}
+
+	/**
+	 * `/compact`: only a completed compaction (including "nothing to compact") ends the turn normally.
+	 * A failed, faulted, or orphaned task (no model, summarization errors) is an RPC error, as a failed
+	 * prompt is; an aborted one is `cancelled`.
+	 */
+	async #compact(): Promise<{ stopReason: string }> {
+		const id = await this.#root.compact(undefined, context);
+		const outcome = (await this.#harness.waitForTask(id, context)).state.outcome;
+		switch (outcome.status) {
+			case "completed":
+				return { stopReason: "end_turn" };
+			case "aborted":
+				return { stopReason: "cancelled" };
+			case "failed":
+			case "faulted": {
+				const detail = outcome.error.detail === undefined ? "" : ` ${JSON.stringify(outcome.error.detail)}`;
+				throw rpcError("run_failed", `Compaction ${outcome.status}: ${outcome.error.message}${detail}`);
+			}
+			case "orphaned":
+				throw rpcError("run_failed", `Compaction orphaned: ${outcome.reason}`);
 		}
 	}
 
