@@ -1,6 +1,6 @@
 # Pi Durable Agent Mode Provider (`AgentProviderKind.piDurable`): Plan
 
-Status: planning only. No source has been changed. A design critique (`docs/proposals/pi-durable/plan-critique.md`) has been applied; corrections are marked "correction vs export" inline.
+Status: Phase 0 and Phase 1 implemented (see §12). A design critique (`docs/proposals/pi-durable/plan-critique.md`) has been applied; corrections are marked "correction vs export" inline. The five findings of the PR #18 design review are folded in and marked "review fix".
 Path conventions: repo-relative to `repoprompt-ce/` unless absolute. Line numbers are anchors at plan time (2026-10-08); search by symbol if they drift. **ext** marks facts from outside this repo (pi monorepo, ACP spec, Bun) that Phase 0 must re-validate.
 
 ---
@@ -91,7 +91,7 @@ What changes: the wire is ACP, not bespoke JSONL. `list_models` and `set_model` 
   - A crash *before* intent reruns the hooks.
   - An ordinary throw from `beforeTool` blocks the tool with the error text.
   - Hooks use `api.memo(name, candidate)` for durable first-writer-wins decisions.
-  - `HookApi` exposes `memo` and `snapshot` (spec.md:2600-2601). Commit access from inside a hook is not shown.
+  - `HookApi` exposes `memo` and `snapshot` (spec.md:2600-2601) and no commit. Phase 0 (c): a commit through the host's own `Harness` from inside the hook works and persists, provided no Session API is called inside the transaction callback.
   - Hook memos live in the task's namespace and exist only while the task is non-terminal (spec.md:1650-1657).
   - There is no built-in approval primitive.
 - **Settled submissions:** a withdrawn or aborted submission settles `unanswered` (spec.md:2228-2231). Re-submitting the same `requestId` returns that settled submission (README:115-121).
@@ -291,14 +291,15 @@ Why a stdio relay instead of RepoPrompt dialing the socket directly:
 - **`session/new {cwd, mcpServers}`:**
   1. Mint a session and open storage, or use `MemoryStorage` under `--ephemeral`.
   2. Build the harness with `CodingTools`, plus MCP tools in Phase 4, plus a `repoprompt` extension holding a short preamble section.
-  3. Respond with `{sessionId, modes: {currentModeId, availableModes}, configOptions: [model, thinking_level]}`.
-  - Modes are the permission levels (§7.2).
+  3. Respond with `{sessionId, configOptions: [mode, model, thinking_level]}`.
+  - **Review fix (finding 1):** the permission levels (§7.2) are advertised as a `configOptions` select with `category: "mode"`, not the legacy `modes` field. The controller requires that selector, applies the bound mode before every prompt (Ask included) through `session/set_config_option`, and throws when it is absent (`ACPAgentSessionController.setSessionModeSerialized`).
   - `configOptions`:
+    - `{id:"mode", category:"mode", type:"select", currentValue:"ask", options:[ask, auto-edit, full-access]}`.
     - `{id:"model", category:"model", type:"select", currentValue:"<provider>/<modelId>", options:[{value,name}]}`, built from `getAvailableSnapshot()` (credentialed models only).
     - `{id:"thinking_level", category:"thinking_level", type:"select", ...}`. The provider classifies it as `.thinking`, parallel to Devin's `thought_level`.
   - The initial model comes from pi `settings.json` via `findInitialAgentModel`.
-- **`session/load {sessionId, cwd, mcpServers}`:** opens existing storage and **replays nothing** (the controller suppresses replay anyway, `:2288-2308`). Responds with the same `modes`/`configOptions` shape plus `_meta.pi.run = {state, runId}`.
-- **`session/set_config_option`, `session/set_mode`:** call `configure({model, thinkingLevel})` or set the permission mode. Respond with the full `configOptions` snapshot; the controller requires a confirmed snapshot (`:1232-1263`).
+- **`session/load {sessionId, cwd, mcpServers}`:** opens existing storage and **replays nothing** (the controller suppresses replay anyway, `:2288-2308`). Responds with the same `configOptions` shape (mode included) plus `_meta.pi.run = {state, runId}`.
+- **`session/set_config_option`:** `mode` commits the permission mode (`app.rp-permission`); `model` and `thinking_level` call `configure({model, thinkingLevel})`. Every response is the full `configOptions` snapshot; the controller requires a confirmed snapshot (`:1232-1263`). `session/set_mode` is accepted as a legacy alias for `mode`.
 - **`session/prompt {sessionId, prompt, _meta:{requestId}}`:**
   - Calls `root.submit({type:"input", content, requestId, whenBusy:"followUp"})` and streams events.
   - Responds `{stopReason: end_turn|cancelled|refusal, usage}` when the run that consumed this input ends.
@@ -311,7 +312,7 @@ Why a stdio relay instead of RepoPrompt dialing the socket directly:
   | pi event | ACP update |
   |---|---|
   | `message_update` | `agent_message_chunk` / `agent_thought_chunk` (with `messageId`) |
-  | `tool_execution_start` | `tool_call{toolCallId, title, kind, rawInput}` |
+  | `tool_execution_start` | `tool_call{toolCallId, title, kind, rawInput}`; pi's tool name rides `_meta.pi.toolName` (ACP forbids custom root fields on spec types) |
   | `tool_execution_update` / `end` | `tool_call_update{status: in_progress\|completed\|failed, rawOutput, content}` |
   | `pi.usage` | `usage_update{used, size, cost}` |
   | `compaction_start` / `end` | `session_info_update` |
@@ -370,8 +371,9 @@ Used only between the daemon and `attach`, never seen by RepoPrompt:
    - Otherwise the delta is all active entries and `resync=true` (compaction or reset moved the head). A fork is a separate conversation with a fresh `pi.provider` identity (README:113), so it never reaches this path.
 4. Translate the delta with the same translator used for live updates. Include `run`, `hasPendingPermission` (from the approvals doc, §7.3), and `inbox`.
 5. Mark the connection attached, but buffer live batches until `_pi/session/ready`. Then flush them and forward each later batch as `session/update`. Without the ready gate, updates sent before the client installs its consumer would be dropped (`resetEventsStreamForNextTurn`, controller :4126-4132).
-   - Pi re-emits a fresh snapshot when the subscriber is more than 100 batches behind.
+   - Pi re-emits a fresh snapshot when the subscriber is more than 100 batches behind (`session/observation.ts`: 100 queued batches collapse into one current snapshot, so a queued `run_end` can disappear).
    - The binary keeps a per-connection high-water `entryId` and forwards only entries after it, so RepoPrompt never sees a mid-stream snapshot.
+   - **Review fix (finding 5):** an overflow snapshot is reconciled for *control state* too, not only entries. The binary diffs the snapshot's `run`, `inbox`, and `pi.live` against what it last forwarded: if a run it reported as active is gone, it synthesizes exactly one `_pi/run_end` for that run (the sole terminal trigger of a synthetic reattached turn, §5.4); a newly active run gets `_pi/run_start`. `generation.message` (the in-flight partial) and `tools` live outside `entries`, so the binary re-sends the partial's unforwarded suffix and the state of open tool calls from the snapshot. Tests: overflow across a run's completion (one terminal, no hang) and mid-stream reattach (no duplicate or lost text).
 6. Attach is exclusive per session. A second attach gets `attach_conflict` unless it passes `takeover: true`; takeover detaches the previous client, whose relay exits with code 75.
    - **Automatic reattach always sends `takeover:false`.**
    - On `attach_conflict`, RepoPrompt shows "open in another window" and stops retrying.
@@ -385,7 +387,7 @@ Cost: O(entries) per attach. Entries are bounded by compaction, so this is accep
 ## 4. Packaging, release, and CI
 
 **Decisions.**
-- **Source owner:** the pi fork `dsebban/pi`, package `packages/rp-pi-durable`, pinned to an exact pi-durable commit. It depends on unpublished `--conditions=source` monorepo packages and an experimental API. CE holds only the pin, the verifier, packaging, and the workflow.
+- **Source owner (amended at implementation):** the package source lives in this repo at `Vendor/PiDurable/rp-pi-durable/` and builds against the **official** pi monorepo (https://github.com/earendil-works/pi, linked from pi.dev) at the exact commit in `Vendor/PiDurable/rp-pi-durable/pi-pin.json`. `Scripts/build_rp_pi_durable.sh` clones that commit, runs `npm ci --ignore-scripts`, hydrates pi-ai's generated model data, drops the package into `packages/rp-pi-durable`, and runs `bun build --compile --conditions=source`. The original plan put the source in the fork `dsebban/pi`; keeping it in CE pins the source and the Swift contract in one review, and the fork is not needed. The package still depends on unpublished `--conditions=source` monorepo packages (including pi's own `ModelRuntime`/`SettingsManager` by source path) and an experimental API, so the pin is exact.
 - **Artifact matrix:**
   - `aarch64-apple-darwin` and `x86_64-apple-darwin`: bundled in the universal release.
   - `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu`: never bundled. Downloaded into a local verified cache for remote install.
@@ -398,7 +400,7 @@ Cost: O(entries) per attach. Entries are bounded by compaction, so this is accep
   - The reason is JavaScriptCore JIT under hardened runtime (ext: Bun docs; Phase 0 validates by running the signed binary from a packaged app).
   - Linux artifacts are hash-verified only.
 
-**Fork release pipeline** (`.github/workflows/release-rp-pi-durable.yml` in the fork, triggered by tag `rp-pi-durable-v<semver>`):
+**Release pipeline** (`.github/workflows/release-rp-pi-durable.yml`, triggered by tag `rp-pi-durable-v<semver>`; it calls `Scripts/build_rp_pi_durable.sh --target …`):
 - Matrix jobs:
   - macOS arm64 on a native runner;
   - macOS x86_64 on a native Intel runner (avoids the cross-target download that failed in the probe);
@@ -671,7 +673,7 @@ struct AgentPiDurableRequestRecord: Codable, Equatable {
 - **Ledger flow:**
   1. Append the user item.
   2. Ledger state `recorded`.
-  3. `scheduleSave`.
+  3. **Review fix (finding 2): await a successful save** through the existing `flushSaveRequired` barrier (`AgentModeViewModel.swift`), not `scheduleSave`. `scheduleSave` is a cancellable one-second debounce; a crash inside that window would leave the daemon running a request whose UUID and ledger never reached disk, which recovery cannot replay by its original identity. A failed save aborts the send.
   4. Send `session/prompt` (or `_pi/session/steer`) with `requestId`; state `dispatched`.
   5. `_pi/run_start{requestIds}` arrives; state `acknowledged`.
   6. Terminal; state `completed`.
@@ -679,11 +681,13 @@ struct AgentPiDurableRequestRecord: Codable, Equatable {
 - A `recorded` record (never dispatched) is dispatched normally.
 - **A user resend always mints a new `requestId`.** A withdrawn or aborted submission settles `unanswered`, and the same `requestId` would return that dead submission (§2.1), so a resend reusing it would silently no-op.
 - **Eviction:** only `completed` or `withdrawn` records are evicted, oldest first, keeping at most 64 of them. `recorded`, `dispatched`, and `acknowledged` records are never evicted.
+- **Tests (review fix):** crash-before-save and failed-save cases assert that no provider dispatch happens.
 
 ### 6.3 Cursor and entry reconciliation (RepoPrompt side)
 - Each delta and live update carries `_meta.entryId`.
 - The provider stamps `entryId` into `AIStreamResult.contentMessageID` for assistant text and uses `stableInvocationUUID(toolCallId)` for tools (`ACPProviderSupport.swift:187-199`).
 - **Dedupe source (correction vs export):** the runner builds the dedupe set from the persisted transcript's `contentMessageID`s and tool invocation IDs, not from a fixed 256-entry ring. `resync=true` sends *all* active entries, and long sessions exceed any fixed ring; the transcript is already the source of truth in the same JSON.
+- **Persisted carrier (review fix, finding 3):** today stream ingestion passes only text into the transcript, and `AgentTranscriptActivity` and its item conversions carry no provider-message identity, so stamping `AIStreamResult.contentMessageID` alone cannot populate a restored dedupe set. Phase 3 therefore adds an optional `providerEntryID` to the transcript activity and items (Codable, `decodeIfPresent`, no schema bump, §6.1), sets it at ingestion from `contentMessageID`, and keeps it through every item conversion. Test: save → hydrate → full resync shows no duplicate assistant text.
 - The cursor advances as items are handed to persistence. Cursor and transcript live in the same JSON, so they cannot diverge.
 - `resync == true` adds a system note "History re-synchronized with <host>" and dedupes by `entryId`. Items without IDs (reasoning) may rarely duplicate; that is accepted.
 
@@ -778,7 +782,7 @@ Correctness argument:
 - it can await for days without a lease or timeout;
 - it resolves cleanly on abort.
 
-`HookApi` documents only `memo` and `snapshot` (spec.md:2600-2601). **Fallback if hooks cannot commit:** keep pending approvals in a binary-side in-memory map, rebuilt on restart from the hook rerun. The rerun is guaranteed because intent is uncommitted.
+`HookApi` documents only `memo` and `snapshot` (spec.md:2600-2601). **Phase 0 (c) result:** the hook cannot commit through `HookApi`, but the binary commits the session rule (`app.rp-approval-rules`) and the permission mode (`app.rp-permission`) through its own `Harness`, which works from inside a running hook. Pending approvals in Phase 1 stay in a binary-side in-memory map; the rerun after a crash before intent commit is verified, so Phase 4 can rebuild them from the hook rerun.
 
 ### 7.4 Disconnect, timeout, restart, cancel
 - **No attached client (Phase 3+):**
@@ -801,6 +805,8 @@ Correctness argument:
   - **`acceptsPendingACPApprovalWhenActivated = (level == .fullAccess)`**
 
   **Correction vs export:** the export set the last flag to `true` unconditionally. The live session-mode arm (`AgentModeProviderBindingService.swift:209-221`) answers the pending approval with `.acceptForSession` whenever the flag is set, so switching to **Ask** mid-approval would approve it. OpenCode gates the flag the same way (`OpenCodeAgentToolPreferences.swift:39-40`).
+
+  **Review fix (finding 4):** for Pi Durable that answer must be one-time. `.acceptForSession` selects `allow_always`, which the binary persists as a session rule (§7.3), so Ask → pending bash → Full access → Ask would leave later bash calls allowed, even after reattach. `AgentModeProviderBindingService.pendingApprovalActivationDecision(for:)` returns `.accept` (`allow_once`) for `.piDurable`; persistent grants come only from an explicit "accept for session". Regression: the downgrade/restart case in the Phase 1 tests.
 
 ---
 
@@ -1109,3 +1115,27 @@ Remaining questions:
 - `earendil-works/pi:packages/mcp/README.md`, `earendil-works/pi:packages/{protocol,server}/README.md`
 - Agent Client Protocol: https://agentclientprotocol.com
 - Devin provider introduction: commit `5d9299b61` (#999)
+
+---
+
+## 12. Implementation status (2026-10-08)
+
+### Phase 0 (done, Linux)
+Facts (a)–(d), (g), (h) are verified and recorded in `research.md` ("Phase 0 contract spike"); (e) hardened runtime and (f) a real-provider run need macOS and credentials and remain open. Consequences already applied above: child mode aborts interrupted work on open (b); approvals commit outside `HookApi` (c); tool names ride `_meta.pi` and extension support is advertised under `agentCapabilities._meta` (d); the `0700` directory stays the socket access control (g); Phase 3/6 should evaluate ACP `session/resume` and `session/delete` (h).
+
+### Phase 1a binary (done)
+`Vendor/PiDurable/rp-pi-durable/` (built by `Scripts/build_rp_pi_durable.sh` against official pi `6fb2e781`):
+- `acp` child mode per §3.3, §3.5, §3.6: `initialize` (`loadSession`, no images, `_meta.pi`), `session/new|load` with per-session SQLite, `meta.json`, `lock` (proper-lockfile, stale 10 s), `session/set_config_option` (`mode`, `model`, `thinking_level`; full confirmed snapshot), legacy `session/set_mode`, `session/prompt` with `_meta.requestId` dedupe, `/compact`, `session/cancel`, `_pi/host/info`, `available_commands_update`, and `_pi/run_start|run_end`.
+- Error contract: only `session_not_found` uses `-32602` + `Session not found: <id>`; everything else uses `-32000…-32008` with `data.kind`, and wrapped messages never say "invalid params".
+- Approvals per §7.1–7.3 (attached-only): `beforeTool` asks for `write`/`edit`/`bash`/other tools in Ask, `bash`/other in Auto Edit, nothing in Full Access; `read` never asks. Decisions are memoized per call; `allow_always` commits a session rule; a `cancelled` outcome without `session/cancel` stays parked until the run is aborted.
+- Model list from pi's `ModelRuntime` (host-owned `auth.json`/`models.json`), initial model from pi's `settings.json`, pi's HTTP setup and harness settings; `--ephemeral` uses `MemoryStorage`. `RP_PI_DURABLE_FAUX=1` selects a deterministic faux model for tests.
+- Validation: `test/conformance.mjs` 18/18 against the compiled linux-x64 binary (handshake, config snapshot and `invalid_mode`, streaming, request-id dedupe, allow/reject/allow-always/full-access, cancel mid-tool and mid-approval, `/compact`, host info, lock contention `-32001` with no fork, `-32602` not-found, reload after exit, `kill -9` mid-tool abandoned on reload, ephemeral writes nothing); `tsc` with pi's tsconfig and `biome check` are clean.
+
+### Phase 1b Swift (done; CI is the compiler)
+All §5.1/§5.2 Phase 1 rows: `PiDurableAgentConfig`, `PiDurableRuntimeLocator` (override `RP_PI_DURABLE_BINARY` / `piDurableBinaryOverridePath` setting, then installed PATH + hints), `PiDurableLaunchResolver` (`--version --json` protocol 1 and minimum `0.1.0`, `acp --help`, executable identity, no `.app` paths), `PiDurableACPAgentProvider`, `PiDurableModelDiscoveryService`, `PiDurableAgentToolPreferences`, the secure document and storage account `rp.agent.permissions.piDurable.v1`, every exhaustive switch, catalog/availability (headless excluded), the CLI Providers row (runtime source/path, Discover Models, permission picker), and an unsupported headless provider until Phase 4. Deviations: the discovery service is owned by `APISettingsViewModel` instead of a `static let shared` (the modularization ratchet gates new singletons); `PiDurableRuntimeSource` has no `.bundled` case until Phase 2.
+
+Tests: `PiDurableRuntimeAvailabilityTests`, `PiDurableACPProviderTests` (with the opt-in real-binary test behind `RP_PI_DURABLE_BINARY`), `PiDurablePermissionLevelTests`, `PiDurableACPControllerIntegrationTests` (fake `rp-pi-durable`: `-32602` load falls back, `-32001` locked load does not, mode and model via `session/set_config_option` with the initial Ask applied, unadvertised mode rejected before any mutation, "accept for session" → `allow_always`, switching to Ask mid-approval answers nothing), plus `.piDurable` in `ACPPermissionScopeTests`, the session-link compaction matrix, and the secure-storage catalog goldens.
+
+### Not done here
+- Phase 1c live slice (`make dev-run`, `rpce-cli-debug` `agent_run` smoke) needs a macOS machine with the CE debug app.
+- Phases 2–6 are unchanged plans; D1 (detach on quit) still needs an owner's call before Phase 3.

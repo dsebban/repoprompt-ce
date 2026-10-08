@@ -1,6 +1,6 @@
 # Pi Durable Agent Mode provider (proposal)
 
-Status: proposal and plan only. No product code changes.
+Status: Phase 0 and Phase 1 implemented (plan §12). The binary source is `Vendor/PiDurable/rp-pi-durable/`, built against the official pi monorepo by `Scripts/build_rp_pi_durable.sh`; the Swift provider is under `Sources/RepoPrompt/Infrastructure/AI/Providers/PiDurable/`.
 
 A new Agent Mode provider, `AgentProviderKind.piDurable`. It is backed by `rp-pi-durable`, a self-hosted, precompiled binary that wraps [`@earendil-works/pi-durable`](https://github.com/earendil-works/pi/tree/main/packages/durable), a durable conversation/task harness on SQLite. It runs locally or on any SSH-reachable host. Runs survive process crashes, SSH drops, and RepoPrompt relaunches, and the model list comes from the models credentialed on that host.
 
@@ -39,4 +39,4 @@ A new Agent Mode provider, `AgentProviderKind.piDurable`. It is backed by `rp-pi
 
 ## Next step
 
-Phase 0 contract spike, then Phase 1: the smallest local slice (child mode, no MCP, no daemon). See `plan.md` §9.
+Phase 1c live slice on macOS (`make dev-run`, then the `rpce-cli-debug` `agent_run` smoke with a built `rp-pi-durable`), then Phase 2 packaging or, per D6, Phase 3 durable runs once D1 is decided. See `plan.md` §9 and §12.
