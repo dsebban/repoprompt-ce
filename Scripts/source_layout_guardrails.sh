@@ -815,6 +815,7 @@ allowed_tracked_docs=(
   "docs/migrations/build-modularization/ratchets.json"
   "docs/migrations/build-modularization/build-ratchets.json"
   "docs/open-source-readiness.md"
+  "docs/plans/workspace-overseer-issue-draft.md"
   "docs/privacy/telemetry.md"
   "docs/releasing.md"
   "docs/testing.md"
