@@ -5,7 +5,7 @@ import RepoPromptSettingsCore
 
 struct OracleToolSettlementCallbacks {
     let prepared: @MainActor @Sendable (_ groupID: OracleGroupID, _ turnID: OracleTurnID) async -> Void
-    let settled: @MainActor @Sendable (_ result: OracleGroupResult, _ turnID: OracleTurnID) -> Void
+    let settled: @MainActor @Sendable (_ result: OracleGroupResult, _ turnID: OracleTurnID, _ reconciliationGuidance: String) -> Void
 }
 
 struct AppOracleGroupExecutionCallbacks {
@@ -31,7 +31,7 @@ private struct AppOracleConfiguredRosterSelection {
 
 private enum AppOracleConfiguredRosterDispatch {
     case singleMCPValue([String: Value])
-    case groupedCompletion(OracleGroupRuntime.Completion)
+    case groupedCompletion(OracleGroupRuntime.Completion, reconciliationGuidance: String)
 }
 
 private enum AppOracleConfiguredRosterSingleFallback {
@@ -120,11 +120,12 @@ extension OracleViewModel {
         ) {
         case let .singleMCPValue(value):
             value
-        case let .groupedCompletion(completion):
+        case let .groupedCompletion(completion, reconciliationGuidance):
             Self.oracleGroupValue(
                 completion.result,
                 mode: completion.terminalDocument.turns.last?.input.mode.rawValue ?? "chat",
-                tabContext: tabContext
+                tabContext: tabContext,
+                reconciliationGuidance: reconciliationGuidance
             )
         }
     }
@@ -155,7 +156,7 @@ extension OracleViewModel {
         ) {
         case .singleMCPValue:
             throw ChatToolError.internalError("Configured Oracle group dispatcher returned a single response.")
-        case let .groupedCompletion(completion):
+        case let .groupedCompletion(completion, _):
             return completion
         }
     }
@@ -176,6 +177,11 @@ extension OracleViewModel {
         let workspaceID = tabContext?.workspaceID ?? workspaceManager.activeWorkspace?.id
         let profile = capturedProfile
             ?? GlobalSettingsStore.shared.effectiveAgentModelsProfile(workspaceID: workspaceID)
+        // Freeze delivery policy before canonical lookup or session restoration can suspend.
+        // A CB start already carries its pre-discovery authority. Later continuations use
+        // the newly captured scoped profile, independently of frozen roster/prompt history.
+        let reconciliationGuidance = resolvedStartExecution?.reconciliationGuidance
+            ?? OracleGroupDeliveryContract.effectiveReconciliationGuidance(profile.oracleReconciliationGuidance)
         let route = try OracleConversationRoute.resolve(
             chatID: args["chat_id"]?.stringValue,
             newChat: args["new_chat"]?.boolValue == true,
@@ -253,13 +259,14 @@ extension OracleViewModel {
             tabContext: tabContext,
             workspaceID: workspaceID,
             startExecution: startExecution,
+            reconciliationGuidance: startExecution?.reconciliationGuidance ?? reconciliationGuidance,
             selectionSnapshotOverride: selectionSnapshotOverride,
             existingGroup: selection.group,
             frozenInput: frozenInput,
             callbacks: callbacks,
             contextBuilderSupervision: contextBuilderSupervision
         )
-        return .groupedCompletion(completion)
+        return .groupedCompletion(completion, reconciliationGuidance: startExecution?.reconciliationGuidance ?? reconciliationGuidance)
     }
 
     @MainActor
@@ -342,6 +349,7 @@ extension OracleViewModel {
         tabContext: OracleSendTabContext?,
         workspaceID: UUID?,
         startExecution: ResolvedOracleExecution?,
+        reconciliationGuidance: String,
         selectionSnapshotOverride: OracleSelectionSnapshot?,
         existingGroup: OracleGroupDocument?,
         frozenInput: OracleInput?,
@@ -496,7 +504,7 @@ extension OracleViewModel {
             }
             recordOracleGroupPresentation(completion.terminalDocument)
             if let turn = completion.terminalDocument.turns.last {
-                tabContext?.toolSettlement?.settled(completion.result, turn.id)
+                tabContext?.toolSettlement?.settled(completion.result, turn.id, reconciliationGuidance)
             }
             return completion
         } catch {
@@ -858,9 +866,12 @@ extension OracleViewModel {
     static func oracleGroupValue(
         _ result: OracleGroupResult,
         mode: String,
-        tabContext: OracleSendTabContext?
+        tabContext: OracleSendTabContext?,
+        reconciliationGuidance: String? = nil
     ) -> [String: Value] {
-        var object = OracleGroupMCPCodec.groupFields(result)
+        var object = ContextBuilderOracleGroupReply(
+            result: result, reconciliationGuidance: reconciliationGuidance
+        ).toMCPFields()
         object.merge([
             "chat_id": .string(result.primary.chatID),
             "mode": .string(mode),
