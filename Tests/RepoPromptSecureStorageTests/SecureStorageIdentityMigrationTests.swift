@@ -428,11 +428,13 @@ final class SecureStorageIdentityMigrationTests: XCTestCase {
         XCTAssertEqual(migrationAccounts.count, 24)
         XCTAssertFalse(migrationAccounts.contains(.jevRouterAPIKey))
         XCTAssertTrue(runtimeAccounts.contains(.jevRouterAPIKey))
-        XCTAssertEqual(runtimeAccounts.count, 27)
+        XCTAssertEqual(runtimeAccounts.count, 28)
         XCTAssertFalse(migrationAccounts.contains(.agentPermissionAntigravityDocument))
         XCTAssertTrue(runtimeAccounts.contains(.agentPermissionAntigravityDocument))
         XCTAssertFalse(migrationAccounts.contains(.agentPermissionDevinDocument))
         XCTAssertTrue(runtimeAccounts.contains(.agentPermissionDevinDocument))
+        XCTAssertFalse(migrationAccounts.contains(.agentPermissionPiDurableDocument))
+        XCTAssertTrue(runtimeAccounts.contains(.agentPermissionPiDurableDocument))
         XCTAssertTrue(SecureStorageIdentityMigrationBootstrap.preparerCatalogSupportsFrozenCatalog())
 
         let manifest = SecureStorageIdentityMigrationManifest(

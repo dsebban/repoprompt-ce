@@ -168,6 +168,15 @@ final class AgentProviderPreferenceSnapshotStore {
             return AgentProviderRuntimePermissionBinding(
                 acpLaunchPermissionMode: level.cliPermissionMode
             )
+        case .piDurable:
+            let level = effectivePiDurablePermissionLevel(profile: profile)
+            // Pi Durable's level is a live ACP session mode, so the controller stays
+            // reusable across changes. Full access is provider-native; RepoPrompt never
+            // auto-selects its permission options.
+            return AgentProviderRuntimePermissionBinding(
+                acpSessionModeID: level.sessionModeID,
+                acceptsPendingACPApprovalWhenActivated: level.acceptsPendingApprovalWhenActivated
+            )
         }
     }
 
@@ -188,6 +197,8 @@ final class AgentProviderPreferenceSnapshotStore {
             GrokBuildAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
         case let .devin(level):
             DevinAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
+        case let .piDurable(level):
+            PiDurableAgentToolPreferences.setPermissionLevel(level, defaults: defaults, secureStore: securePermissions)
         }
         bumpRevision(for: id.providerID)
         return id.providerID
@@ -473,6 +484,26 @@ final class AgentProviderPreferenceSnapshotStore {
                     )
                 }
             )
+        case .piDurable:
+            let effective = effectivePiDurablePermissionLevel(profile: profile)
+            return AgentPermissionChromeBinding(
+                providerID: providerID,
+                displayName: effective.displayName,
+                iconName: effective.iconName,
+                isWarning: effective.isWarning,
+                externallyManagedReason: externallyManagedReason,
+                options: PiDurableAgentToolPreferences.PermissionLevel.allCases.map { level in
+                    AgentPermissionOptionBinding(
+                        id: .piDurable(level),
+                        title: level.displayName,
+                        iconName: level.iconName,
+                        detailText: level.detailText,
+                        isWarning: level.isWarning,
+                        isSelected: level == effective,
+                        isEnabled: externallyManagedReason == nil
+                    )
+                }
+            )
         }
     }
 
@@ -709,6 +740,17 @@ final class AgentProviderPreferenceSnapshotStore {
         )
     }
 
+    private func effectivePiDurablePermissionLevel(
+        profile: AgentProviderPermissionProfile
+    ) -> PiDurableAgentToolPreferences.PermissionLevel {
+        profile.piDurablePermissionLevel(
+            userConfigured: PiDurableAgentToolPreferences.permissionLevel(
+                defaults: defaults,
+                secureStore: securePermissions
+            )
+        )
+    }
+
     private static func representativeAgent(for providerID: AgentProviderBindingID) -> AgentProviderKind {
         switch providerID {
         case .codex: .codexExec
@@ -718,6 +760,7 @@ final class AgentProviderPreferenceSnapshotStore {
         case .grokBuild: .grokBuild
         case .antigravity: .antigravity
         case .devin: .devin
+        case .piDurable: .piDurable
         }
     }
 

@@ -21,6 +21,7 @@ enum AgentProviderPermissionLevelID: Hashable {
     case cursor(CursorAgentToolPreferences.PermissionLevel)
     case grokBuild(GrokBuildAgentToolPreferences.PermissionLevel)
     case devin(DevinAgentToolPreferences.PermissionLevel)
+    case piDurable(PiDurableAgentToolPreferences.PermissionLevel)
 
     var providerID: AgentProviderBindingID {
         switch self {
@@ -38,6 +39,8 @@ enum AgentProviderPermissionLevelID: Hashable {
             .grokBuild
         case .devin:
             .devin
+        case .piDurable:
+            .piDurable
         }
     }
 
@@ -57,6 +60,8 @@ enum AgentProviderPermissionLevelID: Hashable {
             .grokBuild(.managedDefault)
         case .devin:
             .devin(.normal)
+        case .piDurable:
+            .piDurable(.ask)
         }
     }
 
@@ -76,6 +81,8 @@ enum AgentProviderPermissionLevelID: Hashable {
             GrokBuildAgentToolPreferences.PermissionLevel.allCases.map(AgentProviderPermissionLevelID.grokBuild)
         case .devin:
             DevinAgentToolPreferences.PermissionLevel.allCases.map(AgentProviderPermissionLevelID.devin)
+        case .piDurable:
+            PiDurableAgentToolPreferences.PermissionLevel.allCases.map(AgentProviderPermissionLevelID.piDurable)
         }
     }
 
@@ -103,6 +110,9 @@ enum AgentProviderPermissionLevelID: Hashable {
         case .devin:
             guard let level = DevinAgentToolPreferences.PermissionLevel(rawValue: raw) else { return nil }
             self = .devin(level)
+        case .piDurable:
+            guard let level = PiDurableAgentToolPreferences.PermissionLevel(rawValue: raw) else { return nil }
+            self = .piDurable(level)
         }
     }
 
@@ -121,6 +131,8 @@ enum AgentProviderPermissionLevelID: Hashable {
         case let .grokBuild(level):
             level.rawValue
         case let .devin(level):
+            level.rawValue
+        case let .piDurable(level):
             level.rawValue
         }
     }
@@ -141,6 +153,8 @@ enum AgentProviderPermissionLevelID: Hashable {
             level.displayName
         case let .devin(level):
             level.displayName
+        case let .piDurable(level):
+            level.displayName
         }
     }
 
@@ -159,6 +173,8 @@ enum AgentProviderPermissionLevelID: Hashable {
         case let .grokBuild(level):
             level.iconName
         case let .devin(level):
+            level.iconName
+        case let .piDurable(level):
             level.iconName
         }
     }
@@ -179,6 +195,8 @@ enum AgentProviderPermissionLevelID: Hashable {
             level.detailText
         case let .devin(level):
             level.detailText
+        case let .piDurable(level):
+            level.detailText
         }
     }
 
@@ -197,6 +215,8 @@ enum AgentProviderPermissionLevelID: Hashable {
         case let .grokBuild(level):
             level.isWarning
         case let .devin(level):
+            level.isWarning
+        case let .piDurable(level):
             level.isWarning
         }
     }

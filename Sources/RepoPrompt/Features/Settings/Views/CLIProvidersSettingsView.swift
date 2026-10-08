@@ -78,6 +78,7 @@ struct CLIProvidersSettingsView: View {
     @State private var isCursorExpanded: Bool = false
     @State private var isGrokBuildExpanded: Bool = false
     @State private var isDevinExpanded: Bool = false
+    @State private var isPiDurableExpanded: Bool = false
 
     // Per-backend secret text entry buffers (GLM uses viewModel.zaiApiKey directly).
     // SEARCH-HELPER: Claude-Compatible Backends settings, Kimi API key entry, Custom backend key entry
@@ -98,6 +99,7 @@ struct CLIProvidersSettingsView: View {
             || viewModel.isCursorConnected
             || viewModel.isGrokBuildConnected
             || DevinRuntimeLocator.isInstalledSync()
+            || PiDurableRuntimeLocator.isAvailableSync()
     }
 
     private var codexStatusText: String? {
@@ -160,12 +162,14 @@ struct CLIProvidersSettingsView: View {
                 grokBuildCard
                 antigravityCard
                 devinCard
+                piDurableCard
             }
             .padding(16)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .onAppear {
             viewModel.refreshDevinModels()
+            viewModel.refreshPiDurableModels()
             Task {
                 await viewModel.loadCompatibleBackendState()
                 isAntigravityInstalled = AntigravityRuntimeManager.installedRuntimeSync() != nil
@@ -2213,6 +2217,62 @@ struct CLIProvidersSettingsView: View {
                     }
 
                     directProviderInlineControls(for: .devin)
+                }
+            }
+        }
+    }
+
+    private var piDurableCard: some View {
+        let runtime = PiDurableRuntimeLocator.currentRuntimeSync()
+        return providerCard(
+            title: "Pi Durable",
+            subtitle: "Uses a self-hosted `rp-pi-durable acp` runtime for interactive Agent Mode. Conversations persist in local SQLite; models come from this host's pi credentials.",
+            infoURL: "https://pi.dev",
+            isConnected: runtime != nil,
+            isExpanded: $isPiDurableExpanded
+        ) {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(
+                    runtime != nil
+                        ? "pi owns model credentials on this host. RepoPrompt MCP tools, Context Builder, and delegated runs are not available yet."
+                        : "Build `rp-pi-durable` into ~/.local/share/rp-pi-durable/current/bin, put it on PATH, or set RP_PI_DURABLE_BINARY."
+                )
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                if let runtime {
+                    Text("Runtime: \(runtime.source.rawValue) — \(runtime.path)")
+                        .font(.caption.monospaced())
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Always offered: discovery resolves against the shell environment, which can
+                // find a shell-only install the app's inherited environment cannot see.
+                HStack(spacing: 10) {
+                    Button {
+                        viewModel.refreshPiDurableModels(force: true)
+                    } label: {
+                        if viewModel.isDiscoveringPiDurableModels {
+                            ProgressView().scaleEffect(0.6).frame(height: 16)
+                        } else {
+                            Label("Discover Models", systemImage: "arrow.clockwise")
+                        }
+                    }
+                    .disabled(viewModel.isDiscoveringPiDurableModels)
+                    .buttonStyle(CustomButtonStyle())
+
+                    if let message = viewModel.piDurableModelDiscoveryMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if runtime != nil {
+                    directProviderInlineControls(for: .piDurable)
                 }
             }
         }

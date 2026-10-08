@@ -5983,7 +5983,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                     modelContextWindow: session.codexContextUsage?.modelContextWindow
                 )
             }
-        case .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin:
+        case .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable:
             break
         }
         session.contextUsageSnapshot = ContextUsageSnapshot.fromAgentContextUsage(
@@ -18502,7 +18502,8 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     ) -> String {
         guard !attachments.isEmpty else { return text }
         switch agent {
-        case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .openCode, .cursor, .antigravity:
+        case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .openCode, .cursor, .antigravity, .piDurable:
+            // Pi Durable advertises no image prompt capability; its `read` tool opens the path.
             return renderAtPathAttachmentMessage(text: text, attachments: attachments)
         case .codexExec, .grokBuild, .devin:
             // These transports deliver pixels natively but no file path, so the agent could not

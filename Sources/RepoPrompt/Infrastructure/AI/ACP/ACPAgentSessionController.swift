@@ -982,7 +982,7 @@ actor ACPAgentSessionController {
         }
 
         switch provider.providerID {
-        case .openCode, .cursor, .grokBuild, .antigravity, .devin:
+        case .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable:
             if let sessionModelFailureReason {
                 throw ControllerError.protocolViolation("malformed modern model config option: \(sessionModelFailureReason)")
             }
@@ -3983,10 +3983,11 @@ actor ACPAgentSessionController {
         switch provider.providerID {
         case .cursor:
             return optionID(for: options, preferences: genericAllowOptionPreferences(sessionScoped: true))
-        case .openCode, .grokBuild, .antigravity, .devin:
-            // Grok full access is provider-native (`grok agent --always-approve stdio`) and
-            // Devin's is a launch-time `--permission-mode`; the controller never
-            // auto-selects permission options for either.
+        case .openCode, .grokBuild, .antigravity, .devin, .piDurable:
+            // Grok full access is provider-native (`grok agent --always-approve stdio`),
+            // Devin's is a launch-time `--permission-mode`, and Pi Durable's is its
+            // `full-access` session mode; the controller never auto-selects permission
+            // options for any of them.
             return nil
         }
     }
@@ -4033,7 +4034,9 @@ actor ACPAgentSessionController {
             // Strict RepoPrompt MCP auto-approval must remain genuinely one-time,
             // even when Grok mislabels a broader option's ID or kind.
             preferredAllowOptionID(for: options, sessionScoped: false)
-        case .devin:
+        case .devin, .piDurable:
+            // Pi Durable's `allow_always` persists a session rule in the durable binary, so
+            // automatic approval stays on the exact one-time option, as with Devin.
             safePermissionOptionsForAutoSelection(options).first(where: { $0.optionID == "allow_once" })?.optionID
         case .openCode, .cursor, .antigravity:
             optionID(
@@ -4268,6 +4271,8 @@ actor ACPAgentSessionController {
                 "RP_ANTIGRAVITY_ACP_RAW_CAPTURE_PATH"
             case .devin:
                 "RP_DEVIN_ACP_RAW_CAPTURE_PATH"
+            case .piDurable:
+                "RP_PI_DURABLE_ACP_RAW_CAPTURE_PATH"
             }
             let customPath = providerSpecificKey.flatMap { key in
                 env[key]?.trimmingCharacters(in: .whitespacesAndNewlines)

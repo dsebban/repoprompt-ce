@@ -1,0 +1,20 @@
+{
+	"name": "@repoprompt/rp-pi-durable",
+	"version": "0.1.0",
+	"private": true,
+	"description": "RepoPrompt CE's self-hosted pi-durable agent host: ACP over stdio plus _pi/* extensions",
+	"type": "module",
+	"bin": {
+		"rp-pi-durable": "./src/main.ts"
+	},
+	"scripts": {
+		"build": "bun build --compile --minify --conditions=source src/main.ts --outfile dist/rp-pi-durable",
+		"conformance": "node test/conformance.mjs"
+	},
+	"dependencies": {
+		"@earendil-works/chord": "*",
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-durable": "*",
+		"proper-lockfile": "*"
+	}
+}

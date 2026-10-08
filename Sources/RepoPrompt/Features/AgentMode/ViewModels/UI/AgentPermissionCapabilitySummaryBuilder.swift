@@ -222,6 +222,22 @@ struct AgentPermissionCapabilitySummaryBuilder {
                 approvalModeDescription: "Permission mode: \(level.displayName)",
                 warnings: warnings
             )
+        case .piDurable:
+            let level = piDurablePermissionLevel(profile: profile)
+            let warnings = level.isWarning
+                ? ["Pi Durable Full access runs every tool without approval prompts."]
+                : []
+            return AgentPermissionCapabilitySummary(
+                providerID: providerID,
+                providerName: providerID.displayName,
+                isAvailable: isAvailable,
+                fileMutation: "ACP mode: \(level.displayName)",
+                shell: "Handled by Pi Durable",
+                externalMCP: "Third-party MCP: not supported",
+                search: "Managed by Pi Durable",
+                approvalModeDescription: "ACP mode: \(level.displayName)",
+                warnings: warnings
+            )
         }
     }
 
@@ -246,6 +262,7 @@ struct AgentPermissionCapabilitySummaryBuilder {
         case .grokBuild: availability.grokBuildAvailable
         case .antigravity: availability.antigravityAvailable
         case .devin: availability.devinAvailable
+        case .piDurable: availability.piDurableAvailable
         }
     }
 
@@ -324,6 +341,15 @@ struct AgentPermissionCapabilitySummaryBuilder {
     private func devinPermissionLevel(profile: AgentProviderPermissionProfile) -> DevinAgentToolPreferences.PermissionLevel {
         profile.devinPermissionLevel(
             userConfigured: DevinAgentToolPreferences.permissionLevel(
+                defaults: defaults,
+                secureStore: securePermissions
+            )
+        )
+    }
+
+    private func piDurablePermissionLevel(profile: AgentProviderPermissionProfile) -> PiDurableAgentToolPreferences.PermissionLevel {
+        profile.piDurablePermissionLevel(
+            userConfigured: PiDurableAgentToolPreferences.permissionLevel(
                 defaults: defaults,
                 secureStore: securePermissions
             )

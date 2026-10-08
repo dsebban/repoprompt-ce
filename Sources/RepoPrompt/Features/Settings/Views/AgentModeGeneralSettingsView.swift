@@ -640,6 +640,8 @@ struct AgentModeGeneralSettingsView: View {
         case .grokBuild: apiSettingsVM.isGrokBuildConnected
         // Devin owns its own auth, so the installed CLI is the connection.
         case .devin: DevinRuntimeLocator.isInstalledSync()
+        // Pi Durable credentials are host-owned, so a resolvable runtime is the connection.
+        case .piDurable: PiDurableRuntimeLocator.isAvailableSync()
         }
     }
 
