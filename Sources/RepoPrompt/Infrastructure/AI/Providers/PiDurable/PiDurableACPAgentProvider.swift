@@ -127,7 +127,17 @@ struct PiDurableACPAgentProvider: ACPAgentProvider {
             // has no reattach, so the prompt response's `stopReason` stays the only terminal.
             return []
         }
-        return ACPDefaultSessionUpdateNormalizer.normalize(payload, providerID: .piDurable)
+        var projected = payload
+        if let update = (payload["sessionUpdate"] as? String)?.lowercased(),
+           update == "tool_call" || update == "tool_call_update",
+           let pi = (payload["_meta"] as? [String: Any])?["pi"] as? [String: Any],
+           let toolName = ACPRuntimeEventParsing.firstMachineIdentifier(in: pi, keys: ["toolName"])
+        {
+            // ACP forbids custom root fields on spec types, so the binary sends pi's tool name in
+            // `_meta.pi.toolName`; project it where the default normalizer looks.
+            projected["toolName"] = toolName
+        }
+        return ACPDefaultSessionUpdateNormalizer.normalize(projected, providerID: .piDurable)
     }
 
     /// The binary writes INFO logs to files; INFO lines that still reach stderr are noise.

@@ -80,6 +80,26 @@ final class PiDurableACPProviderTests: XCTestCase {
         )
     }
 
+    func testToolNameIsReadFromPiMetadata() {
+        let provider = PiDurableACPAgentProvider(config: PiDurableAgentConfig())
+        let events = provider.normalizeSessionUpdate(
+            [
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call-1",
+                "title": "bash: echo hi",
+                "kind": "execute",
+                "rawInput": ["command": "echo hi"],
+                "_meta": ["pi": ["toolName": "bash"]]
+            ],
+            sessionID: "s"
+        )
+        guard case let .stream(result)? = events.first else {
+            return XCTFail("Expected a tool call stream event")
+        }
+        XCTAssertEqual(result.type, "tool_call")
+        XCTAssertEqual(result.toolName, "bash")
+    }
+
     func testOnlyThinkingLevelIsAModelParameter() {
         let provider = PiDurableACPAgentProvider(config: PiDurableAgentConfig())
         XCTAssertTrue(provider.supportsParameterizedModelPicker)

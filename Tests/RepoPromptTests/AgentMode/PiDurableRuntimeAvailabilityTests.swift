@@ -1,6 +1,6 @@
 import Foundation
-import RepoPromptProcess
 @testable import RepoPromptApp
+import RepoPromptProcess
 import XCTest
 
 /// The resolvable `rp-pi-durable` runtime is Pi Durable's connection (credentials are
