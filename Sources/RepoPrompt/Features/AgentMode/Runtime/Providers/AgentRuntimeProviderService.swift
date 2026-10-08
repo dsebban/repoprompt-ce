@@ -45,6 +45,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
     case grokBuild
     case antigravity
     case devin
+    case piDurable
     case claudeCodeGLM
     case kimiCode
     case customClaudeCompatible
@@ -56,6 +57,9 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
     static let cursorMCPClientID = "Cursor"
     /// Devin's built-in Rust MCP client reports this exact initialize name.
     static let devinMCPClientID = "rmcp"
+    /// Pi Durable's MCP client name. Set now so the identity is stable; it is consumed only
+    /// once Pi Durable gains RepoPrompt MCP routing (Phase 4 of the Pi Durable plan).
+    static let piDurableMCPClientID = "rp-pi-durable"
     /// Grok Build presents `grok-shell-<injected server name>` (here `grok-shell-RepoPromptCEGrokRuntime`)
     /// to MCP servers. The hint must equal that exact registered name: the pending run-scoped
     /// tab-context store keys are raw client names (no family canonicalization), so a
@@ -79,6 +83,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "agy_acp_server.par"
         case .devin:
             "devin"
+        case .piDurable:
+            "rp-pi-durable"
         }
     }
 
@@ -98,6 +104,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "Google Antigravity"
         case .devin:
             "Devin CLI"
+        case .piDurable:
+            "Pi Durable"
         case .claudeCodeGLM:
             ClaudeCodeCompatibleBackendStore.shared.config(for: .glmZAI).normalizedDisplayName
         case .kimiCode:
@@ -123,6 +131,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "antigravity"
         case .devin:
             Self.devinMCPClientID
+        case .piDurable:
+            Self.piDurableMCPClientID
         }
     }
 
@@ -138,6 +148,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             .antigravity
         case .devin:
             .devin
+        case .piDurable:
+            .piDurable
         case .claudeCode, .codexExec, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             nil
         }
@@ -147,7 +159,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         switch self {
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             true
-        case .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin:
+        case .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable:
             false
         }
     }
@@ -160,12 +172,16 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         switch self {
         case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             true
+        case .piDurable:
+            // Phase 1 Pi Durable gets no RepoPrompt MCP (`mcpServers: []`), so the lease must
+            // never arm expected-PID routing for it. Flipped to `true` with the Phase 4 relay.
+            false
         }
     }
 
     var requiresPrePromptAgentModeMCPRouting: Bool {
         switch self {
-        case .cursor, .grokBuild, .antigravity:
+        case .cursor, .grokBuild, .antigravity, .piDurable:
             false
         case .claudeCode, .codexExec, .openCode, .devin, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             true
@@ -189,6 +205,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             return "xAI Grok Build ACP agent. Uses Grok Build's ACP runtime (`grok agent stdio`) and injects RepoPrompt MCP tools through ACP session configuration."
         case .devin:
             return "Installed Devin ACP agent for Agent Mode, Context Builder, and delegated runs. RepoPrompt injects its MCP tools through an isolated configuration overlay."
+        case .piDurable:
+            return "Pi Durable ACP agent (`rp-pi-durable`), a self-hosted pi-durable harness whose conversations persist in local SQLite and whose models come from the host's pi credentials. Available for interactive Agent Mode only; RepoPrompt MCP tools, Context Builder, and delegated headless runs are not supported yet."
         case .claudeCodeGLM:
             let config = ClaudeCodeCompatibleBackendStore.shared.config(for: .glmZAI)
             if case let .claudeSlotMapping(mapping) = config.modelBehavior {
@@ -227,6 +245,8 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             "grok_build_acp"
         case .devin:
             "devin_acp"
+        case .piDurable:
+            "pi_durable_acp"
         }
     }
 
@@ -240,7 +260,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
             .kimi
         case .customClaudeCompatible:
             .customCompatible
-        case .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin:
+        case .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable:
             nil
         }
     }
@@ -356,6 +376,12 @@ final class AgentRuntimeProviderService {
                     modelString: modelString
                 ),
                 workspacePath: workspacePath
+            )
+        case .piDurable:
+            // The headless surface excludes Pi Durable until its headless bridge lands
+            // (Phase 4 of the Pi Durable plan); this is the defensive fallback.
+            return UnsupportedHeadlessAgentProvider(
+                reason: "Pi Durable is currently supported only in interactive Agent Mode. Context Builder and delegated headless runs arrive in a later phase; choose another provider for them."
             )
         }
     }

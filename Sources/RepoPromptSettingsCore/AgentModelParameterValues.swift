@@ -6,6 +6,7 @@ package enum ACPProviderID: String, Codable, Hashable {
     case grokBuild
     case antigravity
     case devin
+    case piDurable
 }
 
 package enum ACPModelParameterKind: String, Codable, Hashable, CaseIterable {

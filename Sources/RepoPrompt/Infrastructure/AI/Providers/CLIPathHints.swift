@@ -10,6 +10,7 @@ enum CLIPathHints {
     static let cursor: [String] = CLILaunchProfiles.cursorProviderSpecificPaths
     static let grokBuild: [String] = CLILaunchProfiles.grokBuildProviderSpecificPaths
     static let devin: [String] = CLILaunchProfiles.devinProviderSpecificPaths
+    static let piDurable: [String] = CLILaunchProfiles.piDurableProviderSpecificPaths
 
     static func nativeDefaultsSupplemented(with providerSpecificPaths: [String]) -> [String] {
         CLILaunchProfiles.nativeDefaultsSupplemented(with: providerSpecificPaths)

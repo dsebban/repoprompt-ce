@@ -633,6 +633,11 @@ enum ACPPermissionOptionPolicy {
         switch providerID {
         case .openCode, .cursor, .antigravity:
             []
+        case .piDurable:
+            // Empty on purpose: the denylist also filters explicit user decisions, so listing
+            // `allow_always` would silently turn "accept for session" into `allow_once`.
+            // Automatic paths stay one-time through their exact `allow_once` selection.
+            []
         case .devin:
             ["allow_always", "allow_always_global", "allow_server_session", "allow_server_always"]
         case .grokBuild:

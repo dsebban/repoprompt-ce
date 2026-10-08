@@ -60,7 +60,8 @@ struct AgentProviderControlCommand: Equatable {
     /// stay unsupported whatever they advertise.
     static func acpRuntimeAdvertisesNativeCommands(_ agent: AgentProviderKind) -> Bool {
         switch agent {
-        case .devin, .grokBuild, .antigravity:
+        case .devin, .grokBuild, .antigravity, .piDurable:
+            // Pi Durable advertises only its native `compact`.
             true
         case .openCode, .cursor, .codexExec, .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             false

@@ -6,7 +6,7 @@ import XCTest
 
 final class ACPPermissionScopeTests: XCTestCase {
     func testOrdinaryApproveNeverSelectsAnAlwaysGrantForGenericProviders() async throws {
-        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity] {
+        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .piDurable] {
             for optionID in ["allow_always", "always", "opaque-always", "once", "allow_once"] {
                 for decision: AgentApprovalDecision in [.accept, .acceptForSession, .acceptWithExecpolicyAmendment("remember")] {
                     let outcome = try await permissionOutcome(
@@ -21,7 +21,7 @@ final class ACPPermissionScopeTests: XCTestCase {
     }
 
     func testNoOneTimeOptionDisablesPlainApproveForEveryACPProvider() async throws {
-        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .grokBuild, .devin] {
+        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .grokBuild, .devin, .piDurable] {
             let outcome = try await permissionOutcome(
                 providerID: providerID, decision: .decline, optionID: "allow_always", expectedPlainApprove: false
             )
@@ -31,7 +31,7 @@ final class ACPPermissionScopeTests: XCTestCase {
     }
 
     func testOneTimeOptionKeepsPlainApprovalAvailable() async throws {
-        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .grokBuild, .devin] {
+        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .grokBuild, .devin, .piDurable] {
             let outcome = try await permissionOutcome(
                 providerID: providerID, decision: .accept, optionID: "allow_once", optionKind: "allow_once", expectedPlainApprove: true
             )
@@ -203,11 +203,13 @@ final class ACPPermissionScopeTests: XCTestCase {
             ["optionId": "allow_once", "kind": "allow_once"],
             ["optionId": "reject_once", "kind": "reject_once"]
         ]
-        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .devin] {
+        for providerID: ACPProviderID in [.openCode, .cursor, .antigravity, .devin, .piDurable] {
             let result = try await autoApprovalOutcome(toolCallJSON: toolCall, providerID: providerID, options: options)
             XCTAssertFalse(result.approvalRequested, "\(providerID)")
             XCTAssertEqual(result.outcome["outcome"], "selected", "\(providerID)")
-            XCTAssertEqual(result.outcome["optionId"], providerID == .devin ? "allow_once" : "always", "\(providerID)")
+            // Devin and Pi Durable auto-approve only on the exact one-time option.
+            let oneTimeOnly = providerID == .devin || providerID == .piDurable
+            XCTAssertEqual(result.outcome["optionId"], oneTimeOnly ? "allow_once" : "always", "\(providerID)")
         }
     }
 
@@ -257,6 +259,7 @@ final class ACPPermissionScopeTests: XCTestCase {
         case .antigravity: .antigravity
         case .grokBuild: .grokBuild
         case .devin: .devin
+        case .piDurable: .piDurable
         }
         let request = ACPRunRequest(
             agentKind: agentKind, modelString: nil, workspacePath: directory.path,
@@ -352,6 +355,7 @@ private extension XCTestCase {
         case .antigravity: .antigravity
         case .grokBuild: .grokBuild
         case .devin: .devin
+        case .piDurable: .piDurable
         }
         let request = ACPRunRequest(
             agentKind: agentKind, modelString: nil, workspacePath: directory.path,

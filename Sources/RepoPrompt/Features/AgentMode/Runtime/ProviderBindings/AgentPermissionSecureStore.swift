@@ -13,6 +13,7 @@ enum AgentPermissionSecureDomain: String, CaseIterable, Hashable {
     case grokBuild
     case antigravity
     case devin
+    case piDurable
 
     var secureStorageAccount: SecureStorageAccount {
         switch self {
@@ -32,6 +33,8 @@ enum AgentPermissionSecureDomain: String, CaseIterable, Hashable {
             .agentPermissionAntigravityDocument
         case .devin:
             .agentPermissionDevinDocument
+        case .piDurable:
+            .agentPermissionPiDurableDocument
         }
     }
 
@@ -371,6 +374,34 @@ struct SecureAntigravityPermissionDocument: Codable, Equatable {
     }
 }
 
+/// Pi Durable permission level, applied per run as the binary's ACP session mode.
+/// Missing, blank, unknown, or unreadable values fail closed to Ask.
+struct SecurePiDurablePermissionDocument: Codable, Equatable {
+    static let currentSchemaVersion = 1
+
+    var schemaVersion: Int
+    var updatedAt: Date
+    var permissionLevelRaw: String?
+
+    init(
+        schemaVersion: Int = currentSchemaVersion,
+        updatedAt: Date = Date(),
+        permissionLevelRaw: String? = PiDurableAgentToolPreferences.PermissionLevel.ask.rawValue
+    ) {
+        self.schemaVersion = schemaVersion
+        self.updatedAt = updatedAt
+        self.permissionLevelRaw = permissionLevelRaw
+    }
+
+    static func failClosedDocument(now: Date = Date()) -> SecurePiDurablePermissionDocument {
+        SecurePiDurablePermissionDocument(updatedAt: now)
+    }
+
+    func permissionLevel() -> PiDurableAgentToolPreferences.PermissionLevel {
+        PiDurableAgentToolPreferences.PermissionLevel.from(rawValue: permissionLevelRaw)
+    }
+}
+
 final class AgentPermissionSecureStore {
     static let shared = AgentPermissionSecureStore(secureStrings: SecureKeysService())
 
@@ -389,6 +420,7 @@ final class AgentPermissionSecureStore {
     private var grokBuildCache: SecureGrokBuildPermissionDocument?
     private var antigravityCache: SecureAntigravityPermissionDocument?
     private var devinCache: SecureDevinPermissionDocument?
+    private var piDurableCache: SecurePiDurablePermissionDocument?
     private var diagnosticsByDomain: [AgentPermissionSecureDomain: AgentPermissionStorageDiagnostic] = [:]
     private let permissionDecisionAccessMode: KeychainAccessMode = .nonInteractive(reason: .permissionDecision)
 
@@ -439,6 +471,7 @@ final class AgentPermissionSecureStore {
             grokBuildCache = nil
             antigravityCache = nil
             devinCache = nil
+            piDurableCache = nil
         }
     }
 
@@ -488,6 +521,10 @@ final class AgentPermissionSecureStore {
             var devin = SecureDevinPermissionDocument.failClosedDocument(now: resetDate)
             _ = normalizeDevin(&devin)
             record(.devin, resetLocked(devin, domain: .devin, cache: &devinCache, deferred: &effects))
+
+            var piDurable = SecurePiDurablePermissionDocument.failClosedDocument(now: resetDate)
+            _ = normalizePiDurable(&piDurable)
+            record(.piDurable, resetLocked(piDurable, domain: .piDurable, cache: &piDurableCache, deferred: &effects))
 
             return AgentPermissionStorageResetResult(
                 succeededDomains: succeededDomains,
@@ -551,6 +588,12 @@ final class AgentPermissionSecureStore {
     func devinPermissions() -> SecureDevinPermissionDocument {
         withLockAndDeferredSideEffects { effects in
             loadDevinPermissionsLocked(deferred: &effects)
+        }
+    }
+
+    func piDurablePermissions() -> SecurePiDurablePermissionDocument {
+        withLockAndDeferredSideEffects { effects in
+            loadPiDurablePermissionsLocked(deferred: &effects)
         }
     }
 
@@ -695,6 +738,24 @@ final class AgentPermissionSecureStore {
         }
     }
 
+    @discardableResult
+    func updatePiDurablePermissions(_ mutation: (inout SecurePiDurablePermissionDocument) -> Void) -> Bool {
+        withLockAndDeferredSideEffects { effects in
+            var document = loadPiDurablePermissionsLocked(deferred: &effects)
+            mutation(&document)
+            normalizePiDurable(&document)
+            document.updatedAt = now()
+            return saveLocked(document, domain: .piDurable, cache: &piDurableCache, deferred: &effects)
+        }
+    }
+
+    @discardableResult
+    func setPiDurablePermissionLevel(_ level: PiDurableAgentToolPreferences.PermissionLevel) -> Bool {
+        updatePiDurablePermissions { document in
+            document.permissionLevelRaw = level.rawValue
+        }
+    }
+
     // MARK: - Locked loads
 
     private func loadSubagentPermissionsLocked(deferred effects: inout DeferredSideEffects) -> SecureSubagentPermissionDocument {
@@ -775,6 +836,16 @@ final class AgentPermissionSecureStore {
             missingDocument: SecureDevinPermissionDocument(updatedAt: now()),
             failClosedDocument: SecureDevinPermissionDocument.failClosedDocument(now: now()),
             normalize: normalizeDevin,
+            deferred: &effects
+        )
+    }
+
+    private func loadPiDurablePermissionsLocked(deferred effects: inout DeferredSideEffects) -> SecurePiDurablePermissionDocument {
+        loadLocked(
+            domain: .piDurable,
+            cache: &piDurableCache,
+            failClosedDocument: SecurePiDurablePermissionDocument.failClosedDocument(now: now()),
+            normalize: normalizePiDurable,
             deferred: &effects
         )
     }
@@ -1144,6 +1215,21 @@ final class AgentPermissionSecureStore {
         return changed
     }
 
+    @discardableResult
+    private func normalizePiDurable(_ document: inout SecurePiDurablePermissionDocument) -> Bool {
+        var changed = false
+        if document.schemaVersion != SecurePiDurablePermissionDocument.currentSchemaVersion {
+            document.schemaVersion = SecurePiDurablePermissionDocument.currentSchemaVersion
+            changed = true
+        }
+        let level = PiDurableAgentToolPreferences.PermissionLevel.from(rawValue: document.permissionLevelRaw)
+        if document.permissionLevelRaw != level.rawValue {
+            document.permissionLevelRaw = level.rawValue
+            changed = true
+        }
+        return changed
+    }
+
     // MARK: - Helpers
 
     private func supportedSchemaVersion(of document: some Any) -> Int {
@@ -1164,6 +1250,8 @@ final class AgentPermissionSecureStore {
             SecureAntigravityPermissionDocument.currentSchemaVersion
         case _ as SecureDevinPermissionDocument:
             SecureDevinPermissionDocument.currentSchemaVersion
+        case _ as SecurePiDurablePermissionDocument:
+            SecurePiDurablePermissionDocument.currentSchemaVersion
         default:
             1
         }
@@ -1186,6 +1274,8 @@ final class AgentPermissionSecureStore {
         case let value as SecureAntigravityPermissionDocument:
             value.schemaVersion
         case let value as SecureDevinPermissionDocument:
+            value.schemaVersion
+        case let value as SecurePiDurablePermissionDocument:
             value.schemaVersion
         default:
             1
@@ -1210,6 +1300,8 @@ final class AgentPermissionSecureStore {
             SecureAntigravityPermissionDocument.failClosedDocument(now: now())
         case .devin:
             SecureDevinPermissionDocument.failClosedDocument(now: now())
+        case .piDurable:
+            SecurePiDurablePermissionDocument.failClosedDocument(now: now())
         }
     }
 

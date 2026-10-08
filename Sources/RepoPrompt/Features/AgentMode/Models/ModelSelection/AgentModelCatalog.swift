@@ -20,6 +20,7 @@ enum AgentModelCatalog {
         let grokBuildAvailable: Bool
         let antigravityAvailable: Bool
         let devinAvailable: Bool
+        let piDurableAvailable: Bool
         let zaiConfigured: Bool
         let kimiConfigured: Bool
         let customClaudeCompatibleConfigured: Bool
@@ -32,6 +33,7 @@ enum AgentModelCatalog {
             grokBuildAvailable: false,
             antigravityAvailable: false,
             devinAvailable: false,
+            piDurableAvailable: false,
             zaiConfigured: false,
             kimiConfigured: false,
             customClaudeCompatibleConfigured: false
@@ -46,6 +48,7 @@ enum AgentModelCatalog {
                 grokBuildAvailable: grokBuildAvailable && providers.contains(.grokBuild),
                 antigravityAvailable: antigravityAvailable,
                 devinAvailable: false,
+                piDurableAvailable: false,
                 zaiConfigured: zaiConfigured && providers.contains(.claudeCode),
                 kimiConfigured: kimiConfigured && providers.contains(.claudeCode),
                 customClaudeCompatibleConfigured: customClaudeCompatibleConfigured && providers.contains(.claudeCode)
@@ -62,6 +65,7 @@ enum AgentModelCatalog {
                 grokBuildAvailable: false,
                 antigravityAvailable: AntigravityRuntimeManager.installedRuntimeSync() != nil,
                 devinAvailable: DevinRuntimeLocator.isInstalledSync(),
+                piDurableAvailable: PiDurableRuntimeLocator.isAvailableSync(),
                 zaiConfigured: backendIsAvailable(.glmZAI, store: store),
                 kimiConfigured: backendIsAvailable(.kimi, store: store),
                 customClaudeCompatibleConfigured: backendIsAvailable(.custom, store: store)
@@ -76,6 +80,7 @@ enum AgentModelCatalog {
             grokBuildAvailable: Bool = false,
             antigravityAvailable: Bool = false,
             devinAvailable: Bool = false,
+            piDurableAvailable: Bool = false,
             zaiConfigured: Bool = false,
             kimiConfigured: Bool = false,
             customClaudeCompatibleConfigured: Bool = false
@@ -87,6 +92,7 @@ enum AgentModelCatalog {
             self.grokBuildAvailable = grokBuildAvailable
             self.antigravityAvailable = antigravityAvailable
             self.devinAvailable = devinAvailable
+            self.piDurableAvailable = piDurableAvailable
             self.zaiConfigured = zaiConfigured
             self.kimiConfigured = kimiConfigured
             self.customClaudeCompatibleConfigured = customClaudeCompatibleConfigured
@@ -112,6 +118,7 @@ enum AgentModelCatalog {
                 grokBuildAvailable: grokBuildAvailable || agentKind == .grokBuild,
                 antigravityAvailable: antigravityAvailable || agentKind == .antigravity,
                 devinAvailable: devinAvailable || agentKind == .devin,
+                piDurableAvailable: piDurableAvailable || agentKind == .piDurable,
                 zaiConfigured: zaiConfigured || agentKind == .claudeCodeGLM,
                 kimiConfigured: kimiConfigured || agentKind == .kimiCode,
                 customClaudeCompatibleConfigured: customClaudeCompatibleConfigured || agentKind == .customClaudeCompatible
@@ -128,7 +135,8 @@ enum AgentModelCatalog {
             case .general:
                 true
             case .headless:
-                agentKind != .antigravity
+                // Pi Durable has no headless bridge until Phase 4 of the Pi Durable plan.
+                agentKind != .antigravity && agentKind != .piDurable
             }
         }
     }
@@ -226,7 +234,7 @@ enum AgentModelCatalog {
         availability: AvailabilityContext = .current,
         surface: AgentSelectionSurface = .general
     ) -> [AgentProviderKind] {
-        [.codexExec, .claudeCode, .openCode, .cursor, .grokBuild, .antigravity, .devin, .claudeCodeGLM, .kimiCode, .customClaudeCompatible]
+        [.codexExec, .claudeCode, .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable, .claudeCodeGLM, .kimiCode, .customClaudeCompatible]
             .filter { surface.allows($0) && isAgentAvailable($0, availability: availability) }
     }
 
@@ -262,6 +270,8 @@ enum AgentModelCatalog {
             availability.antigravityAvailable
         case .devin:
             availability.devinAvailable
+        case .piDurable:
+            availability.piDurableAvailable
         }
     }
 
@@ -278,7 +288,7 @@ enum AgentModelCatalog {
             // Grok's default follows its own configuration.
             return AgentModel.defaultModel.rawValue
         }
-        if agentKind == .antigravity || agentKind == .devin {
+        if agentKind == .antigravity || agentKind == .devin || agentKind == .piDurable {
             return resolvedACPDiscoveredModels(for: agentKind)?.preferredModelRaw ?? ""
         }
         if isAgentAvailable(agentKind, availability: availability),
@@ -294,7 +304,7 @@ enum AgentModelCatalog {
                 ?? AgentModel.defaultModel.rawValue
         case .codexExec, .openCode, .grokBuild:
             return AgentModel.defaultModel.rawValue
-        case .antigravity, .devin:
+        case .antigravity, .devin, .piDurable:
             return ""
         }
     }
@@ -398,7 +408,7 @@ enum AgentModelCatalog {
         if agentKind == .devin {
             return DevinModelCatalog(snapshot: resolvedACPDiscoveredModels(for: .devin)).entries.map(\.option)
         }
-        if agentKind == .antigravity {
+        if agentKind == .antigravity || agentKind == .piDurable {
             return resolvedACPDiscoveredModels(for: agentKind)?.options ?? []
         }
         if agentKind == .grokBuild {
@@ -435,7 +445,7 @@ enum AgentModelCatalog {
             return AgentModel.modelsForAgent(agentKind)
                 .filter { isAvailable($0, for: agentKind, availability: availability) }
                 .map { staticOption($0, for: agentKind) }
-        case .antigravity, .devin:
+        case .antigravity, .devin, .piDurable:
             return []
         }
     }
@@ -461,7 +471,7 @@ enum AgentModelCatalog {
         if agentKind == .devin {
             return DevinModelCatalog(snapshot: resolvedACPDiscoveredModels(for: .devin)).entry(matching: normalized) != nil
         }
-        if agentKind == .antigravity {
+        if agentKind == .antigravity || agentKind == .piDurable {
             return resolvedACPDiscoveredModels(for: agentKind)?.contains(rawModel: normalized) == true
         }
         if let discoveredModels = resolvedACPDiscoveredModels(for: agentKind) {
@@ -1462,7 +1472,7 @@ enum AgentModelCatalog {
             .kimi
         case .customClaudeCompatible:
             .custom
-        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin:
+        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable:
             nil
         }
     }
@@ -1665,7 +1675,7 @@ enum AgentModelCatalog {
             availability.kimiConfigured
         case .customClaudeCompatible:
             availability.customClaudeCompatibleConfigured
-        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin:
+        case .claudeCode, .codexExec, .openCode, .cursor, .grokBuild, .antigravity, .devin, .piDurable:
             true
         }
     }
