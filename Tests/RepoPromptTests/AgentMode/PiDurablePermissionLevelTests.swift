@@ -193,6 +193,7 @@ final class PiDurablePermissionLevelTests: XCTestCase {
 
     // MARK: - Helpers
 
+    @MainActor
     private func makeStore(
         securePermissions: AgentPermissionSecureStore? = nil
     ) throws -> (AgentProviderPreferenceSnapshotStore, UserDefaults) {
