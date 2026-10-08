@@ -194,6 +194,9 @@ final class PiDurableLaunchResolver: @unchecked Sendable {
 
             try launch.executableIdentity.validateForTrustedPathLaunch(atPath: launch.command)
             cache(launch, key: key)
+            PiDurableRuntimeLocator.recordEffectiveRuntime(
+                PiDurableResolvedRuntime(path: launch.command, source: launch.source)
+            )
             Self.logger.info(
                 "Pi Durable resolved runtime source=\(launch.source.rawValue) path=\(launch.command) binaryVersion=\(versionInfo.binaryVersion) protocolVersion=\(versionInfo.protocolVersion)"
             )

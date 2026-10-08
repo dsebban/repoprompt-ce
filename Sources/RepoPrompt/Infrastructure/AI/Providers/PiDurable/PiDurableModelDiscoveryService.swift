@@ -25,7 +25,9 @@ actor PiDurableModelDiscoveryService {
         }
     }
 
-    typealias InstalledCheck = @Sendable () -> Bool
+    /// Authoritative availability: resolves against the effective launch environment, never only
+    /// the app's inherited one (a Finder-launched app may not see a shell-only install).
+    typealias InstalledCheck = @Sendable () async -> Bool
     typealias SessionRunner = @Sendable (PiDurableAgentConfig) async throws -> Int?
 
     private let isInstalled: InstalledCheck
@@ -36,7 +38,7 @@ actor PiDurableModelDiscoveryService {
     private var waiterCount = 0
 
     init(
-        isInstalled: @escaping InstalledCheck = { PiDurableRuntimeLocator.isAvailableSync() },
+        isInstalled: @escaping InstalledCheck = { await PiDurableRuntimeLocator.refreshEffectiveRuntime() != nil },
         runSession: @escaping SessionRunner = { config in
             try await PiDurableModelDiscoveryService.runThrowawaySession(config)
         }
@@ -63,7 +65,7 @@ actor PiDurableModelDiscoveryService {
                 if force {
                     await CLIEnvironmentCache.shared.invalidate()
                 }
-                guard isInstalled() else { return Outcome.notInstalled }
+                guard await isInstalled() else { return Outcome.notInstalled }
                 do {
                     try Task.checkCancellation()
                     guard let count = try await runSession(

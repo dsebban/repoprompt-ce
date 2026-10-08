@@ -2247,27 +2247,31 @@ struct CLIProvidersSettingsView: View {
                         .foregroundColor(.secondary)
                         .textSelection(.enabled)
                         .fixedSize(horizontal: false, vertical: true)
+                }
 
-                    HStack(spacing: 10) {
-                        Button {
-                            viewModel.refreshPiDurableModels(force: true)
-                        } label: {
-                            if viewModel.isDiscoveringPiDurableModels {
-                                ProgressView().scaleEffect(0.6).frame(height: 16)
-                            } else {
-                                Label("Discover Models", systemImage: "arrow.clockwise")
-                            }
-                        }
-                        .disabled(viewModel.isDiscoveringPiDurableModels)
-                        .buttonStyle(CustomButtonStyle())
-
-                        if let message = viewModel.piDurableModelDiscoveryMessage {
-                            Text(message)
-                                .font(.caption)
-                                .foregroundColor(.secondary)
+                // Always offered: discovery resolves against the shell environment, which can
+                // find a shell-only install the app's inherited environment cannot see.
+                HStack(spacing: 10) {
+                    Button {
+                        viewModel.refreshPiDurableModels(force: true)
+                    } label: {
+                        if viewModel.isDiscoveringPiDurableModels {
+                            ProgressView().scaleEffect(0.6).frame(height: 16)
+                        } else {
+                            Label("Discover Models", systemImage: "arrow.clockwise")
                         }
                     }
+                    .disabled(viewModel.isDiscoveringPiDurableModels)
+                    .buttonStyle(CustomButtonStyle())
 
+                    if let message = viewModel.piDurableModelDiscoveryMessage {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+
+                if runtime != nil {
                     directProviderInlineControls(for: .piDurable)
                 }
             }

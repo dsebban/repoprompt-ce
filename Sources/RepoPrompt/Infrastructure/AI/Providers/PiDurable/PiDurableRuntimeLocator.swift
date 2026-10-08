@@ -1,5 +1,6 @@
 import Foundation
 import RepoPromptProcess
+import RepoPromptSettingsCore
 
 /// Where a resolved `rp-pi-durable` came from. Logged as `source=` in ACP diagnostics so a
 /// session always shows which binary actually ran.
@@ -23,6 +24,12 @@ struct PiDurableResolvedRuntime: Equatable {
 /// `PiDurableLaunchResolver` re-resolves and validates executable identity for every launch.
 ///
 /// Precedence is override, then installed. The bundled source arrives with Phase 2 packaging.
+///
+/// A Finder-launched app inherits a minimal environment, while launches use the effective shell
+/// environment. The sync check therefore also consults the last result resolved from that
+/// effective environment (`refreshEffectiveRuntime()` or a successful launch probe), so a binary
+/// on a shell-only PATH, or an override exported only in shell startup files, is not reported
+/// unavailable.
 enum PiDurableRuntimeLocator {
     static let overrideEnvironmentKey = "RP_PI_DURABLE_BINARY"
     static let overrideDefaultsKey = "piDurableBinaryOverridePath"
@@ -34,6 +41,7 @@ enum PiDurableRuntimeLocator {
     private static let lock = NSLock()
     private static var cachedRuntime: PiDurableResolvedRuntime?
     private static var cachedAt: Date?
+    private static var effectiveRuntime: PiDurableResolvedRuntime?
 
     /// The configured override path, or `nil` when none is set. The environment wins over
     /// the setting so tests and developer shells can point at a fresh build.
@@ -85,7 +93,7 @@ enum PiDurableRuntimeLocator {
         lock.lock()
         defer { lock.unlock() }
         if let cachedAt, now.timeIntervalSince(cachedAt) < cacheLifetime {
-            return cachedRuntime
+            return cachedRuntime ?? effectiveRuntime
         }
         let environment = ProcessInfo.processInfo.environment
         let resolved = resolvedRuntime(
@@ -94,7 +102,50 @@ enum PiDurableRuntimeLocator {
         )
         cachedRuntime = resolved
         cachedAt = now
+        return resolved ?? effectiveRuntime
+    }
+
+    /// The first environment that resolves a runtime, in order (inherited, then effective).
+    /// Pure and injectable; each environment brings its own override.
+    static func resolvedRuntime(
+        environments: [[String: String]],
+        defaults: UserDefaults = .standard,
+        additionalPathHints: [String] = CLILaunchProfiles.piDurable.supplementalSearchPaths
+    ) -> PiDurableResolvedRuntime? {
+        for environment in environments {
+            if let runtime = resolvedRuntime(
+                environment: environment,
+                overridePath: overridePath(environment: environment, defaults: defaults),
+                additionalPathHints: additionalPathHints
+            ) {
+                return runtime
+            }
+        }
+        return nil
+    }
+
+    /// Resolves against the effective launch environment (the user's shell PATH and exports) and
+    /// records the result for the sync availability surfaces. Explicit discovery calls this, so
+    /// it always retries authoritative resolution instead of trusting a cached "unavailable".
+    @discardableResult
+    static func refreshEffectiveRuntime(
+        environmentProvider: @Sendable () async -> [String: String] = {
+            await ProcessEnvironmentBuilder.build(
+                ProcessEnvironmentRequest(purpose: .acpAgent(providerID: ACPProviderID.piDurable.rawValue))
+            ).environment
+        }
+    ) async -> PiDurableResolvedRuntime? {
+        let environment = await environmentProvider()
+        let resolved = resolvedRuntime(environments: [environment])
+        recordEffectiveRuntime(resolved)
         return resolved
+    }
+
+    /// Records the authoritative result (also called by a successful launch probe).
+    static func recordEffectiveRuntime(_ runtime: PiDurableResolvedRuntime?) {
+        lock.lock()
+        effectiveRuntime = runtime
+        lock.unlock()
     }
 
     /// `resolve` echoes the bare command back when the search misses, so require an

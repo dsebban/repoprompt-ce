@@ -126,6 +126,69 @@ final class PiDurableRuntimeAvailabilityTests: XCTestCase {
         )
     }
 
+    // MARK: - Shell-only installs (Finder-launched app, minimal inherited environment)
+
+    func testAShellOnlyPathBinaryResolvesFromTheEffectiveEnvironment() throws {
+        let shellOnly = try makeTestDirectory(name: "PiDurableRuntimeLocatorShellOnly")
+        let executable = try makeExecutable(in: shellOnly)
+        let defaults = try isolatedDefaults()
+        let minimalInherited = ["PATH": "/usr/bin:/bin"]
+
+        XCTAssertNil(PiDurableRuntimeLocator.resolvedRuntime(environments: [minimalInherited], defaults: defaults, additionalPathHints: []))
+        XCTAssertEqual(
+            PiDurableRuntimeLocator.resolvedRuntime(
+                environments: [minimalInherited, ["PATH": shellOnly.path]],
+                defaults: defaults,
+                additionalPathHints: []
+            ),
+            PiDurableResolvedRuntime(path: executable.path, source: .installed)
+        )
+    }
+
+    func testAnOverrideExportedOnlyInShellStartupFilesResolves() throws {
+        let directory = try makeTestDirectory(name: "PiDurableRuntimeLocatorShellOverride")
+        let executable = try makeExecutable(in: directory)
+        let defaults = try isolatedDefaults()
+
+        XCTAssertEqual(
+            PiDurableRuntimeLocator.resolvedRuntime(
+                environments: [
+                    ["PATH": "/usr/bin:/bin"],
+                    ["PATH": "/usr/bin:/bin", PiDurableRuntimeLocator.overrideEnvironmentKey: executable.path]
+                ],
+                defaults: defaults,
+                additionalPathHints: []
+            ),
+            PiDurableResolvedRuntime(path: executable.path, source: .override)
+        )
+    }
+
+    func testDiscoveryRetriesAuthoritativeResolutionAndFeedsTheSyncSurfaces() async throws {
+        let shellOnly = try makeTestDirectory(name: "PiDurableDiscoveryShellOnly")
+        let executable = try makeExecutable(in: shellOnly)
+        defer { PiDurableRuntimeLocator.recordEffectiveRuntime(nil) }
+        let effectivePath = SendableBox(value: "/nonexistent-pi-durable-search-path")
+        let service = PiDurableModelDiscoveryService(
+            isInstalled: {
+                await PiDurableRuntimeLocator.refreshEffectiveRuntime(environmentProvider: {
+                    ["PATH": effectivePath.value]
+                }) != nil
+            },
+            runSession: { _ in 2 }
+        )
+
+        let missing = await service.discoverIfNeeded()
+        XCTAssertEqual(missing, .notInstalled)
+
+        // The binary appears only in the shell PATH; the next (explicit) discovery finds it
+        // instead of trusting the earlier "not installed".
+        effectivePath.value = shellOnly.path
+        let found = await service.discoverIfNeeded(force: true)
+        XCTAssertEqual(found, .discovered(modelCount: 2))
+        XCTAssertEqual(PiDurableRuntimeLocator.currentRuntimeSync()?.path, executable.path)
+        XCTAssertTrue(PiDurableRuntimeLocator.isAvailableSync())
+    }
+
     // MARK: - Launch resolver
 
     func testLaunchResolutionRejectsAnInstalledBinaryInsideAnApplicationBundle() throws {
@@ -188,10 +251,31 @@ final class PiDurableRuntimeAvailabilityTests: XCTestCase {
 
     // MARK: - Helpers
 
+    private func isolatedDefaults() throws -> UserDefaults {
+        let suiteName = "PiDurableRuntimeAvailabilityTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        addTeardownBlock { defaults.removePersistentDomain(forName: suiteName) }
+        return defaults
+    }
+
     private func makeExecutable(in directory: URL) throws -> URL {
         let executable = directory.appendingPathComponent("rp-pi-durable")
         try "#!/bin/sh\nexit 0\n".write(to: executable, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
         return executable
+    }
+}
+
+private final class SendableBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: String
+
+    init(value: String) {
+        storage = value
+    }
+
+    var value: String {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
     }
 }
