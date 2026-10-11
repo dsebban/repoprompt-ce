@@ -1667,6 +1667,7 @@ extension AgentProviderKind {
         case .cursor: "cursorarrow"
         case .grokBuild: "bolt.circle.fill"
         case .devin: "terminal.fill"
+        case .piDurable: "externaldrive.badge.checkmark"
         }
     }
 }

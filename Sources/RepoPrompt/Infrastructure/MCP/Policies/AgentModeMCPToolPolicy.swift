@@ -50,6 +50,10 @@ enum AgentModeMCPToolPolicy {
             grokBuildGrantedTools
         case .devin:
             grantedTools
+        case .piDurable:
+            // Phase 1 Pi Durable launches with `mcpServers: []`, so it is granted no
+            // RepoPrompt MCP tools until its routing lands (Phase 4 of the Pi Durable plan).
+            []
         }
     }
 }

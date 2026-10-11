@@ -414,7 +414,7 @@ final class AutoRecommendationEngine {
                 enabledRecommendationProviders.contains(.grokBuild)
             case .openCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
                 true
-            case .antigravity, .devin:
+            case .antigravity, .devin, .piDurable:
                 false
             }
         }) else {
@@ -484,6 +484,7 @@ final class AutoRecommendationEngine {
             grokBuildAvailable: status.grokBuildCLI == .ready,
             antigravityAvailable: runtimeAvailability.antigravityAvailable,
             devinAvailable: runtimeAvailability.devinAvailable,
+            piDurableAvailable: runtimeAvailability.piDurableAvailable,
             zaiConfigured: backendStore.isConfigured(.glmZAI) && backendStore.config(for: .glmZAI).isEnabled && backendStore.config(for: .glmZAI).isValid,
             kimiConfigured: backendStore.isConfigured(.kimi) && backendStore.config(for: .kimi).isEnabled && backendStore.config(for: .kimi).isValid,
             customClaudeCompatibleConfigured: backendStore.isConfigured(.custom) && backendStore.config(for: .custom).isEnabled && backendStore.config(for: .custom).isValid

@@ -20,6 +20,13 @@ package enum CLILaunchProfiles {
         "~/.local/bin"
     ]
 
+    /// `rp-pi-durable` developer install location (`bun build` output linked into
+    /// `current/bin`), then the conventional user bin directory.
+    package static let piDurableProviderSpecificPaths: [String] = [
+        "~/.local/share/rp-pi-durable/current/bin",
+        "~/.local/bin"
+    ]
+
     /// Official Grok Build installer location (`GROK_BIN_DIR` overrides it, but a custom
     /// value is honored through PATH or an explicitly configured absolute command only).
     package static let grokBuildProviderSpecificPaths: [String] = [
@@ -74,6 +81,12 @@ package enum CLILaunchProfiles {
         commandName: "devin",
         preferredBasenames: ["devin"],
         supplementalSearchPaths: providerSpecificPathsSupplementedWithNativeDefaults(devinProviderSpecificPaths)
+    )
+
+    package static let piDurable = CLILaunchProfile(
+        commandName: "rp-pi-durable",
+        preferredBasenames: ["rp-pi-durable"],
+        supplementalSearchPaths: providerSpecificPathsSupplementedWithNativeDefaults(piDurableProviderSpecificPaths)
     )
 
     package static let grokBuild = CLILaunchProfile(

@@ -17,6 +17,7 @@ package enum SettingsAgentKind: String, CaseIterable, Hashable {
     case grokBuild
     case antigravity
     case devin
+    case piDurable
     case claudeCodeGLM
     case kimiCode
     case customClaudeCompatible
@@ -28,6 +29,7 @@ package enum SettingsAgentKind: String, CaseIterable, Hashable {
         case .grokBuild: .grokBuild
         case .antigravity: .antigravity
         case .devin: .devin
+        case .piDurable: .piDurable
         case .claudeCode, .codexExec, .claudeCodeGLM, .kimiCode, .customClaudeCompatible: nil
         }
     }

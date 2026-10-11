@@ -8,6 +8,7 @@ enum AgentProviderBindingID: String, CaseIterable, Hashable {
     case grokBuild
     case antigravity
     case devin
+    case piDurable
 
     var displayName: String {
         switch self {
@@ -25,6 +26,8 @@ enum AgentProviderBindingID: String, CaseIterable, Hashable {
             "Google Antigravity"
         case .devin:
             "Devin CLI"
+        case .piDurable:
+            "Pi Durable"
         }
     }
 }
@@ -46,6 +49,8 @@ extension AgentProviderKind {
             .antigravity
         case .devin:
             .devin
+        case .piDurable:
+            .piDurable
         }
     }
 }

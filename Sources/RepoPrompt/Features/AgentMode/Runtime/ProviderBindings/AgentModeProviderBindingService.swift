@@ -211,8 +211,9 @@ final class AgentModeProviderBindingService {
                 // Claude launch settings are revalidated immediately before dispatch.
                 // Avoid an eager untracked shutdown that could race a newly started run.
                 break
-            case .openCode, .antigravity:
+            case .openCode, .antigravity, .piDurable:
                 let runtime = runtimePermission(for: session.selectedAgent, profile: session.permissionProfile)
+                let activationDecision = Self.pendingApprovalActivationDecision(for: providerID)
                 guard let sessionModeID = runtime.acpSessionModeID,
                       session.runState.isActive,
                       let controller = session.acpController else { continue }
@@ -223,7 +224,7 @@ final class AgentModeProviderBindingService {
                         await controller.setAutoApproveAllToolPermissions(runtime.autoApproveAllACPToolPermissions)
                         try await controller.setSessionMode(sessionModeID)
                         if runtime.acceptsPendingACPApprovalWhenActivated, let pendingApproval = session.pendingApproval {
-                            await controller.respondToPermissionRequest(id: pendingApproval.requestID.displayValue, decision: .acceptForSession)
+                            await controller.respondToPermissionRequest(id: pendingApproval.requestID.displayValue, decision: activationDecision)
                         }
                     } catch {
                         if AgentRuntimeProviderService.enableDebugLogging { print("[ACP-Runner] tab=\(session.tabID) failed to apply \(providerName) session mode=\(sessionModeID) error=\(error.localizedDescription)") }
@@ -258,6 +259,16 @@ final class AgentModeProviderBindingService {
         } else if shouldRefreshGuidance {
             refreshGuidance()
         }
+    }
+
+    /// The decision that answers a pending approval when a live session-mode change activates
+    /// a level whose `acceptsPendingACPApprovalWhenActivated` is set.
+    ///
+    /// Pi Durable persists `allow_always` as a durable session rule, so a mode activation answers
+    /// the pending request once; only an explicit user choice grants for the session. Otherwise
+    /// Ask → Full access → Ask would keep allowing that tool after the downgrade.
+    nonisolated static func pendingApprovalActivationDecision(for providerID: AgentProviderBindingID) -> AgentApprovalDecision {
+        providerID == .piDurable ? .accept : .acceptForSession
     }
 
     @discardableResult

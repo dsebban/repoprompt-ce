@@ -166,10 +166,23 @@ extension AgentProviderPermissionProfile {
         }
     }
 
+    func piDurablePermissionLevel(
+        userConfigured: PiDurableAgentToolPreferences.PermissionLevel
+    ) -> PiDurableAgentToolPreferences.PermissionLevel {
+        switch self {
+        case .userConfigured: userConfigured
+        case .mcpSafeDefaults: .ask
+        case let .providerOverride(.piDurable(level)): level
+        case .providerOverride: .ask
+        }
+    }
+
     func acpSessionModeID(for agent: AgentProviderKind) -> String? {
         switch agent {
         case .openCode:
             openCodeSessionModeID
+        case .piDurable:
+            piDurablePermissionLevel(userConfigured: PiDurableAgentToolPreferences.permissionLevel()).sessionModeID
         case .cursor, .grokBuild, .antigravity, .devin:
             nil
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .codexExec:

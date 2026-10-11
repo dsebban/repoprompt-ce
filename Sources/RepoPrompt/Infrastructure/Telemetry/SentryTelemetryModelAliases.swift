@@ -47,6 +47,8 @@ extension SentryTelemetryModel.ProviderKind {
             self = .antigravity
         case .devin:
             self = .devin
+        case .piDurable:
+            self = .piDurable
         case .claudeCodeGLM:
             self = .claudeCodeGLM
         case .kimiCode:

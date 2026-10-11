@@ -85,9 +85,28 @@ enum ACPModelParameterResolver {
                 workspacePath: workspacePath,
                 observation: openCodeParameters
             )
+        case .piDurable:
+            return piDurableParameterSet(selectedModelRaw: selectedModelRaw)
         default:
             return nil
         }
+    }
+
+    /// Pi Durable advertises `thinking_level` per model through discovery, published to the
+    /// provider registry. An exact model match wins; otherwise only a single canonical match is
+    /// accepted, so an ambiguous identity never borrows another model's choices.
+    private static func piDurableParameterSet(selectedModelRaw: String) -> ACPModelParameterSet? {
+        guard let snapshot = AgentACPModelRegistry.shared.resolvedSnapshot(for: .piDurable),
+              snapshot.hasModelParameterMetadata
+        else { return nil }
+        if let exact = snapshot.modelParameterSets.first(where: { $0.baseModelRaw == selectedModelRaw }) {
+            return exact
+        }
+        let identity = ACPModelParameterIdentity.canonicalBaseModelRaw(selectedModelRaw, providerID: .piDurable)
+        let matches = snapshot.modelParameterSets.filter {
+            ACPModelParameterIdentity.canonicalBaseModelRaw($0.baseModelRaw, providerID: .piDurable) == identity
+        }
+        return matches.count == 1 ? matches[0] : nil
     }
 
     /// Accept OpenCode metadata only when the observation is `.available`, its key matches the

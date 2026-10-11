@@ -201,6 +201,7 @@ package enum SentryTelemetryModel {
         case grokBuild = "grok_build"
         case antigravity
         case devin
+        case piDurable = "pi_durable"
 
 
     }

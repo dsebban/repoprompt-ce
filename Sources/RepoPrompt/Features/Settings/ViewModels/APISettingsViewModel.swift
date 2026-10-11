@@ -366,6 +366,10 @@ public class APISettingsViewModel: ObservableObject {
     private var devinModelsTask: Task<Void, Never>?
     @Published private(set) var isDiscoveringDevinModels = false
     @Published private(set) var devinModelDiscoveryMessage: String?
+    private var piDurableModelsTask: Task<Void, Never>?
+    private let piDurableModelDiscovery = PiDurableModelDiscoveryService()
+    @Published private(set) var isDiscoveringPiDurableModels = false
+    @Published private(set) var piDurableModelDiscoveryMessage: String?
     private var openRouterModelsTask: Task<Void, Never>?
     private var customModelsTask: Task<Void, Never>?
     private var initialLoadTask: Task<Void, Never>?
@@ -400,6 +404,7 @@ public class APISettingsViewModel: ObservableObject {
             grokBuildAvailable: isGrokBuildConnected,
             antigravityAvailable: AntigravityRuntimeManager.installedRuntimeSync() != nil,
             devinAvailable: DevinRuntimeLocator.isInstalledSync(),
+            piDurableAvailable: PiDurableRuntimeLocator.isAvailableSync(),
             zaiConfigured: compatibleBackendIsActive(.glmZAI),
             kimiConfigured: compatibleBackendIsActive(.kimi),
             customClaudeCompatibleConfigured: compatibleBackendIsActive(.custom)
@@ -518,6 +523,9 @@ public class APISettingsViewModel: ObservableObject {
             AntigravityRuntimeManager.installedRuntimeSync() != nil
         case .devin:
             DevinRuntimeLocator.isInstalledSync()
+        case .piDurable:
+            // No headless Context Builder surface for Pi Durable until Phase 4.
+            false
         case .claudeCodeGLM, .kimiCode, .customClaudeCompatible:
             false
         }
@@ -1076,8 +1084,12 @@ public class APISettingsViewModel: ObservableObject {
                 await loadStoredDataIfNeeded()
                 guard !Task.isCancelled, !hasPreparedForWindowClose else { return }
                 refreshDevinModels()
+                refreshPiDurableModels()
                 if let devinModelsTask {
                     await devinModelsTask.value
+                }
+                if let piDurableModelsTask {
+                    await piDurableModelsTask.value
                 }
                 await validateCachedContextBuilderProvidersIfNeeded()
             }
@@ -1091,6 +1103,8 @@ public class APISettingsViewModel: ObservableObject {
         initialLoadTask = nil
         devinModelsTask?.cancel()
         devinModelsTask = nil
+        piDurableModelsTask?.cancel()
+        piDurableModelsTask = nil
         openAIModelsTask?.cancel()
         openAIModelsTask = nil
         deepSeekModelsTask?.cancel()
@@ -1120,6 +1134,7 @@ public class APISettingsViewModel: ObservableObject {
     deinit {
         initialLoadTask?.cancel()
         devinModelsTask?.cancel()
+        piDurableModelsTask?.cancel()
         openAIModelsTask?.cancel()
         deepSeekModelsTask?.cancel()
         fireworksModelsTask?.cancel()
@@ -1798,6 +1813,30 @@ public class APISettingsViewModel: ObservableObject {
             refreshAgentAvailability()
             await updateAvailableModels()
             devinModelsTask = nil
+        }
+    }
+
+    func refreshPiDurableModels(force: Bool = false) {
+        guard piDurableModelsTask == nil else { return }
+        isDiscoveringPiDurableModels = true
+        piDurableModelDiscoveryMessage = nil
+        piDurableModelsTask = Task { [weak self] in
+            guard let self else { return }
+            let outcome = await piDurableModelDiscovery.discoverIfNeeded(force: force)
+            guard !Task.isCancelled, !hasPreparedForWindowClose else { return }
+            isDiscoveringPiDurableModels = false
+            switch outcome {
+            case .notInstalled:
+                piDurableModelDiscoveryMessage = "rp-pi-durable is not installed."
+            case let .discovered(modelCount):
+                piDurableModelDiscoveryMessage = "\(modelCount) models credentialed on this host."
+            case .noModelsAdvertised:
+                piDurableModelDiscoveryMessage = "No pi model credentials on this host. Run `pi` and log in, then discover again."
+            case let .failed(message):
+                piDurableModelDiscoveryMessage = "Model discovery failed: \(message)"
+            }
+            refreshAgentAvailability()
+            piDurableModelsTask = nil
         }
     }
 

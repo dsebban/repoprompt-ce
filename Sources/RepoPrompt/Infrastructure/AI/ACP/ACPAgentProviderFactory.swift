@@ -57,6 +57,13 @@ enum ACPAgentProviderFactory {
                     enableDebugLogging: AgentRuntimeProviderService.enableDebugLogging
                 )
             )
+        case .piDurable:
+            // Permission is a provider-native session mode applied per run, not a launch input.
+            PiDurableACPAgentProvider(
+                config: PiDurableAgentConfig(
+                    enableDebugLogging: AgentRuntimeProviderService.enableDebugLogging
+                )
+            )
         case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible, .codexExec:
             nil
         }

@@ -1562,7 +1562,7 @@ private enum AppSettingsMCPRegistry {
             .codex
         case .openCode:
             .openCode
-        case .antigravity:
+        case .antigravity, .piDurable:
             nil
         case .devin:
             .devin
