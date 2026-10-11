@@ -752,6 +752,7 @@ final class OraclePresetExecutionTests: XCTestCase {
         XCTAssertEqual(implicit["oracle_count"]?.intValue, 2)
         XCTAssertEqual(implicit["oracle_reconciliation_guidance"]?.stringValue, continuationGuidance)
         XCTAssertEqual(capturedMessages.count, 6)
+        XCTAssertTrue(capturedMessages.allSatisfy { $0.systemPrompt.contains(promptMarker) })
         XCTAssertTrue(capturedMessages.allSatisfy {
             !$0.systemPrompt.contains(dispatchGuidance) && !$0.systemPrompt.contains(continuationGuidance)
         })

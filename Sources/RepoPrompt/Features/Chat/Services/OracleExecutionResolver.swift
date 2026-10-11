@@ -120,7 +120,8 @@ struct ResolvedOracleExecution {
                 roster: OracleRoster(primary: roster.primary, additional: []),
                 models: [primaryModel],
                 promptConfiguration: promptConfiguration,
-                selection: selection
+                selection: selection,
+                reconciliationGuidance: reconciliationGuidance
             )
         }
     #endif

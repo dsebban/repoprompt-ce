@@ -1670,7 +1670,6 @@ final class OracleGroupDeliveryContractTests: XCTestCase {
     }
 
     func testGroupedAppFollowUpHintIsLaneLocalAndSingleLaneHintIsUnchanged() {
-    func testGroupedAppFollowUpHintIsLaneLocalAndSingleLaneHintIsUnchanged() {
         let continuation = "Continue this plan conversation with ask_oracle(chat_id: \"chat-0\", new_chat: false)"
         for count in [nil, 1] as [Int?] {
             XCTAssertEqual(
@@ -1681,7 +1680,6 @@ final class OracleGroupDeliveryContractTests: XCTestCase {
 
         let grouped = MCPContextBuilderToolProvider.generatedResponseFollowUpHint(modeLabel: "plan", chatID: "chat-0", oracleCount: 3)
         XCTAssertTrue(grouped.hasPrefix("The 3 Oracle lanes above are independent answers"), grouped)
-        XCTAssertTrue(grouped.contains("This explicit chat_id continues only the addressed Oracle lane; other lanes are not re-run."), grouped)
         XCTAssertTrue(grouped.contains("This explicit chat_id continues only the addressed Oracle lane; other lanes are not re-run."), grouped)
         XCTAssertTrue(grouped.hasSuffix("\n\nOptional later follow-up: " + continuation), grouped)
     }

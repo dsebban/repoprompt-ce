@@ -157,7 +157,7 @@ final class OracleLaneLaunchAuthorizationTests: XCTestCase {
             let security = makeSecurityContext(identity: runtime.identity, toolName: tool)
             for operation in ["poll", "wait", "cancel"] {
                 do {
-                    let value = try await MCPDomainInvocationSecurityContext.$current.withValue(security) {
+                    let value = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(security) {
                         try await provider.wrapping(binding)(["op": .string(operation), "instructions": .string("must not launch"), "message": .string("must not launch")])
                     }
                     XCTAssertEqual(value, .string("observed"))
