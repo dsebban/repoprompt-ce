@@ -799,7 +799,7 @@ enum MCPCommandParser {
         // When no response-type flag is provided, response_type is NOT sent (context-only mode per API default)
         case "builder":
             let remaining = Array(parts.dropFirst())
-            let flags = parseFlagArgs(remaining)
+            let flags = parseFlagArgs(remaining, booleanFlags: ["detach"])
 
             // Get instructions from flags or positional arguments
             // Priority: explicit flags > positional text
@@ -2036,7 +2036,7 @@ enum MCPCommandParser {
     /// Returns both named flags and positional arguments.
     /// Supports: --flag value, --flag=value, -f value
     /// Handles values starting with dash correctly (e.g., "- change bombs")
-    private static func parseFlagArgs(_ tokens: [String]) -> FlagParseResult {
+    private static func parseFlagArgs(_ tokens: [String], booleanFlags: Set<String> = []) -> FlagParseResult {
         var result = FlagParseResult()
         var i = 0
         while i < tokens.count {
@@ -2048,8 +2048,10 @@ enum MCPCommandParser {
                     let key = String(flagPart[..<eqIdx])
                     let value = String(flagPart[flagPart.index(after: eqIdx)...])
                     result.named[key] = value
-                } else if i + 1 < tokens.count, !looksLikeFlagToken(tokens[i + 1]) {
-                    // --flag value format (next token is not a flag)
+                } else if i + 1 < tokens.count, !looksLikeFlagToken(tokens[i + 1]),
+                          !booleanFlags.contains(flagPart) || parseBoolFlag(tokens[i + 1]) != nil
+                {
+                    // Boolean presence flags must not consume positional instructions.
                     result.named[flagPart] = tokens[i + 1]
                     i += 1
                 } else {

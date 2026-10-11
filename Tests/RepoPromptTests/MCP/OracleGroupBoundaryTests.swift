@@ -780,8 +780,7 @@ import XCTest
             for (sourceTool, payload) in [grouped, single].flatMap({ payload in
                 ["oracle_send", "ask_oracle"].map { ($0, payload) }
             }) {
-                let ticketOptions = sourceTool == "oracle_send" ? [false, true] : [false]
-                for ticket in ticketOptions {
+                for ticket in [false, true] {
                     let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), exportOperation: { request in
                         XCTAssertEqual(request.chatID, payload["chat_id"]?.stringValue)
                         XCTAssertEqual(request.reconciliationGuidance, payload["oracle_reconciliation_guidance"]?.stringValue)
@@ -979,6 +978,29 @@ import XCTest
             XCTAssertEqual(calls.last?.arguments?["op"], .string("start"))
             XCTAssertEqual(calls.last?.arguments?["detach"], .bool(true))
             XCTAssertEqual(calls.last?.arguments?["timeout"], .int(20))
+        }
+
+        func testBuilderDetachPreservesPositionalInstructions() async throws {
+            let fixture = try await makeCommandRunnerFixture()
+            addTeardownBlock { await fixture.cleanup() }
+            let commands: [(String, Bool)] = [
+                ("builder --detach Inspect the workspace", true),
+                ("builder --detach true Inspect the workspace", true),
+                ("builder --detach false Inspect the workspace", false),
+                ("builder --detach=true Inspect the workspace", true),
+                ("builder --detach=false Inspect the workspace", false)
+            ]
+            for (command, _) in commands {
+                let result = await fixture.runner.runLine(command)
+                XCTAssertTrue(result.succeeded, command)
+            }
+            let calls = await fixture.recorder.recordedCalls()
+            XCTAssertEqual(calls.count, commands.count)
+            for (call, command) in zip(calls, commands) {
+                XCTAssertEqual(call.arguments?["instructions"], .string("Inspect the workspace"), command.0)
+                XCTAssertEqual(call.arguments?["op"], .string("start"), command.0)
+                XCTAssertEqual(call.arguments?["detach"], .bool(command.1), command.0)
+            }
         }
 
         func testInstructionsOnlyAndPackOnlyReachSession() async throws {

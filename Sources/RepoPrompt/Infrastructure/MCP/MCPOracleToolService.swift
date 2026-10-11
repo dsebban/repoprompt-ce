@@ -318,7 +318,8 @@ struct MCPOracleToolService {
                     result = try await exportSettledOracleResponse(result, request: OracleExportRequest(
                         sourceTool: askOracleToolName, mode: modeRaw, message: message,
                         chatID: result["chat_id"]?.stringValue ?? continuationChatID,
-                        response: result["response"]?.stringValue, groupResult: groupResult, destination: exportDestination
+                        response: result["response"]?.stringValue, groupResult: groupResult,
+                        reconciliationGuidance: result["oracle_reconciliation_guidance"]?.stringValue, destination: exportDestination
                     ), ticketBacked: true)
                 }
                 return .object(result)
