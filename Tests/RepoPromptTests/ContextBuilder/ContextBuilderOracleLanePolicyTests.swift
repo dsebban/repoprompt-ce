@@ -626,7 +626,19 @@ import XCTest
         }
 
         func testDevinOneShotEnforcesItsActualProcessTimeout() async throws {
-            try await withFixture { fixture, driver in
+            try await assertOneShotTimeoutStopsActualChild(slowStart: false)
+        }
+
+        /// Regression witness for the hosted cold-start failure: the 0.2s timeout fires
+        /// while the child is still "starting", before its SIGTERM handler exists, so the
+        /// child dies by default disposition without writing `exited`. An oracle that
+        /// required `exited` unconditionally fails here exactly like hosted CI did.
+        func testDevinOneShotTimeoutStopsChildBeforeItInstallsHandlers() async throws {
+            try await assertOneShotTimeoutStopsActualChild(slowStart: true)
+        }
+
+        private func assertOneShotTimeoutStopsActualChild(slowStart: Bool) async throws {
+            try await withFixture(slowStart: slowStart) { fixture, driver in
                 let run = await ProviderProcessLaunchPolicy.$allowsLaunchForTesting.withValue(true) {
                     await FixtureOracleRun(driver: driver, provider: fixture.devin(timeout: 0.2))
                 }
@@ -634,7 +646,17 @@ import XCTest
                 XCTAssertNotNil(run.error)
                 XCTAssertTrue(run.error?.localizedDescription.lowercased().contains("timed out") == true)
                 XCTAssertTrue(run.scope.hasDrainedForTesting)
-                XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("exited").path))
+                // The contract: the actual child is gone when the timeout error surfaces,
+                // independent of how far the interpreter got before SIGTERM arrived.
+                XCTAssertFalse(try fixture.hasLiveScriptProcess(), "Timed-out one-shot child still running")
+                let handlerReady = FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("handler-ready").path)
+                let exited = FileManager.default.fileExists(atPath: fixture.directory.appendingPathComponent("exited").path)
+                if slowStart {
+                    XCTAssertFalse(handlerReady, "Slow-start fixture must time out before installing its handlers")
+                    XCTAssertFalse(exited)
+                } else if handlerReady {
+                    XCTAssertTrue(exited, "A child with SIGTERM handlers installed must observe termination")
+                }
                 fixture.releaseAll()
                 await run.cancelAndFinish()
             }
@@ -663,9 +685,9 @@ import XCTest
             }
         }
 
-        private func withFixture(genericInitialTool: Bool = false, _ body: @escaping @MainActor (ProviderCLIOracleFixture, ContextBuilderMultiRootDiscoveryDriver) async throws -> Void) async throws {
+        private func withFixture(genericInitialTool: Bool = false, slowStart: Bool = false, _ body: @escaping @MainActor (ProviderCLIOracleFixture, ContextBuilderMultiRootDiscoveryDriver) async throws -> Void) async throws {
             try await ContextBuilderMultiRootDiscoveryDriver.withDriver(rootNames: ["A"]) { driver in
-                let fixture = try ProviderCLIOracleFixture(directory: self.makeTestDirectory(name: "ProviderOracleActivityIntegrationTests"), genericInitialTool: genericInitialTool)
+                let fixture = try ProviderCLIOracleFixture(directory: self.makeTestDirectory(name: "ProviderOracleActivityIntegrationTests"), genericInitialTool: genericInitialTool, slowStart: slowStart)
                 defer { fixture.releaseAll() }
                 try await body(fixture, driver)
                 await driver.window.oracleViewModel.drainTrackedAutosaves(for: driver.fixture.workspace.id)
@@ -890,10 +912,18 @@ import XCTest
     private struct ProviderCLIOracleFixture {
         let directory: URL
         let script: URL
-        init(directory: URL, genericInitialTool: Bool = false) throws {
+        private struct PgrepFailure: Error { let status: Int32 }
+
+        /// `slowStart` simulates a cold interpreter start in the one-shot branch: the child
+        /// sleeps before installing its SIGTERM/SIGINT handlers. The sleep far exceeds any
+        /// provider timeout used with it, so only real termination ends the child early.
+        init(directory: URL, genericInitialTool: Bool = false, slowStart: Bool = false) throws {
             self.directory = directory
             if genericInitialTool {
                 try Data().write(to: directory.appendingPathComponent("generic-initial-tool"))
+            }
+            if slowStart {
+                try Data("60".utf8).write(to: directory.appendingPathComponent("slow-start"))
             }
             script = directory.appendingPathComponent("devin")
             let body = #"""
@@ -912,12 +942,15 @@ import XCTest
                 if sys.argv[1:] == ["acp", "--help"]:
                     print("Run as an ACP server over stdio")
                     sys.exit(0)
-                (root / "calls").write_text("\n".join(sys.argv[1:]))
+                slow = root / "slow-start"
+                if slow.exists(): time.sleep(float(slow.read_text()))
                 def stopped(*_):
                     (root / "exited").write_text("cancelled")
                     sys.exit(0)
                 signal.signal(signal.SIGTERM, stopped)
                 signal.signal(signal.SIGINT, stopped)
+                (root / "handler-ready").write_text(str(os.getpid()))
+                (root / "calls").write_text("\n".join(sys.argv[1:]))
                 release(0)
                 print("fixture answer", end="", flush=True)
                 (root / "exited").write_text("completed")
@@ -970,6 +1003,25 @@ import XCTest
         func releaseAll() {
             for stage in 0 ... 3 {
                 try? release(stage)
+            }
+        }
+
+        /// True while any process whose command line contains this fixture's unique
+        /// script path exists (the interpreter runs it as `python3 <script> ...`).
+        func hasLiveScriptProcess() throws -> Bool {
+            let pgrep = Process()
+            pgrep.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
+            // pgrep takes a POSIX ERE; escape exactly its metacharacters so the path matches literally.
+            let pattern = script.path.map { #".[]()*+?{}|^$\"#.contains($0) ? "\\\($0)" : String($0) }.joined()
+            pgrep.arguments = ["-f", pattern]
+            pgrep.standardOutput = FileHandle.nullDevice
+            pgrep.standardError = FileHandle.nullDevice
+            try pgrep.run()
+            pgrep.waitUntilExit()
+            switch pgrep.terminationStatus {
+            case 0: return true
+            case 1: return false
+            default: throw PgrepFailure(status: pgrep.terminationStatus)
             }
         }
 
