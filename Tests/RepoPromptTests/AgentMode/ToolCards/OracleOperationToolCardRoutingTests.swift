@@ -1,8 +1,242 @@
+import Foundation
 import MCP
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
 import XCTest
+
+#if DEBUG
+    /// Real Oracle tool execution: a real `MCPOracleToolService` and job center over the window's
+    /// `OracleViewModel` roster dispatch. Only the post-packaging provider transport is substituted,
+    /// by `ControlledOracleProvider`, so tickets, claims, lane scopes, and persistence stay real.
+    @MainActor
+    enum OracleTicketExecutionHarness {
+        /// Fixed provider behavior for the whole fixture. `.held` streams end only by cancellation.
+        enum Outcome { case held, failed, completed, partialGroup }
+
+        enum EntryPath: CaseIterable { case blocking, ticket }
+
+        /// Nested types don't inherit the enum's isolation; its members read main-actor state.
+        @MainActor
+        struct Context {
+            let driver: ContextBuilderMultiRootDiscoveryDriver
+            let service: MCPOracleToolService
+            let invocation: ToolInvocationContext
+            let provider: ControlledOracleProvider
+            let preparation: PreparationGate
+
+            var oracle: OracleViewModel {
+                driver.window.oracleViewModel
+            }
+
+            var owner: OracleConversationOwner {
+                get throws { try OracleViewModel.oracleGroupOwner(workspaceID: driver.fixture.workspace.id, tabID: driver.tabID) }
+            }
+
+            /// The same canonical store the app's Oracle group runtime and lane claims use.
+            func loadGroup(_ groupID: String) async throws -> OracleGroupDocument {
+                let id = try OracleGroupID(rawValue: XCTUnwrap(UUID(uuidString: groupID)))
+                let loaded = try await AppDomainRuntimeComposition.shared.oracleConversationStore.load(groupID: id, owner: owner)
+                return try XCTUnwrap(loaded)
+            }
+
+            /// Lane projections ordered by lane index.
+            func lanes(ofGroup groupID: String) -> [ChatSession] {
+                oracle.sessions
+                    .filter { $0.oracleGroupID?.uuidString == groupID }
+                    .sorted { ($0.oracleLaneIndex ?? 0) < ($1.oracleLaneIndex ?? 0) }
+            }
+
+            func awaitSends(_ count: Int) async throws {
+                try await driver.fixture.awaitGateEvent(provider.sendsReached(count))
+            }
+        }
+
+        /// Suspends the next real Oracle preparation at its first await (context stabilization),
+        /// before job admission. Single-shot so later preparations run unimpeded.
+        @MainActor
+        final class PreparationGate {
+            private var suspension: (entered: XCTestExpectation, gate: AsyncStream<Void>)?
+            private var release: AsyncStream<Void>.Continuation?
+
+            /// Arms the gate; the returned expectation is fulfilled once preparation is suspended.
+            func arm() -> XCTestExpectation {
+                let entered = XCTestExpectation(description: "Oracle preparation suspended")
+                let (stream, continuation) = AsyncStream<Void>.makeStream()
+                suspension = (entered, stream)
+                release = continuation
+                return entered
+            }
+
+            func open() {
+                release?.finish()
+                release = nil
+            }
+
+            func passThrough() async {
+                guard let armed = suspension else { return }
+                suspension = nil
+                armed.entered.fulfill()
+                for await _ in armed.gate {}
+            }
+        }
+
+        static func withFixture(
+            outcome: Outcome,
+            retention: TimeInterval = 3600,
+            _ body: @escaping @MainActor (ContextBuilderMultiRootDiscoveryDriver, MCPOracleToolService, ToolInvocationContext) async throws -> Void
+        ) async throws {
+            try await withControlledFixture(
+                rootName: "OracleTicketCard",
+                additionalModels: outcome == .partialGroup ? [.gpt54] : [],
+                retention: retention,
+                allowsRebind: false
+            ) { context in
+                context.provider.behavior = { model in
+                    switch outcome {
+                    case .held: .hold
+                    case .failed: .fail
+                    case .completed: .complete
+                    case .partialGroup: model == .gpt54 ? .fail : .complete
+                    }
+                }
+                try await body(context.driver, context.service, context.invocation)
+            }
+        }
+
+        /// The primary lane is `.gpt54Mini`; `additionalModels` configure further lanes.
+        /// Explicit `chat_id` continuations rebind the visible chat; `allowsRebind: false`
+        /// asserts a request never does.
+        static func withControlledFixture(
+            rootName: String = "OracleTicketExecution",
+            additionalModels: [AIModel],
+            retention: TimeInterval = 3600,
+            allowsRebind: Bool = true,
+            _ body: @escaping @MainActor (Context) async throws -> Void
+        ) async throws {
+            try await ContextBuilderMultiRootDiscoveryDriver.withDriver(rootNames: [rootName]) { driver in
+                let settings = GlobalSettingsStore.shared
+                let previousExposure = settings.mcpShowModelPresets()
+                let previousDisabled = settings.mcpTemporarilyDisablePresets()
+                let provider = ControlledOracleProvider()
+                let preparation = PreparationGate()
+                defer {
+                    preparation.open()
+                    settings.setMCPShowModelPresets(previousExposure, commit: false)
+                    settings.setMCPTemporarilyDisablePresets(previousDisabled, commit: false)
+                    driver.window.oracleViewModel.setOraclePostPackagingTransportOverrideForTesting(nil)
+                }
+                settings.setMCPShowModelPresets(false, commit: false)
+                settings.setMCPTemporarilyDisablePresets(false, commit: false)
+                settings.setWorkspaceAgentModelsProfile(workspaceID: driver.fixture.workspace.id, profile: .init(planningModelRaw: AIModel.gpt54Mini.rawValue, additionalOracleModelRaws: additionalModels.map(\.rawValue)))
+                driver.window.apiSettingsViewModel.openAIApiKey = "test-key"
+                driver.window.apiSettingsViewModel.isOpenAIKeyValid = true
+                driver.window.oracleViewModel.setOraclePostPackagingTransportOverrideForTesting { [provider] message, model in
+                    provider.transport(message, model)
+                }
+                let context = MCPTabContextSnapshot(tabID: driver.tabID, windowID: driver.window.windowID, workspaceID: driver.fixture.workspace.id, promptText: "", selection: StoredSelection(), selectedMetaPromptIDs: [], tabName: rootName, runID: nil, frozenLookupContext: .visibleWorkspace, explicitlyBound: true)
+                let invocation = ToolInvocationContext.trustedLocal(toolName: "oracle_send", metadata: MCPRequestMetadata(connectionID: UUID(), clientName: "oracle-ticket-execution-harness", windowID: driver.window.windowID))
+                let service = MCPOracleToolService(
+                    askOracleToolName: "ask_oracle", oracleSendToolName: "oracle_send", oracleChatLogToolName: "oracle_chat_log",
+                    promptVM: driver.window.promptManager, oracleVM: driver.window.oracleViewModel,
+                    liveRunPurpose: { _ in .unknown }, resolveTabContextSnapshot: { _ in .init(snapshot: context) }, requireCurrentTabContext: { _ in context }, stabilizedVirtualContext: { [preparation] snapshot in
+                        await preparation.passThrough()
+                        return snapshot
+                    },
+                    resolveDelegatedReviewPackaging: { _, _, _, _ in nil },
+                    rebindChatSessionIfNeeded: { _, _ in if !allowsRebind { XCTFail("New ticket requests must not rebind") } },
+                    resolveTabIDForAgentMode: { _, _ in driver.tabID }, requireTargetWindow: { driver.window }, rawExplicitTabID: { _ in nil }, sendStageProgress: { _, _, _, _ in }, withHeartbeat: { _, _, _, _, operation in try await operation() },
+                    resolveStartExecution: { mode, model, workspaceID in try driver.window.oracleViewModel.resolveMCPFollowUpExecution(mode: mode, modelParam: model, workspaceID: workspaceID) },
+                    sendChat: { args, prompt, tabContext in try await driver.window.oracleViewModel.tool_chatSendWithConfiguredRoster(args: args, promptVM: prompt, tabContext: tabContext) },
+                    exportOracleResponse: { _ in throw ChatToolError.internalError("Unexpected fixture export") }, jobCenter: MCPLongRunningJobCenter(store: DomainLongRunningJobStore(retention: retention))
+                )
+                let fixtureContext = Context(driver: driver, service: service, invocation: invocation, provider: provider, preparation: preparation)
+                do {
+                    try await body(fixtureContext)
+                    preparation.open()
+                    provider.finishHeld()
+                    await driver.window.oracleViewModel.drainTrackedAutosaves(for: driver.fixture.workspace.id)
+                } catch {
+                    // Never leave a producer parked on a held stream across driver shutdown.
+                    preparation.open()
+                    provider.finishHeld()
+                    await driver.window.oracleViewModel.drainTrackedAutosaves(for: driver.fixture.workspace.id)
+                    throw error
+                }
+            }
+        }
+
+        static func execute(_ tool: String, args: [String: Value], service: MCPOracleToolService, invocation: ToolInvocationContext) async throws -> Value {
+            try await (tool == "ask_oracle" ? service.executeAskOracle(args: args, invocationContext: invocation) : service.executeOracleSend(args: args, invocationContext: invocation))
+        }
+    }
+
+    /// Provider transport whose streams complete, fail, or hold until the test releases them.
+    /// Waits are expectation-based (`sendsReached`), never wall-clock polling.
+    @MainActor
+    final class ControlledOracleProvider {
+        enum Behavior { case complete, fail, hold }
+
+        static let failureMessage = "Controlled provider failure"
+        static let completedText = "PRIVATE_CARD_RESPONSE"
+
+        var behavior: (AIModel) -> Behavior = { _ in .complete }
+        private(set) var models: [AIModel] = []
+        private var held: [AsyncThrowingStream<ChatStreamOutput, Error>.Continuation] = []
+        private var sendWaiters: [(count: Int, expectation: XCTestExpectation)] = []
+
+        var sendCount: Int {
+            models.count
+        }
+
+        var heldCount: Int {
+            held.count
+        }
+
+        func transport(_: AIMessage, _ model: AIModel) -> (id: ChatStreamID, stream: AsyncThrowingStream<ChatStreamOutput, Error>) {
+            let (stream, continuation) = AsyncThrowingStream<ChatStreamOutput, Error>.makeStream()
+            switch behavior(model) {
+            case .complete:
+                Self.complete(continuation, text: Self.completedText)
+            case .fail:
+                continuation.finish(throwing: ChatToolError.internalError(Self.failureMessage))
+            case .hold:
+                held.append(continuation)
+            }
+            models.append(model)
+            let reached = sendWaiters.filter { $0.count <= models.count }
+            sendWaiters.removeAll { $0.count <= models.count }
+            reached.forEach { $0.expectation.fulfill() }
+            return (UUID(), stream)
+        }
+
+        /// Fulfilled once `count` provider sends have started (immediately if already reached).
+        func sendsReached(_ count: Int) -> XCTestExpectation {
+            let expectation = XCTestExpectation(description: "\(count) Oracle provider sends")
+            if models.count >= count { expectation.fulfill() } else { sendWaiters.append((count: count, expectation: expectation)) }
+            return expectation
+        }
+
+        /// Completes every held stream with a provider-completed answer.
+        func releaseHeld(text: String = completedText) {
+            let pending = held
+            held.removeAll()
+            pending.forEach { Self.complete($0, text: text) }
+        }
+
+        /// Ends every held stream without a provider answer (fixture cleanup only).
+        func finishHeld() {
+            let pending = held
+            held.removeAll()
+            pending.forEach { $0.finish() }
+        }
+
+        private static func complete(_ continuation: AsyncThrowingStream<ChatStreamOutput, Error>.Continuation, text: String) {
+            continuation.yield(.init(text: text, reasoning: nil, tokens: .init(), terminalOutcome: .completed))
+            continuation.finish()
+        }
+    }
+#endif
 
 final class OracleOperationToolCardRoutingTests: XCTestCase {
     @MainActor
@@ -84,6 +318,109 @@ final class OracleOperationToolCardRoutingTests: XCTestCase {
         let legacy = AgentChatItem(kind: .toolResult, text: "", toolName: "context_builder", toolResultJSON: #"{"status":"completed"}"#, toolIsError: false)
         XCTAssertEqual(ContextBuilderResultCard(item: legacy, context: context).status, .success)
     }
+
+    #if DEBUG
+        /// Only control operations and detached starts are observation-only call cards. A blocking
+        /// start (detach omitted/false/non-boolean) follows the real tab run and follow-up state.
+        @MainActor
+        func testBlockingContextBuilderStartKeepsLiveCardWhileDetachedStartAndControlOpsObserve() async throws {
+            try await ContextBuilderMultiRootDiscoveryDriver.withDriver { driver in
+                let vm = driver.vm
+                let tabID = driver.tabID
+                let jobID = UUID().uuidString
+                let cases: [(args: [String: Any], observes: Bool)] = [
+                    (["op": "start"], false),
+                    (["op": "start", "detach": false], false),
+                    (["op": "start", "detach": "true"], false),
+                    (["detach": true], false),
+                    (["op": "status", "job_id": jobID], false),
+                    (["op": "start", "detach": true], true),
+                    (["op": " Poll ", "job_id": jobID], true),
+                    (["op": "wait", "job_id": jobID, "timeout": 1], true),
+                    (["op": "cancel", "job_id": jobID], true)
+                ]
+                func callRow(_ args: [String: Any], sequence: Int) -> AgentChatItem {
+                    AgentChatItem(
+                        kind: .toolCall, text: "", toolName: "context_builder", toolInvocationID: UUID(),
+                        toolArgsJSON: self.jsonString(args), sequenceIndex: sequence
+                    )
+                }
+                func card(_ item: AgentChatItem, rows: [AgentChatItem]) -> ContextBuilderCallCard {
+                    ContextBuilderCallCard(item: item, context: ContextBuilderCardContext(
+                        tabID: tabID, contextBuilderAgentVM: vm, oracleOpenContext: nil,
+                        transcriptMetadata: ContextBuilderTranscriptMetadata(rows: rows)
+                    ))
+                }
+
+                // A real UI run holds its provider stream, so the tab's run is genuinely active.
+                let entered = XCTestExpectation(description: "Context Builder provider stream entered")
+                let hold = driver.fixture.makeGate()
+                driver.streamBody = { _ in
+                    entered.fulfill()
+                    await hold.wait()
+                }
+                vm.runContextBuilderAgent()
+                let runID = try XCTUnwrap(vm.activeRunIDForTesting(tabID: tabID))
+                try await driver.fixture.awaitGateEvent(entered)
+                XCTAssertTrue(vm.tabsWithActiveContextBuilderRun.contains(tabID))
+                for (args, observes) in cases {
+                    let call = callRow(args, sequence: 1)
+                    XCTAssertEqual(ContextBuilderTranscriptMetadata(rows: [call]).activeCallItemID, call.id)
+                    let active = card(call, rows: [call])
+                    XCTAssertEqual(active.title, observes ? "Context Builder observation" : "Context Builder", "\(args)")
+                    XCTAssertEqual(active.status, observes ? .neutral : .running, "\(args)")
+                    if observes {
+                        XCTAssertEqual(active.summary, "Ticket request observation", "\(args)")
+                    } else {
+                        XCTAssertTrue(active.summary.hasPrefix("running"), "\(args): \(active.summary)")
+                    }
+                }
+
+                // An unrelated historical blocking call stays completed while a later invocation runs.
+                let historical = callRow(["op": "start"], sequence: 1)
+                let historicalResult = AgentChatItem(
+                    kind: .toolResult, text: "", toolName: "context_builder", toolInvocationID: historical.toolInvocationID,
+                    toolResultJSON: #"{"status":"completed"}"#, toolIsError: false, sequenceIndex: 2
+                )
+                let current = callRow(["op": "start"], sequence: 3)
+                let rows = [historical, historicalResult, current]
+                XCTAssertEqual(card(historical, rows: rows).status, .success)
+                XCTAssertEqual(card(current, rows: rows).status, .running)
+
+                await vm.cancelAgentRun()
+                hold.release()
+                try await driver.fixture.awaitGateEvent(driver.teardownExpectation(runID: runID))
+                XCTAssertFalse(vm.tabsWithActiveContextBuilderRun.contains(tabID))
+
+                // A blocking start that returns a ticket snapshot (observation timeout) is still an
+                // observation result; its settled call card no longer claims the live run.
+                let returned = AgentChatItem(
+                    kind: .toolResult, text: "", toolName: "context_builder", toolInvocationID: current.toolInvocationID,
+                    toolResultJSON: self.jsonString(["job_id": jobID, "job": ["id": jobID, "context_id": tabID.uuidString, "status": "running", "revision": 1]]),
+                    toolIsError: false, sequenceIndex: 4
+                )
+                let resultContext = ContextBuilderCardContext(
+                    tabID: tabID, contextBuilderAgentVM: vm, oracleOpenContext: nil,
+                    transcriptMetadata: ContextBuilderTranscriptMetadata(rows: rows + [returned])
+                )
+                let resultCard = ContextBuilderResultCard(item: returned, context: resultContext)
+                XCTAssertEqual(resultCard.title, "Context Builder observation")
+                XCTAssertEqual(resultCard.status, .neutral)
+                XCTAssertTrue(resultCard.summary.contains(jobID), resultCard.summary)
+                XCTAssertEqual(ContextBuilderCallCard(item: current, context: resultContext).status, .success)
+
+                // Follow-up generation keeps its plan-progress presentation for blocking starts only.
+                vm.setBackgroundPlanGenerating(true, forTabID: tabID)
+                defer { vm.setBackgroundPlanGenerating(false, forTabID: tabID) }
+                for (args, observes) in cases {
+                    let call = callRow(args, sequence: 1)
+                    let generating = card(call, rows: [call])
+                    XCTAssertEqual(generating.status, observes ? .neutral : .running, "\(args)")
+                    XCTAssertEqual(generating.summary.hasPrefix("generating"), !observes, "\(args): \(generating.summary)")
+                }
+            }
+        }
+    #endif
 
     @MainActor
     func testContextBuilderTicketObservationsDoNotBecomeCompletedRuns() async throws {
@@ -1618,20 +1955,22 @@ final class OracleLaneCoverageTests: XCTestCase {
 
 @MainActor
 final class OracleTicketResultCardTests: XCTestCase {
+    private typealias Harness = OracleTicketExecutionHarness
+
     func testIssuedRunningCancelledAndFailedTicketsProjectObservedStateThroughDiskRestore() async throws {
         for tool in ["ask_oracle", "oracle_send"] {
-            for outcome in [Outcome.held, .failed] {
-                try await withFixture(outcome: outcome) { driver, service, invocation in
-                    let start = try await self.execute(tool, args: ["op": .string("start"), "detach": .bool(true), "message": .string("PRIVATE_CARD_INPUT"), "new_chat": .bool(true)], service: service, invocation: invocation)
+            for outcome in [Harness.Outcome.held, .failed] {
+                try await Harness.withFixture(outcome: outcome) { driver, service, invocation in
+                    let start = try await Harness.execute(tool, args: ["op": .string("start"), "detach": .bool(true), "message": .string("PRIVATE_CARD_INPUT"), "new_chat": .bool(true)], service: service, invocation: invocation)
                     let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
                     try await self.assertProjection(start, tool: tool, driver: driver)
                     if outcome == .held {
-                        let poll = try await self.execute(tool, args: ["op": .string("poll"), "job_id": .string(id)], service: service, invocation: invocation)
+                        let poll = try await Harness.execute(tool, args: ["op": .string("poll"), "job_id": .string(id)], service: service, invocation: invocation)
                         try await self.assertProjection(poll, tool: tool, driver: driver)
-                        let cancel = try await self.execute(tool, args: ["op": .string("cancel"), "job_id": .string(id)], service: service, invocation: invocation)
+                        let cancel = try await Harness.execute(tool, args: ["op": .string("cancel"), "job_id": .string(id)], service: service, invocation: invocation)
                         try await self.assertProjection(cancel, tool: tool, driver: driver)
                     }
-                    let terminal = try await self.execute(tool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], service: service, invocation: invocation)
+                    let terminal = try await Harness.execute(tool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], service: service, invocation: invocation)
                     XCTAssertEqual(terminal.objectValue?["job"]?.objectValue?["status"]?.stringValue, outcome == .held ? "cancelled" : "failed")
                     if outcome == .failed {
                         // This producer failed after creating its chat, unlike pre-dispatch cancellation.
@@ -1647,11 +1986,11 @@ final class OracleTicketResultCardTests: XCTestCase {
 
     func testIssuedCompletedSingletonAndPartialGroupKeepReplyCoverageAndRecovery() async throws {
         for tool in ["ask_oracle", "oracle_send"] {
-            for outcome in [Outcome.completed, .partialGroup] {
-                try await withFixture(outcome: outcome) { driver, service, invocation in
-                    let start = try await self.execute(tool, args: ["op": .string("start"), "detach": .bool(true), "message": .string("PRIVATE_CARD_INPUT"), "new_chat": .bool(true)], service: service, invocation: invocation)
+            for outcome in [Harness.Outcome.completed, .partialGroup] {
+                try await Harness.withFixture(outcome: outcome) { driver, service, invocation in
+                    let start = try await Harness.execute(tool, args: ["op": .string("start"), "detach": .bool(true), "message": .string("PRIVATE_CARD_INPUT"), "new_chat": .bool(true)], service: service, invocation: invocation)
                     let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
-                    let terminal = try await self.execute(tool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], service: service, invocation: invocation)
+                    let terminal = try await Harness.execute(tool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], service: service, invocation: invocation)
                     XCTAssertEqual(terminal.objectValue?["job"]?.objectValue?["status"]?.stringValue, "completed")
                     XCTAssertNotNil(terminal.objectValue?["chat_id"])
                     if outcome == .partialGroup {
@@ -1666,11 +2005,11 @@ final class OracleTicketResultCardTests: XCTestCase {
 
     func testIssuedExpiredTicketWarnsAndStrictSelectionDoesNotInventRecovery() async throws {
         for tool in ["ask_oracle", "oracle_send"] {
-            try await withFixture(outcome: .completed, retention: 0) { driver, service, invocation in
-                let start = try await self.execute(tool, args: ["op": .string("start"), "detach": .bool(true), "message": .string("PRIVATE_CARD_INPUT"), "new_chat": .bool(true)], service: service, invocation: invocation)
+            try await Harness.withFixture(outcome: .completed, retention: 0) { driver, service, invocation in
+                let start = try await Harness.execute(tool, args: ["op": .string("start"), "detach": .bool(true), "message": .string("PRIVATE_CARD_INPUT"), "new_chat": .bool(true)], service: service, invocation: invocation)
                 let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
-                _ = try await self.execute(tool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], service: service, invocation: invocation)
-                let expired = try await self.execute(tool, args: ["op": .string("poll"), "job_id": .string(id)], service: service, invocation: invocation)
+                _ = try await Harness.execute(tool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], service: service, invocation: invocation)
+                let expired = try await Harness.execute(tool, args: ["op": .string("poll"), "job_id": .string(id)], service: service, invocation: invocation)
                 XCTAssertEqual(expired.objectValue?["job"]?.objectValue?["status"]?.stringValue, "expired")
                 try await self.assertProjection(expired, tool: tool, driver: driver)
                 let native = try self.object(expired)
@@ -1764,60 +2103,6 @@ final class OracleTicketResultCardTests: XCTestCase {
         XCTAssertNil(restored.toolArgsJSON)
         XCTAssertLessThanOrEqual(try XCTUnwrap(restored.toolResultJSON).utf8.count, AgentToolResultPersistencePolicy.maxPersistedToolSummaryBytes)
         return restored
-    }
-
-    private enum Outcome { case held, failed, completed, partialGroup }
-
-    private func withFixture(outcome: Outcome, retention: TimeInterval = 3600, _ body: @escaping @MainActor (ContextBuilderMultiRootDiscoveryDriver, MCPOracleToolService, ToolInvocationContext) async throws -> Void) async throws {
-        try await ContextBuilderMultiRootDiscoveryDriver.withDriver(rootNames: ["OracleTicketCard"]) { driver in
-            let settings = GlobalSettingsStore.shared
-            let previousExposure = settings.mcpShowModelPresets()
-            let previousDisabled = settings.mcpTemporarilyDisablePresets()
-            defer {
-                settings.setMCPShowModelPresets(previousExposure, commit: false)
-                settings.setMCPTemporarilyDisablePresets(previousDisabled, commit: false)
-                driver.window.oracleViewModel.setOraclePostPackagingTransportOverrideForTesting(nil)
-            }
-            settings.setMCPShowModelPresets(false, commit: false)
-            settings.setMCPTemporarilyDisablePresets(false, commit: false)
-            settings.setWorkspaceAgentModelsProfile(workspaceID: driver.fixture.workspace.id, profile: .init(planningModelRaw: AIModel.gpt54Mini.rawValue, additionalOracleModelRaws: outcome == .partialGroup ? [AIModel.gpt54.rawValue] : []))
-            driver.window.apiSettingsViewModel.openAIApiKey = "test-key"
-            driver.window.apiSettingsViewModel.isOpenAIKeyValid = true
-            driver.window.oracleViewModel.setOraclePostPackagingTransportOverrideForTesting { _, model in
-                let stream = AsyncThrowingStream<ChatStreamOutput, Error> { continuation in
-                    if outcome == .failed || (outcome == .partialGroup && model == .gpt54) {
-                        continuation.finish(throwing: ChatToolError.internalError("Controlled provider failure"))
-                    } else if outcome != .held {
-                        continuation.yield(.init(text: "PRIVATE_CARD_RESPONSE", reasoning: nil, tokens: .init(), terminalOutcome: .completed))
-                        continuation.finish()
-                    }
-                }
-                return (UUID(), stream)
-            }
-            let context = MCPTabContextSnapshot(tabID: driver.tabID, windowID: driver.window.windowID, workspaceID: driver.fixture.workspace.id, promptText: "", selection: StoredSelection(), selectedMetaPromptIDs: [], tabName: "Oracle ticket card", runID: nil, frozenLookupContext: .visibleWorkspace, explicitlyBound: true)
-            let invocation = ToolInvocationContext.trustedLocal(toolName: "oracle_send", metadata: MCPRequestMetadata(connectionID: UUID(), clientName: "ticket-card-fixture", windowID: driver.window.windowID))
-            let service = MCPOracleToolService(
-                askOracleToolName: "ask_oracle", oracleSendToolName: "oracle_send", oracleChatLogToolName: "oracle_chat_log",
-                promptVM: driver.window.promptManager, oracleVM: driver.window.oracleViewModel,
-                liveRunPurpose: { _ in .unknown }, resolveTabContextSnapshot: { _ in .init(snapshot: context) }, requireCurrentTabContext: { _ in context }, stabilizedVirtualContext: { $0 },
-                resolveDelegatedReviewPackaging: { _, _, _, _ in nil }, rebindChatSessionIfNeeded: { _, _ in XCTFail("New ticket requests must not rebind") },
-                resolveTabIDForAgentMode: { _, _ in driver.tabID }, requireTargetWindow: { driver.window }, rawExplicitTabID: { _ in nil }, sendStageProgress: { _, _, _, _ in }, withHeartbeat: { _, _, _, _, operation in try await operation() },
-                resolveStartExecution: { mode, model, workspaceID in try driver.window.oracleViewModel.resolveMCPFollowUpExecution(mode: mode, modelParam: model, workspaceID: workspaceID) },
-                sendChat: { args, prompt, tabContext in try await driver.window.oracleViewModel.tool_chatSendWithConfiguredRoster(args: args, promptVM: prompt, tabContext: tabContext) },
-                exportOracleResponse: { _ in throw ChatToolError.internalError("Unexpected fixture export") }, jobCenter: MCPLongRunningJobCenter(store: DomainLongRunningJobStore(retention: retention))
-            )
-            do {
-                try await body(driver, service, invocation)
-                await driver.window.oracleViewModel.drainTrackedAutosaves(for: driver.fixture.workspace.id)
-            } catch {
-                await driver.window.oracleViewModel.drainTrackedAutosaves(for: driver.fixture.workspace.id)
-                throw error
-            }
-        }
-    }
-
-    private func execute(_ tool: String, args: [String: Value], service: MCPOracleToolService, invocation: ToolInvocationContext) async throws -> Value {
-        try await (tool == "ask_oracle" ? service.executeAskOracle(args: args, invocationContext: invocation) : service.executeOracleSend(args: args, invocationContext: invocation))
     }
 
     private func object(_ value: Value) throws -> [String: Any] {

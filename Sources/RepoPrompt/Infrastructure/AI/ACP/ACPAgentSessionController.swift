@@ -311,6 +311,7 @@ actor ACPAgentSessionController {
     private var stdoutConsumerTask: Task<Void, Never>?
     private var stderrConsumerTask: Task<Void, Never>?
     private var processWaitTask: Task<Void, Never>?
+    private var shutdownTask: Task<Void, Never>?
     private var stdoutFramer = LineFramer()
     private var stderrFramer = LineFramer()
     private var launchDescription: String?
@@ -539,6 +540,7 @@ actor ACPAgentSessionController {
 
     #if DEBUG
         private var testRejectNextTurnPreparation = false
+        private var testShutdownCallerCount = 0
         private var testHoldNextSteeringInterrupt = false
         private var testSteeringInterruptEntered = false
         private var testSteeringInterruptEntryWaiter: CheckedContinuation<Void, Never>?
@@ -913,7 +915,7 @@ actor ACPAgentSessionController {
                 if state == .promptRunning { state = .sessionOpen }
                 throw error
             }
-            if error is CancellationError {
+            if error is CancellationError || state == .closing || state == .closed {
                 throw error
             }
             let message = displayText(for: provider.normalizeError(error))
@@ -1609,6 +1611,15 @@ actor ACPAgentSessionController {
         func debugPromptSettlementWaiterCount() -> Int {
             promptSettlementWaitersByTurnID.values.reduce(0) { $0 + $1.count }
         }
+
+        func debugShutdownCallerCount() -> Int {
+            testShutdownCallerCount
+        }
+
+        func debugInjectProcessWaitFailure(_ error: Error) async -> Bool {
+            await handleProcessWaitFailure(error)
+            return eventStreamFinished
+        }
     #endif
 
     func interruptActivePromptForSteering(timeoutSeconds: TimeInterval = 15) async throws {
@@ -1777,10 +1788,29 @@ actor ACPAgentSessionController {
 
     func shutdown() async {
         #if DEBUG
+            testShutdownCallerCount += 1
+            defer { testShutdownCallerCount -= 1 }
+        #endif
+        // Teardown drains the provider's cancelled prompt before reaping it, so a later caller
+        // must wait for that same teardown instead of observing a half-closed controller.
+        // The task is unstructured: a stopped run's cancellation must not abort the drain.
+        if let shutdownTask {
+            await shutdownTask.value
+            return
+        }
+        guard state != .closed else { return }
+        #if DEBUG
             debugResumeConfigurationMutationPostcheck()
         #endif
-        guard state != .closed, state != .closing else { return }
         state = .closing
+        let task = Task { [self] in
+            await performShutdown()
+        }
+        shutdownTask = task
+        await task.value
+    }
+
+    private func performShutdown() async {
         recentDevinToolCalls.removeAll()
         recentDevinToolCallIDs.removeAll()
         promptImagesSupported = false
@@ -1791,14 +1821,11 @@ actor ACPAgentSessionController {
             // the process alive until the provider settles its prompt and persists terminal
             // tool parts. Drain once, only at teardown and after a successful cancel write.
             // A stopped run's cancellation must not abort this bounded transport drain.
-            let drain = Task { [self] in
-                do {
-                    try await waitForPromptSettlement(turnID: turnID, timeoutSeconds: requestTimeouts.cancellationSettlementSeconds)
-                } catch {
-                    log("ACP cancellation settlement drain failed: \(error.localizedDescription)")
-                }
+            do {
+                try await waitForPromptSettlement(turnID: turnID, timeoutSeconds: requestTimeouts.cancellationSettlementSeconds)
+            } catch {
+                log("ACP cancellation settlement drain failed: \(error.localizedDescription)")
             }
-            await drain.value
         }
         failAllPromptSettlementWaiters(with: ControllerError.transportClosed)
         failPendingRequests(with: ControllerError.transportClosed)
@@ -2236,6 +2263,21 @@ actor ACPAgentSessionController {
     }
 
     private func handlePermissionRequest(id: JSONRPCID, params: [String: Any]) {
+        // Shutdown keeps readers alive while the cancelled prompt settles, so a provider can still
+        // ask for permission after Stop. Teardown never grants new authority: answer `cancelled`
+        // before strict RepoPrompt or full-access auto-approval and before surfacing a prompt.
+        if state == .closing || state == .closed {
+            do {
+                try sendJSONLine([
+                    "jsonrpc": "2.0",
+                    "id": id.jsonValue,
+                    "result": ["outcome": ["outcome": "cancelled"]]
+                ])
+            } catch {
+                log("Failed to cancel ACP permission request \(id.displayValue) during shutdown: \(error.localizedDescription)")
+            }
+            return
+        }
         guard
             let sessionID = params["sessionId"] as? String,
             let toolCall = params["toolCall"] as? [String: Any]
@@ -2357,8 +2399,9 @@ actor ACPAgentSessionController {
     }
 
     private func handleProcessExit(_ exitCode: Int32, timedOut: Bool) async {
-        guard state != .closing, state != .closed else {
-            finishEventsIfNeeded()
+        guard state != .closed else { return }
+        if state == .closing {
+            settleTransportForProcessLossWhileClosing()
             return
         }
 
@@ -2380,8 +2423,9 @@ actor ACPAgentSessionController {
     }
 
     private func handleProcessWaitFailure(_ error: Error) async {
-        guard state != .closing, state != .closed else {
-            finishEventsIfNeeded()
+        guard state != .closed else { return }
+        if state == .closing {
+            settleTransportForProcessLossWhileClosing()
             return
         }
 
@@ -2398,6 +2442,14 @@ actor ACPAgentSessionController {
         await clearExpectedAgentPIDIfNeeded()
         await cleanupLaunchArtifacts()
         finishEventsIfNeeded()
+    }
+
+    /// Shutdown owns the state transition while it drains a cancelled prompt. A provider that
+    /// disappears during that drain can no longer settle it, so release the drain and any pending
+    /// requests now instead of letting teardown wait out the settlement timeout.
+    private func settleTransportForProcessLossWhileClosing() {
+        failAllPromptSettlementWaiters(with: ControllerError.transportClosed)
+        failPendingRequests(with: ControllerError.transportClosed)
     }
 
     private func registerExpectedAgentPIDIfNeeded(_ pid: pid_t) async {

@@ -348,16 +348,14 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
             **Agent mode behavior**: If this tool is invoked during an Agent Mode run, it reuses the current agent tab instead of creating a new tab.
 
             **Timing**: 30s-5min depending on codebase size and task complexity.
-
-            For long work use op=start, detach=true, then op=poll|wait|cancel with job_id. One job owns discovery, optional Oracle follow-up and export. timeout bounds observation, not execution; jobs survive client disconnect, not app restart. Omit op for unchanged blocking behavior. Direct headless rejects ticket arguments.
             """,
             annotations: .repoPromptLocalEphemeralState,
             inputSchema: .object(
                 properties: [
-                    "op": .string(description: "App-backed job operation; omitted retains blocking execution", enum: ["start", "poll", "wait", "cancel"]),
-                    "job_id": .string(description: "Job UUID for poll/wait/cancel, not a chat/session ID"),
-                    "detach": .boolean(description: "start only: return immediately after admission"),
-                    "timeout": .number(description: "start/wait observation seconds; agent_run timeout policy, default configured subagent wait"),
+                    "op": .string(description: MCPLongRunningJobToolContract.operationDescription, enum: ["start", "poll", "wait", "cancel"]),
+                    "job_id": .string(description: MCPLongRunningJobToolContract.jobIDDescription),
+                    "detach": .boolean(description: MCPLongRunningJobToolContract.detachDescription),
+                    "timeout": .number(description: MCPLongRunningJobToolContract.timeoutDescription),
                     "instructions": .string(description: "Your request, ideally structured with XML tags: <task> for the main goal, <context> for background/constraints/file references, <discovery_agent-guidelines> for optional starting hints. Describe what you need — the agent finds the right files."),
                     "response_type": .string(description: "Optional: 'plan' to generate implementation plan, 'question' to ask a question, or 'review' to generate a code review. Omit or 'clarify' to just return context.", enum: ["plan", "question", "review", "clarify"]),
                     "oracle_preset": .string(
@@ -476,7 +474,12 @@ final class MCPContextBuilderToolProvider: MCPAppToolProviding {
         guard case let .start(detach, timeout) = operation else {
             return try await performContextBuilderRun(prepared, dependencies: dependencies).toMCPValue()
         }
-        let snapshot = try await dependencies.jobs.start(tool: MCPWindowToolName.contextBuilder, owner: prepared.owner, register: { id, cancel in
+        let snapshot = try await dependencies.jobs.start(tool: MCPWindowToolName.contextBuilder, owner: prepared.owner, admissible: {
+            // Tab close sweeps only admitting/registered jobs; reject a tab removed during preparation.
+            guard prepared.targetWindow.workspaceManager.composeTab(for: prepared.tabResolution.identity) != nil else {
+                throw MCPError.invalidRequest("Tab context '\(prepared.tabResolution.identity.tabID.uuidString)' was closed before the job was admitted")
+            }
+        }, register: { id, cancel in
             dependencies.registerJob(id, prepared.owner.runID, cancel)
         }, unregister: dependencies.unregisterJob, onNotStarted: { prepared.abandon() }) { progress in
             try await performContextBuilderRun(prepared, dependencies: dependencies, jobProgress: progress).toMCPValue()

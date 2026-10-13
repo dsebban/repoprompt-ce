@@ -32,7 +32,9 @@ final class MCPLongRunningJobCenter {
         self.store = store
     }
 
-    func start(tool: String, owner: Owner, register: (UUID, @escaping () -> Void) -> Void = { _, _ in }, unregister: @escaping (UUID) -> Void = { _ in }, onNotStarted: @escaping @MainActor () -> Void = {}, body: @escaping Body) async throws -> Snapshot {
+    /// `admissible` runs synchronously immediately before admission is recorded, so an owner closed during
+    /// awaited preparation is rejected here; one closed afterwards is seen by the owner's cancellation sweep.
+    func start(tool: String, owner: Owner, admissible: () throws -> Void = {}, register: (UUID, @escaping () -> Void) -> Void = { _, _ in }, unregister: @escaping (UUID) -> Void = { _ in }, onNotStarted: @escaping @MainActor () -> Void = {}, body: @escaping Body) async throws -> Snapshot {
         let id = UUID()
         var handedOff = false
         var registered = false
@@ -51,6 +53,7 @@ final class MCPLongRunningJobCenter {
         }
         guard !closingWindows.contains(owner.windowID) else { throw MCPError.invalidRequest("Window is closing") }
         try Task.checkCancellation()
+        try admissible()
         // Registration can publish the ticket before this actor installs its worker.
         // Keep cancellation intent through that handoff, including owner teardown.
         admitting[id] = Admission(owner: owner)

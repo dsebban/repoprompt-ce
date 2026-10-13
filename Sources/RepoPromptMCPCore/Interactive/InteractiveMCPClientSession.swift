@@ -1529,7 +1529,9 @@ actor InteractiveMCPClientSession {
             {
                 let observes = op == "wait" || (op == "start" && arguments["detach"]?.boolValue != true)
                 if observes {
-                    let wait = arguments["timeout"]?.doubleValue ?? arguments["timeout"]?.intValue.map(Double.init) ?? TimeInterval(MCPTimeoutPolicy.maximumSupportedSubagentDefaultWaitSeconds)
+                    let wait = arguments["timeout"].flatMap(Self.parsedNonNegativeFiniteSeconds)
+                        .flatMap { $0 <= 86400 ? $0 : nil }
+                        ?? TimeInterval(MCPTimeoutPolicy.maximumSupportedSubagentDefaultWaitSeconds)
                     return max(30, wait + MCPTimeoutPolicy.cliSemanticWaitResponseMarginSeconds)
                 }
                 return 30

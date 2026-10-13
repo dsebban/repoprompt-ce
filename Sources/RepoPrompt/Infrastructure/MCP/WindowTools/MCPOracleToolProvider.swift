@@ -84,8 +84,6 @@ final class MCPOracleToolProvider: MCPAppToolProviding {
 
             \(Self.askOracleImageUsageDescription)
 
-            For long work use op=start, detach=true, then op=poll|wait|cancel with job_id. timeout bounds observation, not execution; jobs survive client disconnect, not app restart. Omit op for unchanged blocking behavior.
-
             Pass `export_response: true` to write the response to a shareable file and get back shareable `oracle_export_path` / `oracle_export_instruction` values. To hand the export to a child agent, include `oracle_export_path` inside the `message` (or `messages`) you send on your next delegation call; your system prompt names the specific delegation tool available to you.
 
             Use `oracle_chat_log` after compaction to recover recent oracle messages.
@@ -93,10 +91,10 @@ final class MCPOracleToolProvider: MCPAppToolProviding {
             annotations: .repoPromptLocalEphemeralState,
             inputSchema: .object(
                 properties: Self.withDebugDiagnostics([
-                    "op": .string(description: "App-backed job operation; omitted retains blocking execution", enum: ["start", "poll", "wait", "cancel"]),
-                    "job_id": .string(description: "Job UUID for poll/wait/cancel, not a chat/session ID"),
-                    "detach": .boolean(description: "start only: return immediately after admission"),
-                    "timeout": .number(description: "start/wait observation seconds; agent_run timeout policy, default configured subagent wait (120s)"),
+                    "op": .string(description: MCPLongRunningJobToolContract.operationDescription, enum: ["start", "poll", "wait", "cancel"]),
+                    "job_id": .string(description: MCPLongRunningJobToolContract.jobIDDescription),
+                    "detach": .boolean(description: MCPLongRunningJobToolContract.detachDescription),
+                    "timeout": .number(description: MCPLongRunningJobToolContract.timeoutDescription),
                     "message": .string(
                         description: "Your message to send",
                         minLength: 1
@@ -151,16 +149,14 @@ final class MCPOracleToolProvider: MCPAppToolProviding {
             Pass `export_response: true` to write the response to a shareable file and get back shareable `oracle_export_path` / `oracle_export_instruction` values. To hand the export to a child agent, include `oracle_export_path` inside the `message` (or `messages`) you send on your next delegation call; your system prompt names the specific delegation tool available to you.
 
             Build context first with file reads, `manage_selection`, or `workspace_context`.
-
-            For long work use op=start, detach=true, then op=poll|wait|cancel with job_id. timeout bounds observation, not execution; jobs survive client disconnect, not app restart. Terminal payload preserves existing fields and adds job/job_id; lane progress contains statuses, not early responses. Omit op for unchanged blocking behavior.
             """ + Self.debugInstructions,
             annotations: .repoPromptLocalEphemeralState,
             inputSchema: .object(
                 properties: Self.withDebugDiagnostics([
-                    "op": .string(description: "App-backed job operation; omitted retains blocking execution", enum: ["start", "poll", "wait", "cancel"]),
-                    "job_id": .string(description: "Job UUID for poll/wait/cancel, not a chat/session ID"),
-                    "detach": .boolean(description: "start only: return immediately after admission"),
-                    "timeout": .number(description: "start/wait observation seconds; agent_run timeout policy, default configured subagent wait (120s)"),
+                    "op": .string(description: MCPLongRunningJobToolContract.operationDescription, enum: ["start", "poll", "wait", "cancel"]),
+                    "job_id": .string(description: MCPLongRunningJobToolContract.jobIDDescription),
+                    "detach": .boolean(description: MCPLongRunningJobToolContract.detachDescription),
+                    "timeout": .number(description: MCPLongRunningJobToolContract.timeoutDescription),
                     "message": .string(
                         description: "Your message to send",
                         minLength: 1

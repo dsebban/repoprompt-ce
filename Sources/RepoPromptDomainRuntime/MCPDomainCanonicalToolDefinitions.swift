@@ -1474,15 +1474,12 @@ package enum MCPDomainCanonicalToolDefinitions {
                 "type": .string("boolean"),
                 "description": .string("Start a new conversation. Omitted chat_id also selects the start route; false with chat_id continues that conversation.")
             ])
-            properties["op"] = .object(["type": .string("string"), "enum": .array(["start", "poll", "wait", "cancel"].map(Value.string)), "description": .string("App-backed ticket operation. Direct headless rejects ticket arguments. Omit for unchanged blocking execution.")])
-            properties["job_id"] = .object(["type": .string("string"), "description": .string("Job UUID for poll/wait/cancel")])
-            properties["detach"] = .object(["type": .string("boolean"), "description": .string("start only: return immediately")])
-            properties["timeout"] = .object(["type": .string("number"), "description": .string("start/wait observation seconds, using agent_run timeout policy")])
+            properties.merge(MCPLongRunningJobToolContract.properties) { _, ticket in ticket }
             schema["required"] = .array([])
             schema["properties"] = .object(properties)
             return MCPDomainToolDefinition(
                 name: definition.name,
-                description: definition.description + " Omit chat_id or set new_chat=true to start; otherwise chat_id continues. The optional model override applies only to the primary model of a new conversation.",
+                description: definition.description + " Omit chat_id or set new_chat=true to start; otherwise chat_id continues. The optional model override applies only to the primary model of a new conversation.\n\n" + MCPLongRunningJobToolContract.askOracleGuidance,
                 inputSchema: .object(schema),
                 annotations: definition.annotations,
                 isEnabledByDefault: definition.isEnabledByDefault
@@ -1505,10 +1502,7 @@ package enum MCPDomainCanonicalToolDefinitions {
                 "description": .string("Optional exposed Model Preset name/UUID or available raw primary-model override for an explicit new_chat=true start. Exact preset identity wins a collision; a raw model retains configured additional Oracles. Rejected on continuation."),
                 "maxLength": .int(OracleRosterContract.maximumModelIdentifierLength)
             ])
-            properties["op"] = .object(["type": .string("string"), "enum": .array(["start", "poll", "wait", "cancel"].map(Value.string)), "description": .string("App-backed ticket operation. Direct headless rejects ticket arguments. Omit for unchanged blocking execution.")])
-            properties["job_id"] = .object(["type": .string("string"), "description": .string("Job UUID for poll/wait/cancel")])
-            properties["detach"] = .object(["type": .string("boolean"), "description": .string("start only: return immediately")])
-            properties["timeout"] = .object(["type": .string("number"), "description": .string("start/wait observation seconds, using agent_run timeout policy")])
+            properties.merge(MCPLongRunningJobToolContract.properties) { _, ticket in ticket }
             schema["required"] = .array([])
             schema["properties"] = .object(properties)
             return MCPDomainToolDefinition(
@@ -1516,7 +1510,7 @@ package enum MCPDomainCanonicalToolDefinitions {
                 description: definition.description.replacingOccurrences(
                     of: "Use this to start or continue an oracle conversation in `chat`, `plan`, or `review` mode.",
                     with: "Use this to start or continue an oracle conversation in `chat`, `plan`, or `review` mode. When `chat_id` and `new_chat` are omitted, the resolved tab resumes its selected eligible conversation, falling back to the most recent eligible conversation. Set `new_chat=true` to force a new conversation; `model` is valid only for that explicit start. With Model Presets exposed, an exact preset UUID or name is resolved before raw-model interpretation and supplies the complete roster and mapped Chat Preset. An available raw model replaces only the configured primary and retains configured additional Oracles."
-                ),
+                ) + "\n\n" + MCPLongRunningJobToolContract.oracleSendGuidance,
                 inputSchema: .object(schema),
                 annotations: definition.annotations,
                 isEnabledByDefault: definition.isEnabledByDefault
@@ -1537,15 +1531,12 @@ package enum MCPDomainCanonicalToolDefinitions {
                 "pattern": .string("^oracle-pack:sha256:[0-9a-f]{64}$"),
                 "description": .string("Direct-headless only: canonical reference to a resolvable persisted frozen Context Builder package. Raw multi-Oracle instructions remain rejected with context_pack_required.")
             ])
-            properties["op"] = .object(["type": .string("string"), "enum": .array(["start", "poll", "wait", "cancel"].map(Value.string)), "description": .string("App-backed ticket operation. Direct headless rejects ticket arguments. Omit for unchanged blocking execution.")])
-            properties["job_id"] = .object(["type": .string("string"), "description": .string("Job UUID for poll/wait/cancel")])
-            properties["detach"] = .object(["type": .string("boolean"), "description": .string("start only: return immediately")])
-            properties["timeout"] = .object(["type": .string("number"), "description": .string("start/wait observation seconds, using agent_run timeout policy")])
+            properties.merge(MCPLongRunningJobToolContract.properties) { _, ticket in ticket }
             schema["required"] = .array([])
             schema["properties"] = .object(properties)
             return MCPDomainToolDefinition(
                 name: definition.name,
-                description: definition.description + " For app-backed plan, question, or review responses, oracle_preset selects an exposed Model Preset's complete Oracle roster and prompt independently of the discovery model. Direct-headless execution rejects oracle_preset. Direct grouped execution accepts only a canonical resolvable context_pack_ref; raw multi-Oracle instructions still require a frozen package.",
+                description: definition.description + " For app-backed plan, question, or review responses, oracle_preset selects an exposed Model Preset's complete Oracle roster and prompt independently of the discovery model. Direct-headless execution rejects oracle_preset. Direct grouped execution accepts only a canonical resolvable context_pack_ref; raw multi-Oracle instructions still require a frozen package.\n\n" + MCPLongRunningJobToolContract.contextBuilderGuidance,
                 inputSchema: .object(schema),
                 annotations: definition.annotations,
                 isEnabledByDefault: definition.isEnabledByDefault

@@ -1601,6 +1601,9 @@ enum AgentTranscriptToolNormalizer {
             return .unknown
         }
         if normalizedToolName == "ask_oracle" || normalizedToolName == "oracle_send" || normalizedToolName == "context_builder" {
+            if let nativeStatus = settledNativeObservationStatus(for: item) {
+                return nativeStatus
+            }
             // A settled group can have completed lanes even when its transport reports an error.
             if normalizedToolName != "context_builder", stringValue(resultObject, keys: ["status"]) == "partial_failure" {
                 return .warning
@@ -1608,9 +1611,6 @@ enum AgentTranscriptToolNormalizer {
             if item.toolIsError == true {
                 let nativeStatus = AgentTranscriptToolStatusSemantics.normalizedStatusWord(stringValue(resultObject, keys: ["status", "result", "outcome", "state"]))
                 return nativeStatus == "cancelled" ? .cancelled : .failed
-            }
-            if let nativeStatus = settledNativeObservationStatus(for: item) {
-                return nativeStatus
             }
             if normalizedToolName == "context_builder" {
                 // The existing transcript status owns the effective operation outcome,
@@ -1674,16 +1674,20 @@ enum AgentTranscriptToolNormalizer {
             if let data = ToolResultDTOs.ChatSendDTO.nativeOracleReplyJSONData(from: raw) {
                 if let group = try? JSONDecoder().decode(OracleGroupResult.self, from: data) {
                     switch group.status {
-                    case .completed: return .success
+                    case .completed: return item.toolIsError == true ? .failed : .success
                     case .partialFailure: return .warning
                     case .failed: return .failed
                     }
                 }
                 guard let reply = try? JSONDecoder().decode(ToolResultDTOs.ChatSendDTO.self, from: data) else { return nil }
-                if item.toolIsError == true || !(reply.errors ?? []).isEmpty { return .failed }
                 let outcome = AgentTranscriptToolStatusSemantics.transcriptStatus(
                     fromNormalizedStatusWord: AgentTranscriptToolStatusSemantics.normalizedStatusWord(reply.status)
                 )
+                if outcome == .cancelled { return .cancelled }
+                let summary = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+                let hasPersistedErrors = summary?["summary_only"] as? Bool == true
+                    && (summary?["error_count"] as? Int ?? 0) > 0
+                if item.toolIsError == true || !(reply.errors ?? []).isEmpty || hasPersistedErrors { return .failed }
                 // Bounded native summaries retain terminal outcome, not provider call liveness.
                 switch outcome {
                 case .pending, .running, .unknown: return .success

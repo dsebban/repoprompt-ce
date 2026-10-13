@@ -34,8 +34,14 @@ struct ContextBuilderCallCard: View {
         return false
     }
 
-    private var isTicketCall: Bool {
-        ToolJSON.rawObject(from: item.toolArgsJSON)?["op"] != nil
+    /// Only control operations and detached starts return a ticket observation; a blocking
+    /// `op=start` is still the live run (see `MCPLongRunningJobOperation.parse`).
+    private var isTicketObservationCall: Bool {
+        guard let args = ToolJSON.rawObject(from: item.toolArgsJSON),
+              let op = (args["op"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        else { return false }
+        if op == "start" { return args["detach"] as? Bool == true }
+        return ["poll", "wait", "cancel"].contains(op)
     }
 
     private var ticket: ToolResultDTOs.LongRunningJobTicketDTO? {
@@ -45,11 +51,11 @@ struct ContextBuilderCallCard: View {
     }
 
     var title: String {
-        isTicketCall ? "Context Builder observation" : "Context Builder"
+        isTicketObservationCall ? "Context Builder observation" : "Context Builder"
     }
 
     private var phase: ContextBuilderCardPhase {
-        if isTicketCall { return .observation }
+        if isTicketObservationCall { return .observation }
         if isActiveCallCard, isRunningForTab {
             return .running
         }
@@ -60,12 +66,12 @@ struct ContextBuilderCallCard: View {
     }
 
     private var detailLine: String? {
-        if isTicketCall { return ticket.map { "Job \($0.jobID.uuidString)" } }
+        if isTicketObservationCall { return ticket.map { "Job \($0.jobID.uuidString)" } }
         return contextBuilderCardDetailLine(contextBuilderAgentVM: contextBuilderAgentVM)
     }
 
     var summary: String {
-        if isTicketCall {
+        if isTicketObservationCall {
             return ticket.map { longRunningJobTicketObservationLabel($0) } ?? "Ticket request observation"
         }
         return contextBuilderCardSubtitle(

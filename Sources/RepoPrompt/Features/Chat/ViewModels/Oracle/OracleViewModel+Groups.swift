@@ -25,9 +25,12 @@ struct AppOracleGroupExecutionCallbacks {
 private struct AppOracleConfiguredRosterSelection {
     let group: OracleGroupDocument?
     let singleSessionID: UUID?
+    /// Validated parent of an explicit member continuation. Request-local exclusion identity only:
+    /// `group` stays nil so this never enables fan-out.
+    let singleSessionGroup: OracleGroupDocument?
     var singleSessionModelRaw: String?
 
-    static let none = AppOracleConfiguredRosterSelection(group: nil, singleSessionID: nil)
+    static let none = AppOracleConfiguredRosterSelection(group: nil, singleSessionID: nil, singleSessionGroup: nil)
 }
 
 private enum AppOracleConfiguredRosterDispatch {
@@ -275,14 +278,23 @@ extension OracleViewModel {
                     // Group member continuation is append-only; rename owns a separate group mutation.
                     singleArgs.removeValue(forKey: "chat_name")
                 }
-                let value = try await tool_chatSend(
-                    args: singleArgs,
-                    promptVM: promptVM,
-                    tabContext: tabContext,
-                    resolvedExecution: singleExecution,
-                    implicitSessionID: selection.singleSessionID
-                )
-                return .singleMCPValue(value)
+                let chatArgs = singleArgs
+                let send: () async throws -> [String: Value] = { [self] in
+                    try await tool_chatSend(
+                        args: chatArgs,
+                        promptVM: promptVM,
+                        tabContext: tabContext,
+                        resolvedExecution: singleExecution,
+                        implicitSessionID: selection.singleSessionID,
+                        requiresProducerDrain: selection.singleSessionGroup != nil
+                    )
+                }
+                guard let group = selection.singleSessionGroup, let sessionID = selection.singleSessionID else {
+                    return try await .singleMCPValue(send())
+                }
+                return try await .singleMCPValue(withExplicitOracleMemberClaim(
+                    group: group, sessionID: sessionID, tabContext: tabContext, operation: send
+                ))
             case .rejectTypedCompletion:
                 throw ChatToolError.invalidParams(
                     "Configured Oracle group execution requires an additional Oracle roster or an existing Oracle group."
@@ -343,7 +355,7 @@ extension OracleViewModel {
                 throw ChatToolError.internalError("Oracle group projection identity conflict.")
             }
             guard let groupID = session.oracleGroupID else {
-                return AppOracleConfiguredRosterSelection(group: nil, singleSessionID: session.id)
+                return AppOracleConfiguredRosterSelection(group: nil, singleSessionID: session.id, singleSessionGroup: nil)
             }
             let resolvedGroup = if let aliasGroup {
                 aliasGroup
@@ -365,7 +377,8 @@ extension OracleViewModel {
             // Explicit chat IDs address one conversation. Keep its historical group and
             // siblings unchanged; only implicit selection resumes the whole group.
             return AppOracleConfiguredRosterSelection(
-                group: nil, singleSessionID: session.id, singleSessionModelRaw: member.model.modelID
+                group: nil, singleSessionID: session.id, singleSessionGroup: group,
+                singleSessionModelRaw: member.model.modelID
             )
         case .implicitContinuation:
             let candidate: ChatSession?
@@ -409,10 +422,70 @@ extension OracleViewModel {
                     workspaceID: workspaceID,
                     tabID: tabID
                 )
-                return AppOracleConfiguredRosterSelection(group: group, singleSessionID: nil)
+                return AppOracleConfiguredRosterSelection(group: group, singleSessionID: nil, singleSessionGroup: nil)
             }
-            return AppOracleConfiguredRosterSelection(group: nil, singleSessionID: candidate.id)
+            return AppOracleConfiguredRosterSelection(group: nil, singleSessionID: candidate.id, singleSessionGroup: nil)
         }
+    }
+
+    /// A lane-only send must exclude its parent group's turns in both directions, across runtimes.
+    /// It joins the group runtime's claim namespace, revalidates under it, and holds it until the
+    /// single send's producer has drained (`requiresProducerDrain`), releasing on every exit.
+    @MainActor
+    private func withExplicitOracleMemberClaim(
+        group observed: OracleGroupDocument,
+        sessionID: UUID,
+        tabContext: OracleSendTabContext?,
+        operation: () async throws -> [String: Value]
+    ) async throws -> [String: Value] {
+        // sendMessage replaces a streaming target, so refuse before touching the claim.
+        try rejectBusyOracleMember(sessionID: sessionID, group: observed, requiresTerminalTurn: false)
+        let composition = AppDomainRuntimeComposition.shared
+        let invocationID = UUID()
+        let claim: OracleGroupClaim
+        do {
+            claim = try await composition.oracleGroupClaimManager.acquire(
+                group: observed,
+                owner: observed.owner,
+                invocationID: invocationID,
+                runID: tabContext?.agentModeRunID ?? invocationID
+            )
+        } catch OracleGroupClaimError.conflict {
+            throw Self.oracleLaneBusyError(groupID: observed.group.id)
+        }
+        defer { claim.release() }
+        guard let current = try await composition.oracleConversationStore.load(
+            groupID: observed.group.id,
+            owner: observed.owner
+        ),
+            current.members.contains(where: { $0.memberID.rawValue == sessionID })
+        else {
+            throw ChatToolError.internalError("Canonical Oracle group member was not found.")
+        }
+        try rejectBusyOracleMember(sessionID: sessionID, group: current, requiresTerminalTurn: false)
+        let recovered = try await composition.oracleGroupRuntime.recoverInterruptedTurn(current, claim: claim)
+        try rejectBusyOracleMember(sessionID: sessionID, group: recovered)
+        return try await operation()
+    }
+
+    /// A missing latest turn is not busy; `.terminal` is the domain's only settled turn state.
+    @MainActor
+    private func rejectBusyOracleMember(
+        sessionID: UUID,
+        group: OracleGroupDocument,
+        requiresTerminalTurn: Bool = true
+    ) throws {
+        if isSessionStreaming(sessionID) || (requiresTerminalTurn && group.turns.last.map { $0.state != .terminal } == true) {
+            throw Self.oracleLaneBusyError(groupID: group.group.id)
+        }
+    }
+
+    private static func oracleLaneBusyError(groupID: OracleGroupID) -> ChatToolError {
+        ChatToolError(
+            code: .conflict,
+            message: "Oracle lane is busy with an active conversation or group turn. Wait for it to finish before continuing this chat.",
+            details: ["oracle_group_id": groupID.rawValue.uuidString]
+        )
     }
 
     @MainActor
@@ -585,6 +658,9 @@ extension OracleViewModel {
             return completion
         } catch {
             await finishOracleGroupPresentation(invocationID: invocationID)
+            if let claimError = error as? OracleGroupClaimError, claimError == .conflict, let existingGroup {
+                throw Self.oracleLaneBusyError(groupID: existingGroup.group.id)
+            }
             if let runtimeError = error as? OracleGroupRuntime.RuntimeError {
                 throw mapOracleGroupRuntimeError(runtimeError)
             }

@@ -1,3 +1,4 @@
+import Combine
 import Foundation
 import MCP
 @testable import RepoPromptApp
@@ -5,6 +6,463 @@ import RepoPromptDomainRuntime
 @testable import RepoPromptMCPCore
 import RepoPromptSettingsCore
 import XCTest
+
+#if DEBUG
+    /// Lane/group mutual exclusion (F1) and in-app cancellation of owned Oracle sends (F2), driven
+    /// through the real `MCPOracleToolService` → configured-roster dispatch with a held provider.
+    @MainActor
+    final class OracleGroupLaneConflictTests: XCTestCase {
+        private typealias Harness = OracleTicketExecutionHarness
+
+        private static let laneBusyMessage = "Oracle lane is busy with an active conversation or group turn. Wait for it to finish before continuing this chat."
+
+        // MARK: - F1: explicit member continuation vs. group turn
+
+        func testExplicitMemberContinuationConflictsWhileGroupTurnIsInFlight() async throws {
+            try await Harness.withControlledFixture(additionalModels: [.gpt54]) { ctx in
+                let (groupID, lanes) = try await self.createGroup(ctx)
+                ctx.provider.behavior = { _ in .hold }
+                let groupTurn = Task { try await self.continueGroup(ctx, message: "Held group turn") }
+                try await ctx.awaitSends(4)
+                XCTAssertTrue(lanes.allSatisfy { ctx.oracle.isSessionStreaming($0.id) })
+                let inFlight = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(inFlight.turns.last?.state, .prepared)
+                let transcripts = lanes.map { ctx.oracle.messagesSnapshot(for: $0.id).map(\.id) }
+
+                // Primary and additional lane, on both entry paths.
+                for lane in lanes {
+                    for entry in Harness.EntryPath.allCases {
+                        try await self.assertLaneBusy(ctx, chatID: lane.shortID, groupID: groupID, via: entry)
+                    }
+                }
+                XCTAssertEqual(ctx.provider.sendCount, 4, "A rejected continuation never reaches the provider")
+                XCTAssertTrue(lanes.allSatisfy { ctx.oracle.isSessionStreaming($0.id) }, "The group turn was not cancelled")
+                XCTAssertEqual(lanes.map { ctx.oracle.messagesSnapshot(for: $0.id).map(\.id) }, transcripts)
+                let unchanged = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(unchanged, inFlight)
+
+                ctx.provider.releaseHeld()
+                let settled = try await groupTurn.value
+                XCTAssertEqual(settled.objectValue?["oracle_group_id"]?.stringValue, groupID)
+                XCTAssertEqual(settled.objectValue?["status"]?.stringValue, "completed")
+                XCTAssertEqual(settled.objectValue?["oracle_count"]?.intValue, 2)
+
+                // Rejection did not retain anything: a valid retry succeeds on each path.
+                ctx.provider.behavior = { _ in .complete }
+                for (lane, entry) in zip(lanes, Harness.EntryPath.allCases) {
+                    let reply = try await self.continueLane(ctx, chatID: lane.shortID, via: entry, message: "Retry \(entry)")
+                    self.assertCompletedLaneReply(reply, chatID: lane.shortID, via: entry)
+                }
+                XCTAssertEqual(ctx.provider.sendCount, 6)
+            }
+        }
+
+        /// ask_oracle's omitted-op explicit `chat_id` continuation shares the roster busy check.
+        func testAskOracleExplicitMemberContinuationConflictsWhileGroupTurnIsInFlight() async throws {
+            try await Harness.withControlledFixture(additionalModels: [.gpt54]) { ctx in
+                let (groupID, lanes) = try await self.createGroup(ctx)
+                ctx.provider.behavior = { _ in .hold }
+                let groupTurn = Task { try await self.continueGroup(ctx, message: "Held group turn") }
+                try await ctx.awaitSends(4)
+                let inFlight = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(inFlight.turns.last?.state, .prepared)
+
+                do {
+                    _ = try await self.askOracleLane(ctx, chatID: lanes[1].shortID, message: "Rejected ask_oracle lane")
+                    XCTFail("ask_oracle explicit member continuation must conflict")
+                } catch let error as ChatToolError {
+                    XCTAssertEqual(error.code, .conflict)
+                    XCTAssertEqual(error.message, Self.laneBusyMessage)
+                    XCTAssertEqual(error.details?["oracle_group_id"], groupID)
+                }
+                XCTAssertEqual(ctx.provider.sendCount, 4, "No third lane dispatch")
+                XCTAssertTrue(lanes.allSatisfy { ctx.oracle.isSessionStreaming($0.id) }, "The group turn was not cancelled")
+                let unchanged = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(unchanged, inFlight)
+
+                ctx.provider.releaseHeld()
+                let settled = try await groupTurn.value
+                XCTAssertEqual(settled.objectValue?["status"]?.stringValue, "completed")
+
+                ctx.provider.behavior = { _ in .complete }
+                let reply = try await self.askOracleLane(ctx, chatID: lanes[1].shortID, message: "Lane after settlement")
+                self.assertCompletedLaneReply(reply, chatID: lanes[1].shortID, via: .blocking)
+                XCTAssertEqual(ctx.provider.sendCount, 5, "Lane-only: exactly the addressed member sent")
+            }
+        }
+
+        func testExplicitMemberContinuationConflictsWhenTargetStreamsTurnIsUnsettledOrClaimIsHeld() async throws {
+            try await Harness.withControlledFixture(additionalModels: [.gpt54]) { ctx in
+                let (groupID, lanes) = try await self.createGroup(ctx)
+                let target = lanes[1]
+
+                // Terminal turn, but the target is streaming an ordinary UI send.
+                ctx.provider.behavior = { _ in .hold }
+                let loaded = await ctx.oracle.ensureSessionMessagesLoaded(target.id)
+                XCTAssertTrue(loaded)
+                let sent = await ctx.oracle.sendMessage("UI turn", sessionID: target.id, overrideModel: .gpt54)
+                XCTAssertNotNil(sent, "The UI send admitted a query")
+                try await ctx.awaitSends(3)
+                XCTAssertTrue(ctx.oracle.isSessionStreaming(target.id))
+                let terminal = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(terminal.turns.last?.state, .terminal)
+                for entry in Harness.EntryPath.allCases {
+                    try await self.assertLaneBusy(ctx, chatID: target.shortID, groupID: groupID, via: entry)
+                }
+                XCTAssertEqual(ctx.provider.sendCount, 3)
+                XCTAssertTrue(ctx.oracle.isSessionStreaming(target.id), "The current producer stays alive")
+                let finalized = XCTestExpectation(description: "UI turn finalized")
+                finalized.assertForOverFulfill = false
+                let streamingObservation = ctx.oracle.$streamingSessions.sink { if !$0.contains(target.id) { finalized.fulfill() } }
+                ctx.provider.releaseHeld()
+                try await ctx.driver.fixture.awaitGateEvent(finalized)
+                streamingObservation.cancel()
+
+                // Terminal and idle, but another invocation (any runtime) holds the group claim.
+                let idle = try await ctx.loadGroup(groupID)
+                let foreignClaim = try await AppDomainRuntimeComposition.shared.oracleGroupClaimManager.acquire(
+                    group: idle, owner: idle.owner, invocationID: UUID(), runID: UUID()
+                )
+                for entry in Harness.EntryPath.allCases {
+                    try await self.assertLaneBusy(ctx, chatID: target.shortID, groupID: groupID, via: entry)
+                }
+                foreignClaim.release()
+                XCTAssertEqual(ctx.provider.sendCount, 3)
+                let afterClaim = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(afterClaim, idle)
+                ctx.provider.behavior = { _ in .complete }
+                let retry = try await self.continueLane(ctx, chatID: target.shortID, via: .blocking, message: "After claim")
+                self.assertCompletedLaneReply(retry, chatID: target.shortID, via: .blocking)
+                XCTAssertEqual(ctx.provider.sendCount, 4)
+
+                // Canonical latest turn is nonterminal (another runtime's prepared turn); target idle.
+                let settled = try await ctx.loadGroup(groupID)
+                let foreignTurn = try OracleTurnRecord(
+                    input: OracleInput(mode: .chat, userMessage: "Foreign in-flight turn"),
+                    state: .prepared, startedAt: max(Date(), settled.updatedAt)
+                )
+                let prepared = try OracleGroupDocument(
+                    schemaVersion: settled.schemaVersion, group: settled.group, owner: settled.owner, name: settled.name,
+                    revision: settled.revision &+ 1, createdAt: settled.createdAt, updatedAt: foreignTurn.startedAt,
+                    roster: settled.roster, members: settled.members, turns: settled.turns + [foreignTurn]
+                )
+                let liveClaim = try await AppDomainRuntimeComposition.shared.oracleGroupClaimManager.acquire(
+                    group: settled, owner: settled.owner, invocationID: UUID(), runID: UUID()
+                )
+                defer { liveClaim.release() }
+                try await AppDomainRuntimeComposition.shared.oracleConversationStore.save(prepared, expectedRevision: settled.revision)
+                let targetMessages = try await self.persistedMessageCount(ctx, target.id)
+                for entry in Harness.EntryPath.allCases {
+                    try await self.assertLaneBusy(ctx, chatID: target.shortID, groupID: groupID, via: entry)
+                }
+                XCTAssertEqual(ctx.provider.sendCount, 4)
+                XCTAssertFalse(ctx.oracle.isSessionStreaming(target.id))
+                let rejectedMessages = try await self.persistedMessageCount(ctx, target.id)
+                XCTAssertEqual(rejectedMessages, targetMessages, "Rejected before any session mutation")
+                let afterPrepared = try await ctx.loadGroup(groupID)
+                XCTAssertEqual(afterPrepared.revision, prepared.revision)
+                XCTAssertEqual(afterPrepared.turns.map(\.id), prepared.turns.map(\.id))
+                XCTAssertEqual(afterPrepared.turns.last?.state, .prepared)
+            }
+        }
+
+        func testExplicitMemberContinuationRecoversCrashStalePreparedTurnWithoutSendingSiblings() async throws {
+            for entry in Harness.EntryPath.allCases {
+                try await Harness.withControlledFixture(additionalModels: [.gpt54]) { ctx in
+                    let (groupID, lanes) = try await self.createGroup(ctx)
+                    let target = lanes[1]
+                    let sibling = lanes[0]
+                    let settled = try await ctx.loadGroup(groupID)
+                    let staleTurn = try OracleTurnRecord(
+                        input: OracleInput(mode: .chat, userMessage: "Crash-interrupted group turn"),
+                        state: .prepared, startedAt: max(Date(), settled.updatedAt)
+                    )
+                    let prepared = try OracleGroupDocument(
+                        schemaVersion: settled.schemaVersion, group: settled.group, owner: settled.owner, name: settled.name,
+                        revision: settled.revision &+ 1, createdAt: settled.createdAt, updatedAt: staleTurn.startedAt,
+                        roster: settled.roster, members: settled.members, turns: settled.turns + [staleTurn]
+                    )
+                    try await AppDomainRuntimeComposition.shared.oracleConversationStore.save(prepared, expectedRevision: settled.revision)
+                    XCTAssertFalse(ctx.oracle.isSessionStreaming(target.id))
+                    let targetMessages = try await self.persistedMessageCount(ctx, target.id)
+                    let siblingMessages = try await self.persistedMessageCount(ctx, sibling.id)
+
+                    let reply = try await self.continueLane(ctx, chatID: target.shortID, via: entry, message: "Continue after crash")
+                    self.assertCompletedLaneReply(reply, chatID: target.shortID, via: entry)
+                    XCTAssertEqual(ctx.provider.sendCount, 3, "Exactly one lane continuation send")
+                    let targetAfter = try await self.persistedMessageCount(ctx, target.id)
+                    let siblingAfter = try await self.persistedMessageCount(ctx, sibling.id)
+                    XCTAssertEqual(targetAfter, targetMessages + 2)
+                    XCTAssertEqual(siblingAfter, siblingMessages, "The sibling receives no new send")
+                    let recovered = try await ctx.loadGroup(groupID)
+                    XCTAssertEqual(recovered.revision, prepared.revision + 1)
+                    XCTAssertEqual(recovered.turns.map(\.id), prepared.turns.map(\.id))
+                    XCTAssertEqual(Array(recovered.turns.dropLast()), settled.turns)
+                    XCTAssertEqual(recovered.turns.last?.state, .terminal)
+                    XCTAssertEqual(recovered.turns.last?.results.map(\.status), [.failed, .failed])
+                    XCTAssertEqual(recovered.turns.last?.results.map(\.error?.code), ["interrupted", "interrupted"])
+                }
+            }
+        }
+
+        /// The reverse direction: a lane-only continuation owns the shared claim until its producer
+        /// drains, so a whole-group turn cannot start beside it. Same case for both entry paths.
+        func testExplicitLaneContinuationExcludesWholeGroupTurnUntilItsProducerDrains() async throws {
+            try await Harness.withControlledFixture(additionalModels: [.gpt54]) { ctx in
+                let (groupID, lanes) = try await self.createGroup(ctx)
+                var sends = 2
+                for entry in Harness.EntryPath.allCases {
+                    let laneMessages = try await self.persistedMessageCount(ctx, lanes[0].id)
+                    let siblingMessages = try await self.persistedMessageCount(ctx, lanes[1].id)
+                    let before = try await ctx.loadGroup(groupID)
+                    ctx.provider.behavior = { _ in .hold }
+                    let held = try await self.startHeldLaneContinuation(ctx, chatID: lanes[0].shortID, via: entry)
+                    try await ctx.awaitSends(sends + 1)
+                    sends += 1
+                    XCTAssertTrue(ctx.oracle.isSessionStreaming(lanes[0].id))
+
+                    await self.assertGroupClaimConflict(groupID: groupID) { try await self.continueGroup(ctx, message: "Whole group beside \(entry) lane") }
+                    XCTAssertEqual(ctx.provider.sendCount, sends, "\(entry): no group lane started")
+                    XCTAssertTrue(ctx.oracle.isSessionStreaming(lanes[0].id), "\(entry): lane producer remains alive")
+                    XCTAssertFalse(ctx.oracle.isSessionStreaming(lanes[1].id))
+
+                    ctx.provider.releaseHeld()
+                    let reply = try await held.settle()
+                    self.assertCompletedLaneReply(reply, chatID: lanes[0].shortID, via: entry)
+                    XCTAssertEqual(ctx.provider.sendCount, sends, "\(entry): exactly the addressed lane sent once")
+                    let laneAfter = try await self.persistedMessageCount(ctx, lanes[0].id)
+                    let siblingAfter = try await self.persistedMessageCount(ctx, lanes[1].id)
+                    let after = try await ctx.loadGroup(groupID)
+                    XCTAssertEqual(laneAfter, laneMessages + 2, "\(entry)")
+                    XCTAssertEqual(siblingAfter, siblingMessages, "\(entry): sibling unchanged")
+                    XCTAssertEqual(after.turns, before.turns, "\(entry): historical group turns unchanged")
+                }
+
+                // Both lane continuations released the claim after draining.
+                ctx.provider.behavior = { _ in .complete }
+                let turnsBefore = try await ctx.loadGroup(groupID).turns.count
+                let group = try await self.continueGroup(ctx, message: "Whole group after lanes")
+                XCTAssertEqual(group.objectValue?["oracle_group_id"]?.stringValue, groupID)
+                XCTAssertEqual(group.objectValue?["oracle_count"]?.intValue, 2)
+                XCTAssertEqual(ctx.provider.sendCount, sends + 2)
+                let turnsAfter = try await ctx.loadGroup(groupID).turns.count
+                XCTAssertEqual(turnsAfter, turnsBefore + 1)
+            }
+        }
+
+        // MARK: - F2: in-app stop of an owned send
+
+        func testInAppStopOfExplicitLaneContinuationIsCancellationAndReleasesClaim() async throws {
+            try await Harness.withControlledFixture(additionalModels: [.gpt54]) { ctx in
+                let (groupID, lanes) = try await self.createGroup(ctx)
+                var sends = 2
+                for entry in Harness.EntryPath.allCases {
+                    ctx.provider.behavior = { _ in .hold }
+                    let held = try await self.startHeldLaneContinuation(ctx, chatID: lanes[0].shortID, via: entry)
+                    try await ctx.awaitSends(sends + 1)
+                    sends += 1
+
+                    // UI Stop: the exact scoped query, not the ticket worker's parent task.
+                    await ctx.oracle.cancelAIResponse(in: lanes[0].id)
+                    XCTAssertFalse(ctx.oracle.isSessionStreaming(lanes[0].id), "\(entry): producer drained by the stop")
+                    switch entry {
+                    case .blocking:
+                        do {
+                            _ = try await held.settle()
+                            XCTFail("A stopped blocking continuation must not return a reply")
+                        } catch is CancellationError {
+                        } catch {
+                            XCTFail("Expected CancellationError, got \(error)")
+                        }
+                    case .ticket:
+                        let terminal = try await held.settle()
+                        XCTAssertEqual(self.job(terminal)?["status"]?.stringValue, "cancelled")
+                        XCTAssertEqual(self.job(terminal)?["chat_id"]?.stringValue, lanes[0].shortID)
+                    }
+
+                    // Cleanup released the claim: a whole-group retry now succeeds.
+                    ctx.provider.behavior = { _ in .complete }
+                    let group = try await self.continueGroup(ctx, message: "Group after \(entry) stop")
+                    XCTAssertEqual(group.objectValue?["oracle_group_id"]?.stringValue, groupID)
+                    XCTAssertEqual(group.objectValue?["oracle_count"]?.intValue, 2)
+                    sends += 2
+                    XCTAssertEqual(ctx.provider.sendCount, sends)
+                }
+            }
+        }
+
+        func testInAppStopOfTicketedSingletonEndsCancelledKeepsRecoveryAndDoesNotResend() async throws {
+            try await Harness.withControlledFixture(additionalModels: []) { ctx in
+                var sends = 0
+                for tool in ["ask_oracle", "oracle_send"] {
+                    ctx.provider.behavior = { _ in .hold }
+                    let start = try await Harness.execute(tool, args: [
+                        "op": .string("start"), "detach": .bool(true), "new_chat": .bool(true), "message": .string("Stop me")
+                    ], service: ctx.service, invocation: ctx.invocation)
+                    let jobID = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
+                    try await ctx.awaitSends(sends + 1)
+                    sends += 1
+                    let running = try await Harness.execute(tool, args: ["op": .string("poll"), "job_id": .string(jobID)], service: ctx.service, invocation: ctx.invocation)
+                    XCTAssertEqual(self.job(running)?["status"]?.stringValue, "running", tool)
+                    let chatID = try XCTUnwrap(self.job(running)?["chat_id"]?.stringValue, "\(tool): recovery chat_id is published before the send")
+                    let session = try XCTUnwrap(ctx.oracle.resolveSession(id: chatID))
+                    XCTAssertTrue(ctx.oracle.isSessionStreaming(session.id))
+
+                    await ctx.oracle.cancelAIResponse(in: session.id)
+                    XCTAssertFalse(ctx.oracle.isSessionStreaming(session.id), "\(tool): producer drained before terminal observation")
+
+                    let terminal = try await Harness.execute(tool, args: ["op": .string("wait"), "job_id": .string(jobID), "timeout": .int(5)], service: ctx.service, invocation: ctx.invocation)
+                    XCTAssertEqual(self.job(terminal)?["status"]?.stringValue, "cancelled", tool)
+                    XCTAssertEqual(self.job(terminal)?["chat_id"]?.stringValue, chatID, tool)
+                    let errorMessage = self.job(terminal)?["error"]?.objectValue?["message"]?.stringValue ?? ""
+                    XCTAssertFalse(errorMessage.contains("OracleLaneCancellation"), errorMessage)
+                    for _ in 0 ..< 2 {
+                        let poll = try await Harness.execute(tool, args: ["op": .string("poll"), "job_id": .string(jobID)], service: ctx.service, invocation: ctx.invocation)
+                        XCTAssertEqual(self.job(poll)?["status"]?.stringValue, "cancelled", tool)
+                    }
+                    XCTAssertEqual(ctx.provider.sendCount, sends, "\(tool): polling a cancelled ticket never resends")
+                    let log = try await ctx.oracle.tool_chatGetLog(args: ["chat_id": .string(chatID)])
+                    XCTAssertEqual(log["chat_id"]?.stringValue, chatID, tool)
+
+                    // A genuine provider failure is still a failed job, not a cancellation.
+                    ctx.provider.behavior = { _ in .fail }
+                    let failing = try await Harness.execute(tool, args: [
+                        "op": .string("start"), "detach": .bool(true), "new_chat": .bool(true), "message": .string("Fail me")
+                    ], service: ctx.service, invocation: ctx.invocation)
+                    let failingID = try XCTUnwrap(failing.objectValue?["job_id"]?.stringValue)
+                    let failed = try await Harness.execute(tool, args: ["op": .string("wait"), "job_id": .string(failingID), "timeout": .int(5)], service: ctx.service, invocation: ctx.invocation)
+                    sends += 1
+                    XCTAssertEqual(self.job(failed)?["status"]?.stringValue, "failed", tool)
+                    XCTAssertNotNil(self.job(failed)?["chat_id"]?.stringValue, tool)
+                    XCTAssertEqual(ctx.provider.sendCount, sends)
+                }
+            }
+        }
+
+        // MARK: - Helpers
+
+        /// A held lane continuation started through one entry path; `settle()` returns its reply
+        /// (blocking) or terminal ticket snapshot (ticket).
+        private struct HeldContinuation {
+            let settle: () async throws -> Value
+        }
+
+        private func createGroup(_ ctx: Harness.Context) async throws -> (groupID: String, lanes: [ChatSession]) {
+            ctx.provider.behavior = { _ in .complete }
+            let initial = try await ctx.service.executeOracleSend(
+                args: ["message": .string("Create group"), "new_chat": .bool(true)], invocationContext: ctx.invocation
+            )
+            let groupID = try XCTUnwrap(initial.objectValue?["oracle_group_id"]?.stringValue)
+            await ctx.oracle.drainTrackedAutosaves(for: ctx.driver.fixture.workspace.id)
+            let lanes = ctx.lanes(ofGroup: groupID)
+            XCTAssertEqual(lanes.map(\.oracleLaneIndex), [0, 1])
+            XCTAssertEqual(ctx.provider.sendCount, 2)
+            // Implicit continuation resumes the whole group through this selection.
+            ctx.driver.manager.setActiveChatSessionID(lanes[0].id, forTabID: ctx.driver.tabID)
+            return (groupID, lanes)
+        }
+
+        private func continueGroup(_ ctx: Harness.Context, message: String) async throws -> Value {
+            try await ctx.service.executeOracleSend(args: ["message": .string(message)], invocationContext: ctx.invocation)
+        }
+
+        /// Blocking returns the reply; ticket uses a non-detached start that returns the terminal snapshot.
+        private func continueLane(_ ctx: Harness.Context, chatID: String, via entry: Harness.EntryPath, message: String) async throws -> Value {
+            var args: [String: Value] = ["message": .string(message), "chat_id": .string(chatID)]
+            if entry == .ticket {
+                args["op"] = .string("start")
+                args["timeout"] = .int(5)
+            }
+            return try await ctx.service.executeOracleSend(args: args, invocationContext: ctx.invocation)
+        }
+
+        private func askOracleLane(_ ctx: Harness.Context, chatID: String, message: String) async throws -> Value {
+            try await ctx.service.executeAskOracle(
+                args: ["message": .string(message), "chat_id": .string(chatID)], invocationContext: ctx.invocation
+            )
+        }
+
+        private func startHeldLaneContinuation(_ ctx: Harness.Context, chatID: String, via entry: Harness.EntryPath) async throws -> HeldContinuation {
+            let message = "Held \(entry) lane"
+            switch entry {
+            case .blocking:
+                let task = Task { try await self.continueLane(ctx, chatID: chatID, via: .blocking, message: message) }
+                return HeldContinuation { try await task.value }
+            case .ticket:
+                let start = try await ctx.service.executeOracleSend(args: [
+                    "op": .string("start"), "detach": .bool(true), "message": .string(message), "chat_id": .string(chatID)
+                ], invocationContext: ctx.invocation)
+                let jobID = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
+                return HeldContinuation {
+                    try await ctx.service.executeOracleSend(
+                        args: ["op": .string("wait"), "job_id": .string(jobID), "timeout": .int(5)], invocationContext: ctx.invocation
+                    )
+                }
+            }
+        }
+
+        private func assertLaneBusy(
+            _ ctx: Harness.Context, chatID: String, groupID: String, via entry: Harness.EntryPath,
+            file: StaticString = #filePath, line: UInt = #line
+        ) async throws {
+            switch entry {
+            case .blocking:
+                do {
+                    _ = try await continueLane(ctx, chatID: chatID, via: .blocking, message: "Rejected lane")
+                    XCTFail("Explicit member continuation must conflict", file: file, line: line)
+                } catch let error as ChatToolError {
+                    XCTAssertEqual(error.code, .conflict, file: file, line: line)
+                    XCTAssertEqual(error.message, Self.laneBusyMessage, file: file, line: line)
+                    XCTAssertEqual(error.details?["oracle_group_id"], groupID, file: file, line: line)
+                } catch {
+                    XCTFail("Expected lane conflict, got \(error)", file: file, line: line)
+                }
+            case .ticket:
+                let terminal = try await continueLane(ctx, chatID: chatID, via: .ticket, message: "Rejected lane")
+                XCTAssertEqual(job(terminal)?["status"]?.stringValue, "failed", file: file, line: line)
+                XCTAssertEqual(job(terminal)?["error"]?.objectValue?["message"]?.stringValue, Self.laneBusyMessage, file: file, line: line)
+                XCTAssertNil(job(terminal)?["chat_id"], "Rejected before the send published recovery", file: file, line: line)
+            }
+        }
+
+        /// The whole-group runtime surfaces the shared claim's conflict.
+        private func assertGroupClaimConflict(
+            groupID: String,
+            file: StaticString = #filePath, line: UInt = #line,
+            _ operation: () async throws -> Value
+        ) async {
+            do {
+                _ = try await operation()
+                XCTFail("Whole-group turn must not start while a lane owns the claim", file: file, line: line)
+            } catch let error as ChatToolError {
+                XCTAssertEqual(error.code, .conflict, file: file, line: line)
+                XCTAssertEqual(error.message, Self.laneBusyMessage, file: file, line: line)
+                XCTAssertEqual(error.details?["oracle_group_id"], groupID, file: file, line: line)
+            } catch {
+                XCTFail("Expected mapped Oracle lane busy conflict, got \(error)", file: file, line: line)
+            }
+        }
+
+        private func assertCompletedLaneReply(_ reply: Value, chatID: String, via entry: Harness.EntryPath, file: StaticString = #filePath, line: UInt = #line) {
+            if entry == .ticket {
+                XCTAssertEqual(job(reply)?["status"]?.stringValue, "completed", file: file, line: line)
+            }
+            XCTAssertEqual(reply.objectValue?["chat_id"]?.stringValue, chatID, file: file, line: line)
+            XCTAssertNil(reply.objectValue?["oracle_group_id"], "A lane continuation never fans out", file: file, line: line)
+            XCTAssertTrue(reply.objectValue?["response"]?.stringValue?.contains(ControlledOracleProvider.completedText) == true, file: file, line: line)
+        }
+
+        private func persistedMessageCount(_ ctx: Harness.Context, _ sessionID: UUID) async throws -> Int {
+            await ctx.oracle.drainTrackedAutosaves(for: ctx.driver.fixture.workspace.id)
+            let session = try XCTUnwrap(ctx.oracle.sessions.first { $0.id == sessionID })
+            return try await ctx.oracle.chatData.loadChatSession(from: XCTUnwrap(session.fileURL)).messages.count
+        }
+
+        private func job(_ value: Value) -> [String: Value]? {
+            value.objectValue?["job"]?.objectValue
+        }
+    }
+#endif
 
 #if DEBUG
     @MainActor
@@ -112,6 +570,31 @@ import XCTest
                 XCTAssertTrue(error.localizedDescription.contains("model"), error.localizedDescription)
             }
             XCTAssertEqual(fixture.rebindRecorder.count, 0)
+        }
+
+        func testStartRejectsInvalidRouteAsInvalidParamsWithoutAdmittingTicket() async throws {
+            let start: [String: Value] = ["op": .string("start"), "detach": .bool(true), "message": .string("continue"), "model": .string("override-model")]
+            var explicit = start
+            explicit["chat_id"] = .string("existing-chat")
+            // ask_oracle starts fresh without a chat_id, so only oracle_send has an implicit continuation.
+            let cases: [(tool: String, args: [String: Value])] = [
+                ("ask_oracle", explicit), ("oracle_send", explicit), ("oracle_send", start)
+            ]
+            for (tool, args) in cases {
+                let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID())
+                defer { fixture.cleanup() }
+                fixture.service.jobCenter.admissionDidRegister = { _ in XCTFail("Invalid route admitted a ticket") }
+                do {
+                    _ = try await executeOracleTool(tool, args: args, fixture: fixture)
+                    XCTFail("Expected invalid route (\(tool), chat_id: \(args["chat_id"] != nil))")
+                } catch let MCPError.invalidParams(rawDetail) {
+                    XCTAssertEqual(rawDetail, OracleGroupContractError.modelOverrideOnContinuation.localizedDescription, tool)
+                } catch {
+                    XCTFail("Route error must be invalidParams, got \(error) (\(tool))")
+                }
+                XCTAssertEqual(fixture.sendRecorder.calls.count, 0, tool)
+                XCTAssertEqual(fixture.rebindRecorder.count, 0, tool)
+            }
         }
 
         func testOracleSendValidContinuationRebindsOnce() async {
@@ -465,6 +948,49 @@ import XCTest
             XCTAssertEqual(fixture.sendRecorder.calls.count, 1)
             XCTAssertEqual(fixture.rebindRecorder.count, 0)
             XCTAssertNil(fixture.sendRecorder.calls[0]["op"])
+        }
+
+        /// A non-Agent compose tab closed while ticket preparation is suspended (before admission)
+        /// is invisible to the close sweep; admission must reject it rather than dispatch paid work.
+        func testTicketStartRejectsTabClosedDuringPreparationAndUnclosedTabStillAdmits() async throws {
+            for tool in ["ask_oracle", "oracle_send"] {
+                try await OracleTicketExecutionHarness.withControlledFixture(additionalModels: [], allowsRebind: false) { ctx in
+                    let args: [String: Value] = ["op": .string("start"), "detach": .bool(true), "new_chat": .bool(true), "message": .string("Gated preparation")]
+                    let tabID = ctx.driver.tabID
+
+                    // Control: the same gated real preparation admits while the tab stays open.
+                    let controlEntered = ctx.preparation.arm()
+                    let control = Task { try await OracleTicketExecutionHarness.execute(tool, args: args, service: ctx.service, invocation: ctx.invocation) }
+                    try await ctx.driver.fixture.awaitGateEvent(controlEntered)
+                    ctx.preparation.open()
+                    let controlStart = try await control.value
+                    let controlID = try XCTUnwrap(controlStart.objectValue?["job_id"]?.stringValue.flatMap(UUID.init(uuidString:)))
+                    let controlTerminal = await ctx.service.jobCenter.store.wait(id: controlID, timeout: 5)
+                    XCTAssertEqual(controlTerminal?.status, .completed, tool)
+                    XCTAssertEqual(ctx.provider.sendCount, 1, tool)
+
+                    // Close the exact tab while preparation is suspended, then release preparation.
+                    let entered = ctx.preparation.arm()
+                    let rejected = Task { try await OracleTicketExecutionHarness.execute(tool, args: args, service: ctx.service, invocation: ctx.invocation) }
+                    try await ctx.driver.fixture.awaitGateEvent(entered)
+                    let report = await ctx.driver.window.promptManager.closeComposeTab(tabID)
+                    XCTAssertTrue(report.removedComposeTabIDs.contains(tabID), tool)
+                    let sessionsBefore = Set(ctx.oracle.sessions.map(\.id))
+                    ctx.service.jobCenter.admissionDidRegister = { _ in XCTFail("\(tool): a closed tab must not register a job") }
+                    defer { ctx.service.jobCenter.admissionDidRegister = nil }
+                    ctx.preparation.open()
+                    do {
+                        _ = try await rejected.value
+                        XCTFail("\(tool): start must fail for a tab closed during preparation")
+                    } catch let error as MCPError {
+                        guard case .invalidRequest = error else { return XCTFail("\(tool): unexpected \(error)") }
+                        XCTAssertTrue(error.localizedDescription.contains("closed before the job was admitted"), "\(tool): \(error)")
+                    }
+                    XCTAssertEqual(ctx.provider.sendCount, 1, "\(tool): no worker or provider dispatch")
+                    XCTAssertTrue(Set(ctx.oracle.sessions.map(\.id)).subtracting(sessionsBefore).isEmpty, "\(tool): no chat created")
+                    XCTAssertNil(ctx.driver.manager.composeTab(with: tabID), "\(tool): never rebound or resurrected")
+                }
+            }
         }
 
         func testOracleSendTicketSurvivesOriginDisconnectAndAuthorizedReconnect() async throws {
@@ -835,6 +1361,107 @@ import XCTest
             }
         }
 
+        func testMalformedGroupExportDegradesToNoticeOnTicketsAndStillThrowsWhenBlocking() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("oracle-malformed-export-\(UUID())", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let payload = try malformedGroupPayload()
+            XCTAssertThrowsError(try MCPOracleToolService.decodeOracleGroupResultForExport(payload))
+            for sourceTool in ["oracle_send", "ask_oracle"] {
+                for path in ["ticket", "ticket-without-export", "blocking"] {
+                    let label = "\(sourceTool) \(path)"
+                    let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), exportOperation: { _ in
+                        XCTFail("A malformed group payload must not reach the exporter")
+                        throw CancellationError()
+                    }, settledReply: payload)
+                    defer { fixture.cleanup() }
+                    try await installWorkspace(root, in: fixture)
+                    var args: [String: Value] = ["new_chat": .bool(true), "message": .string("fixture")]
+                    if path != "ticket-without-export" { args["export_response"] = .bool(true) }
+                    if path != "blocking" { args["op"] = .string("start") }
+
+                    if path == "blocking" {
+                        do {
+                            _ = try await executeOracleTool(sourceTool, args: args, fixture: fixture)
+                            XCTFail("Blocking export must keep the strict decoder's throwing contract (\(label))")
+                        } catch let MCPError.internalError(detail) {
+                            XCTAssertTrue(detail?.contains("invalid grouped result") == true, "\(label): \(detail ?? "")")
+                        } catch {
+                            XCTFail("Unexpected error \(error) (\(label))")
+                        }
+                        XCTAssertEqual(fixture.sendRecorder.calls.count, 1, label)
+                        continue
+                    }
+
+                    let reply = try await executeOracleTool(sourceTool, args: args, fixture: fixture)
+                    var fields = try XCTUnwrap(reply.objectValue)
+                    XCTAssertEqual(fields.removeValue(forKey: "job")?.objectValue?["status"], .string("completed"), "\(label): \(reply)")
+                    let jobID = try XCTUnwrap(fields.removeValue(forKey: "job_id")?.stringValue)
+                    if path == "ticket" {
+                        XCTAssertEqual(
+                            fields.removeValue(forKey: "oracle_export_error"),
+                            .string("Oracle export failed; output may remain. Recover the settled result using the returned chat IDs."),
+                            label
+                        )
+                    }
+                    XCTAssertNil(fields["oracle_export_path"], label)
+                    XCTAssertNil(fields["oracle_export_instruction"], label)
+                    XCTAssertEqual(fields, payload, "\(label) must retain the settled reply unchanged")
+                    for op in ["poll", "wait"] {
+                        let observed = try await executeOracleTool(sourceTool, args: ["op": .string(op), "job_id": .string(jobID)], fixture: fixture)
+                        XCTAssertEqual(
+                            observed.objectValue?.filter { $0.key != "job" }, reply.objectValue?.filter { $0.key != "job" }, "\(label) \(op)"
+                        )
+                    }
+                    XCTAssertEqual(fixture.sendRecorder.calls.count, 1, "\(label): observation must not rerun paid work")
+                }
+            }
+        }
+
+        func testCancelledTicketWithMalformedGroupRetainsReplyWithoutDecodingOrExport() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent("oracle-malformed-cancel-\(UUID())", isDirectory: true)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let payload = try malformedGroupPayload()
+            for sourceTool in ["oracle_send", "ask_oracle"] {
+                let entered = expectation(description: "\(sourceTool) send entered")
+                let gate = AsyncStream<Void>.makeStream()
+                let fixture = makeOracleSendFixture(stopAfterRoute: false, connectionID: UUID(), exportOperation: { _ in
+                    XCTFail("A cancelled ticket must not start export")
+                    throw CancellationError()
+                }, sendOperation: { _, _, _ in
+                    entered.fulfill()
+                    for await _ in gate.stream {}
+                    return payload
+                })
+                defer {
+                    gate.continuation.finish()
+                    fixture.cleanup()
+                }
+                try await installWorkspace(root, in: fixture)
+                let start = try await executeOracleTool(sourceTool, args: [
+                    "op": .string("start"), "detach": .bool(true), "new_chat": .bool(true),
+                    "message": .string("fixture"), "export_response": .bool(true)
+                ], fixture: fixture)
+                let id = try XCTUnwrap(start.objectValue?["job_id"]?.stringValue)
+                await fulfillment(of: [entered], timeout: 2)
+                _ = try await executeOracleTool(sourceTool, args: ["op": .string("cancel"), "job_id": .string(id)], fixture: fixture)
+                let result = try await executeOracleTool(
+                    sourceTool, args: ["op": .string("wait"), "job_id": .string(id), "timeout": .int(5)], fixture: fixture
+                )
+                var fields = try XCTUnwrap(result.objectValue)
+                XCTAssertEqual(fields.removeValue(forKey: "job")?.objectValue?["status"], .string("cancelled"), sourceTool)
+                fields.removeValue(forKey: "job_id")
+                XCTAssertEqual(
+                    fields.removeValue(forKey: "oracle_export_error"),
+                    .string("Oracle export cancelled; output may remain. Recover the settled result using the returned chat IDs."),
+                    sourceTool
+                )
+                XCTAssertEqual(fields, payload, "\(sourceTool) must retain the settled reply")
+                XCTAssertEqual(fixture.sendRecorder.calls.count, 1, sourceTool)
+            }
+        }
+
         func testNonGroupExportCancellationStillThrows() async {
             let fixture = makeOracleSendFixture(exportOperation: { _ in throw CancellationError() })
             defer { fixture.cleanup() }
@@ -849,6 +1476,41 @@ import XCTest
             } catch {
                 XCTFail("Unexpected error: \(error)")
             }
+        }
+
+        private func executeOracleTool(
+            _ tool: String, args: [String: Value], fixture: OracleSendBoundaryFixture
+        ) async throws -> Value {
+            if tool == "ask_oracle" {
+                return try await fixture.service.executeAskOracle(args: args, invocationContext: fixture.invocationContext)
+            }
+            return try await fixture.service.executeOracleSend(args: args, invocationContext: fixture.invocationContext)
+        }
+
+        private func installWorkspace(_ root: URL, in fixture: OracleSendBoundaryFixture) async throws {
+            await fixture.window.workspaceManager.awaitInitialized()
+            let workspace = try WorkspaceModel(
+                id: XCTUnwrap(fixture.context.workspaceID), name: "Oracle export fixture",
+                repoPaths: [root.path], ephemeralFlag: true
+            )
+            fixture.window.workspaceManager.workspaces = [workspace]
+            fixture.window.workspaceManager.activeWorkspace = workspace
+        }
+
+        /// Canonical two-lane group fields whose declared `oracle_count` disagrees with its lanes.
+        private func malformedGroupPayload() throws -> [String: Value] {
+            let group = try OracleGroupResult(
+                groupID: OracleGroupID(rawValue: UUID()), status: .completed,
+                oracleResults: [
+                    OracleLaneResult(laneIndex: 0, chatID: "primary-chat", providerID: "fixture", modelID: "primary", status: .completed, response: "Primary answer"),
+                    OracleLaneResult(laneIndex: 1, chatID: "additional-chat", providerID: "fixture", modelID: "additional", status: .completed, response: "Additional answer")
+                ]
+            )
+            var payload = OracleGroupMCPCodec.groupFields(group)
+            payload["chat_id"] = .string(group.primary.chatID)
+            payload["response"] = .string("Primary answer")
+            payload["oracle_count"] = .int(3)
+            return payload
         }
 
         private func assertStopsAfterRoute(
@@ -899,7 +1561,7 @@ import XCTest
             )
             let recorder = OracleRebindRecorder()
             let sendRecorder = OracleSendArgsRecorder()
-            let service = MCPOracleToolService(
+            var service = MCPOracleToolService(
                 askOracleToolName: "ask_oracle",
                 oracleSendToolName: "oracle_send",
                 oracleChatLogToolName: "oracle_chat_log",
@@ -951,6 +1613,8 @@ import XCTest
                 exportOracleResponse: exportOperation ?? { _ in throw OracleBoundaryTestStop.unexpectedExport },
                 jobCenter: MCPLongRunningJobCenter()
             )
+            // Synthetic tab identity: admission-target closure is covered by the real-tab fixture tests.
+            service.admissionTargetExists = { _, _ in true }
             return OracleSendBoundaryFixture(
                 window: window,
                 service: service,
@@ -1755,6 +2419,172 @@ final class OracleGroupDeliveryContractTests: XCTestCase {
                     )
                     XCTAssertEqual(texts(raw), [ToolOutputFormatter.rawJSONString(.object(ticket))])
                 }
+            }
+        }
+    }
+
+    func testNonTerminalAndResultlessTicketsRenderExactSummaries() {
+        let id = UUID().uuidString
+        let context = UUID().uuidString
+        let next = "Call ask_oracle op=wait or poll with job_id=\(id)."
+        // Nonterminal snapshots must never render result bodies, even when unexpected fields are present.
+        let leaked: [String: Value] = ["response": .string("LEAKED_RESPONSE_BODY"), "prompt": .string("LEAKED_PROMPT_BODY")]
+        let cases: [(status: String, extra: [String: Value], payload: [String: Value], expected: String)] = [
+            (
+                "running", ["phase": .string("discovery"), "context_id": .string(context), "chat_id": .string("chat-9")],
+                leaked.merging(["next_action": .string(next)]) { _, new in new },
+                "## Long-running job\n- **Job ID**: `\(id)`\n- **Status**: running\n- **Phase**: discovery\n- **Context ID**: `\(context)`\n- **Oracle chat**: `chat-9`\n\(next)"
+            ),
+            (
+                "cancelling", ["message": .string("Cancellation requested")],
+                leaked.merging(["next_action": .string(next)]) { _, new in new },
+                "## Long-running job\n- **Job ID**: `\(id)`\n- **Status**: cancelling\nCancellation requested\n\(next)"
+            ),
+            (
+                "failed", ["error": .object(["code": .string("failed"), "message": .string("Provider stopped")])],
+                [:],
+                "## Long-running job\n- **Job ID**: `\(id)`\n- **Status**: failed\nProvider stopped"
+            ),
+            (
+                "expired", ["message": .string("Ticket expired on app restart")],
+                [:],
+                "## Long-running job\n- **Job ID**: `\(id)`\n- **Status**: expired\nTicket expired on app restart"
+            )
+        ]
+        for tool in ["ask_oracle", "oracle_send", "context_builder"] {
+            for item in cases {
+                var job: [String: Value] = ["id": .string(id), "status": .string(item.status)]
+                job.merge(item.extra) { _, new in new }
+                var ticket = item.payload
+                ticket["job_id"] = .string(id)
+                ticket["job"] = .object(job)
+                let blocks = ToolOutputFormatter.buildContentBlocks(
+                    toolName: tool, args: [:], result: .object(ticket), emitResources: false
+                )
+                XCTAssertEqual(texts(blocks), [item.expected], "\(tool) \(item.status)")
+            }
+        }
+    }
+
+    func testTerminalTicketPayloadRendersAfterHeaderThatKeepsRecoveryText() {
+        let id = UUID().uuidString
+        let answered: [String: Value] = ["chat_id": .string("single"), "mode": .string("chat"), "response": .string("Single settled answer")]
+        // A settled singleton can carry only recovery/error fields (no response, oracle_results, or prompt).
+        let errorsOnly: [String: Value] = ["chat_id": .string("single"), "errors": .array([.string("Provider stopped mid-reply")])]
+        let cases: [(status: String, job: [String: Value], recovery: [String])] = [
+            ("completed", [:], []),
+            ("cancelled", ["message": .string("Cancelled by owner")], ["Cancelled by owner"]),
+            ("failed", ["error": .object(["code": .string("failed"), "message": .string("Provider stopped")])], ["Provider stopped"]),
+            ("expired", ["message": .string("Ticket expired")], ["Ticket expired"])
+        ]
+        for tool in ["ask_oracle", "oracle_send"] {
+            for reply in [answered, errorsOnly] {
+                for item in cases {
+                    var job = item.job
+                    job["id"] = .string(id)
+                    job["status"] = .string(item.status)
+                    var ticket = reply
+                    ticket["job_id"] = .string(id)
+                    ticket["job"] = .object(job)
+                    ticket["next_action"] = .string("Recover with chat_id single.")
+                    let expected = ToolOutputFormatter.buildContentBlocks(
+                        toolName: tool, args: [:], result: .object(reply), emitResources: false
+                    )
+                    let blocks = ToolOutputFormatter.buildContentBlocks(
+                        toolName: tool, args: [:], result: .object(ticket), emitResources: false
+                    )
+                    let header = (
+                        ["## Long-running job", "- **Job ID**: `\(id)`", "- **Status**: \(item.status)"]
+                            + item.recovery + ["Recover with chat_id single."]
+                    ).joined(separator: "\n") + "\n\n"
+                    XCTAssertEqual(texts(Array(blocks.prefix(1))), [header], "\(tool) \(item.status)")
+                    XCTAssertEqual(texts(Array(blocks.dropFirst())), texts(expected), "\(tool) \(item.status)")
+                }
+            }
+            let errorsText = joinedText(ToolOutputFormatter.buildContentBlocks(
+                toolName: tool, args: [:],
+                result: .object(errorsOnly.merging(["job_id": .string(id), "job": .object(["id": .string(id), "status": .string("completed")])]) { _, new in new }),
+                emitResources: false
+            ))
+            XCTAssertTrue(errorsText.contains("### Errors\n- Provider stopped mid-reply"), errorsText)
+        }
+    }
+
+    func testTicketBranchIgnoresMismatchedIDsAndForeignTools() {
+        let id = UUID().uuidString
+        let reply: [String: Value] = ["chat_id": .string("single"), "mode": .string("chat"), "response": .string("Plain answer")]
+        var mismatched = reply
+        mismatched["job_id"] = .string(id)
+        mismatched["job"] = .object(["id": .string(UUID().uuidString), "status": .string("completed")])
+        var foreign = reply
+        foreign["job_id"] = .string(id)
+        foreign["job"] = .object(["id": .string(id), "status": .string("running")])
+
+        let mismatchedText = joinedText(ToolOutputFormatter.buildContentBlocks(
+            toolName: "ask_oracle", args: [:], result: .object(mismatched), emitResources: false
+        ))
+        XCTAssertFalse(mismatchedText.contains("Long-running job"), mismatchedText)
+        XCTAssertTrue(mismatchedText.contains("Plain answer"), mismatchedText)
+
+        let foreignText = joinedText(ToolOutputFormatter.buildContentBlocks(
+            toolName: "oracle_chat_log", args: [:], result: .object(foreign), emitResources: false
+        ))
+        XCTAssertFalse(foreignText.contains("Long-running job"), foreignText)
+    }
+
+    func testExportNoticeRendersOnceForSingleAndGroupedOracleReplies() throws {
+        let notice = "Oracle export failed; output may remain. Recover the settled result using the returned chat IDs."
+        let section = "### Oracle export notice\n- \(notice)\n"
+        let id = UUID().uuidString
+        let single: [String: Value] = [
+            "chat_id": .string("single"), "mode": .string("chat"), "response": .string("Paid single answer"),
+            "oracle_export_error": .string(notice)
+        ]
+        var grouped = try groupFields(lanes: [lane(index: 0, response: "primary answer"), lane(index: 1, response: "adviser answer")])
+        grouped["oracle_export_error"] = .string(notice)
+        for tool in ["ask_oracle", "oracle_send"] {
+            for reply in [single, grouped] {
+                var ticket = reply
+                ticket["job_id"] = .string(id)
+                ticket["job"] = .object(["id": .string(id), "status": .string("completed")])
+                for value in [reply, ticket] {
+                    let text = texts(ToolOutputFormatter.buildContentBlocks(
+                        toolName: tool, args: [:], result: .object(value), emitResources: false
+                    )).joined()
+                    XCTAssertEqual(text.components(separatedBy: "### Oracle export notice").count, 2, "\(tool): \(text)")
+                    XCTAssertTrue(text.contains(section), text)
+                    XCTAssertFalse(text.contains("### Oracle export\n"), "No handoff without a path: \(text)")
+                    XCTAssertFalse(text.contains("❌"), "An export notice is not a generation failure: \(text)")
+                }
+            }
+            let singleText = texts(ToolOutputFormatter.buildContentBlocks(
+                toolName: tool, args: [:], result: .object(single), emitResources: false
+            )).joined()
+            XCTAssertTrue(singleText.contains("### Response\nPaid single answer\n### Oracle export notice"), singleText)
+
+            // Grouped delivery keeps its lanes and end-marker line, then the notice, then a handoff that
+            // can legitimately accompany it.
+            var withPath = grouped
+            withPath["oracle_export_path"] = .string("/tmp/prompt-exports/oracle.md")
+            let groupedText = texts(ToolOutputFormatter.buildContentBlocks(
+                toolName: tool, args: [:], result: .object(withPath), emitResources: false
+            )).joined()
+            XCTAssertLessThan(
+                try XCTUnwrap(groupedText.range(of: "primary answer")).lowerBound,
+                try XCTUnwrap(groupedText.range(of: "adviser answer")).lowerBound
+            )
+            XCTAssertTrue(
+                groupedText.contains("\nEnd of Oracle group: 2 lanes above.\n\n\(section)### Oracle export\n- Path: `/tmp/prompt-exports/oracle.md`"),
+                groupedText
+            )
+
+            for blankNotice in [Value.string(" \n"), .null] {
+                var blank = single
+                blank["oracle_export_error"] = blankNotice
+                let blankText = joinedText(ToolOutputFormatter.buildContentBlocks(
+                    toolName: tool, args: [:], result: .object(blank), emitResources: false
+                ))
+                XCTAssertFalse(blankText.contains("Oracle export notice"), blankText)
             }
         }
     }

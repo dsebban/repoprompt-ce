@@ -876,6 +876,7 @@ extension OracleViewModel {
         resolvedLaneIndex: Int = 0,
         implicitSessionID: UUID? = nil,
         contextBuilderScope: ContextBuilderOracleLaneScope? = nil,
+        requiresProducerDrain: Bool = false,
         onProgress: ((_ text: String, _ reasoning: String?) -> Void)? = nil
     ) async throws
         -> [String: Value]
@@ -1007,9 +1008,10 @@ extension OracleViewModel {
         let effectiveMode = PromptViewModel.PlanActMode(rawValue: mode.capitalized) ?? .chat
 
         // ────────── 5. Send user message & wait for completion ──────────
-        // A single ticket must own sendMessage's independent producer, not just its hub waiter.
-        // Reuse exact-query release/join without opting ordinary Oracle into CB deadlines.
-        let ticketScope = contextBuilderScope == nil && tabContext?.jobProgress != nil
+        // A ticket, or a caller holding a claim until the producer stops, must own sendMessage's
+        // independent producer, not just its hub waiter. Reuse exact-query release/join without
+        // opting ordinary Oracle into CB deadlines.
+        let ownedScope = contextBuilderScope == nil && (tabContext?.jobProgress != nil || requiresProducerDrain)
             ? ContextBuilderOracleGroupSupervision(configuration: nil).makeLane(sessionID: chatID) : nil
         let execute: (ContextBuilderOracleLaneScope?) async throws -> OracleLaneExecutionResponse = { [self] scope in
             let send = {
@@ -1052,11 +1054,14 @@ extension OracleViewModel {
             return OracleLaneExecutionResponse(response: response)
         }
         let response: String
-        if let ticketScope {
+        if let ownedScope {
             do {
-                response = try await ticketScope.run(oracle: self) { try await execute(ticketScope) }.response
+                response = try await ownedScope.run(oracle: self) { try await execute(ownedScope) }.response
             } catch {
-                if ticketScope.queryID == nil { clearMCPSessionUIState(for: chatID) }
+                if ownedScope.queryID == nil { clearMCPSessionUIState(for: chatID) }
+                // This call owns the scope, so its typed lane outcome stops here: an in-app stop is
+                // ordinary cancellation to callers and the job center. Caller-owned scopes keep it.
+                if error is OracleLaneCancellation { throw CancellationError() }
                 throw error
             }
         } else {
