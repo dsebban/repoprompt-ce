@@ -1,0 +1,221 @@
+{
+ "scenario": "a_get_file_tree",
+ "non_idle_samples": 7744,
+ "hidden_idle_samples": 137231,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [
+  {
+   "function": "AG::Graph::UpdateStack::u\u2026 (trunc)",
+   "self_pct": 8.0,
+   "total_pct": 9.6
+  },
+  {
+   "function": "AG::Graph::propagate_dirt\u2026 (trunc)",
+   "self_pct": 7.7,
+   "total_pct": 9.1
+  },
+  {
+   "function": "newJSONString (Foundation)",
+   "self_pct": 4.3,
+   "total_pct": 7.2
+  },
+  {
+   "function": "__CFFromUTF8 (CoreFoundation)",
+   "self_pct": 2.5,
+   "total_pct": 2.5
+  },
+  {
+   "function": "JSONWriter.serializeStrin\u2026 (trunc)",
+   "self_pct": 2.1,
+   "total_pct": 2.6
+  },
+  {
+   "function": "swift_release (libswiftCore.dylib)",
+   "self_pct": 2.0,
+   "total_pct": 2.0
+  },
+  {
+   "function": "AG::Subgraph::update(unsi\u2026 (trunc)",
+   "self_pct": 2.0,
+   "total_pct": 9.7
+  },
+  {
+   "function": "_platform_memmo\u2026 (libsystem_p\u2026)",
+   "self_pct": 1.7,
+   "total_pct": 1.7
+  },
+  {
+   "function": "_xzm_free (libsystem_malloc.dylib)",
+   "self_pct": 1.7,
+   "total_pct": 2.1
+  },
+  {
+   "function": "swift_retain (libswiftCore.dylib)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "___chkstk_darw\u2026 (libsystem_pt\u2026)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "swift_bridgeObjectRele\u2026 (lib\u2026)",
+   "self_pct": 1.1,
+   "total_pct": 1.1
+  }
+ ],
+ "terms": {
+  "get_file_tree": {
+   "shot": "a_get_file_tree__t_get_file_tree.png",
+   "match_count": 0,
+   "search_share_pct": 0.0,
+   "selected_function": null,
+   "total_pct": null,
+   "total_samples": null,
+   "self_pct": null,
+   "self_samples": null,
+   "top_rows": [],
+   "note": "Functions 0, empty table, no bottom bar; no highlighted boxes; toast 'omp 18.10.2 installed' overlays bottom"
+  },
+  "JSONEncoder": {
+   "shot": "a_get_file_tree__t_JSONEncoder.png",
+   "match_count": 20,
+   "search_share_pct": 5.8,
+   "selected_function": "JSONEncoder.encode<A>(_:)",
+   "module": "Foundation",
+   "total_pct": 1.9,
+   "total_samples": 144,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "aggregate_in_places": "5.8% in 8 places",
+   "selected_table_row": {
+    "self_pct": 0.0,
+    "total_pct": 5.8
+   },
+   "top_rows": [
+    {
+     "function": "outlined copy of JSONEnco\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "specialized __JSONEncoder\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": 2.6
+    },
+    {
+     "function": "__JSONEncoder.wrapGeneric\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": 2.5
+    },
+    {
+     "function": "protocol witness for Sing\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "__JSONEncoder.unkeyedCont\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    }
+   ],
+   "further_rows": [
+    [
+     "dispatch thunk of JSONEnc\u2026",
+     0.0,
+     5.8
+    ],
+    [
+     "JSONEncoder.encode<\u2026>(\u2026 (selected)",
+     0.0,
+     5.8
+    ]
+   ],
+   "thread": "worker column 'com.apple.root.user-initiated-qos.cooperative' (highlighted boxes: yellow x~548,y365; yellow x~261,y425; orange-outlined selected x~215,y455); none in Main thread column"
+  },
+  "Regex": {
+   "shot": "a_get_file_tree__t_Regex.png",
+   "match_count": 51,
+   "search_share_pct": 8.7,
+   "selected_function": "Regex.wholeMatch(in:)",
+   "module": "libswift_StringProcessing",
+   "total_pct": 5.0,
+   "total_samples": 388,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "aggregate_in_places": "8.7% in 21 places",
+   "selected_table_row": {
+    "self_pct": 0.0,
+    "total_pct": 8.7
+   },
+   "top_rows": [
+    {
+     "function": "Regex.init(verbati\u2026 (trunc; libswift\u2026)",
+     "self_pct": "<0.1",
+     "total_pct": 0.1
+    },
+    {
+     "function": "Lookahead.regex.get\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": 0.1
+    },
+    {
+     "function": "closure #1 in static Rege\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "DYLD-STUB$$static RegexCo\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "_RegexFactory.ini\u2026 (trunc)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    }
+   ],
+   "further_rows": [
+    [
+     "Regex.wholeMatch(i\u2026 (selected)",
+     0.0,
+     8.7
+    ],
+    [
+     "Regex.Program.loweredProg\u2026",
+     0.0,
+     8.6
+    ],
+    [
+     "Regex.init<\u2026>(_\u2026",
+     0.0,
+     3.8
+    ]
+   ],
+   "thread": "flame view is scrolled down so thread header row not visible; selected green box 'Re\u2026' (x285-335,y885) sits in the sub-column x285-450 (JSONDecoderImpl/dispatch thunk chain), the same sub-column as the worker 'com.apple.root.user-initiated-qos.cooperative' column (x8-686 in overview); Main thread column (x688+) shows no highlight. Thread inferred from x-position, header not visible"
+  },
+  "AG::Graph::UpdateStack::update": {
+   "shot": "a_get_file_tree__t_AG__Graph__UpdateStack__update.png",
+   "match_count": 1,
+   "search_share_pct": 9.6,
+   "search_text_shown": "AG::Graph::UpdateSta (truncated)",
+   "selected_function": "AG::Graph::UpdateStack::update()",
+   "module": "AttributeGraph",
+   "total_pct": 7.3,
+   "total_samples": 566,
+   "self_pct": 6.3,
+   "self_samples": 489,
+   "aggregate_in_places": "9.6% in 28 places",
+   "top_rows": [
+    {
+     "function": "AG::Graph::UpdateStack::u\u2026 (trunc)",
+     "self_pct": 8.0,
+     "total_pct": 9.6
+    }
+   ],
+   "thread": "selected box 'AG :: G\u2026' (x688-762,y178) sits at left edge of the Main thread column (x688+); second box 'AG :: Gr\u2026' x~790 also in Main thread column; none in worker column (x8-686)"
+  }
+ },
+ "notes": "Bottom-up shot Functions list (sorted Self, 3,065 functions) identical to overview list; 12 rows transcribed (header text '9\u2026' truncated). Term 'get_file_tree' matched 0 functions (0.0%). Thread columns in top-down view: worker 'com.apple.root.user-initiated-qos.cooperative' (x8-686, left) and 'Main thread' (x688-1040, right). JSONEncoder highlights are in the cooperative worker column; Regex highlight in the worker sub-column (header scrolled out, inferred by x-position); AG::Graph::UpdateStack::update highlights in Main thread column (SwiftUI/AttributeGraph). Bottom-up flame shows AG:: boxes in both columns at the roots. 83 get_file_tree calls recorded in evidence.jsonl (latencies 0.15-0.69s)."
+}

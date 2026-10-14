@@ -1,0 +1,104 @@
+{
+ "scenario": "e_code_structure_nosig",
+ "non_idle_samples": 6995,
+ "hidden_idle_samples": 137208,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [
+  {
+   "function": "AG::Graph::propagate_dirt\u2026 (truncated)",
+   "self_pct": 6.6,
+   "total_pct": 7.7
+  },
+  {
+   "function": "AG::Graph::UpdateStack::u\u2026 (truncated)",
+   "self_pct": 6.2,
+   "total_pct": 7.5
+  },
+  {
+   "function": "DYLD-STUB$$implicit closu\u2026 (truncated)",
+   "self_pct": 2.6,
+   "total_pct": 2.6
+  },
+  {
+   "function": "swift_release (libswiftCore.dylib)",
+   "self_pct": 2.6,
+   "total_pct": 2.6
+  },
+  {
+   "function": "_xzm_free (libsystem_malloc.dylib)",
+   "self_pct": 2.1,
+   "total_pct": 3.0
+  },
+  {
+   "function": "Substring.subscript.ge\u2026 (truncated)",
+   "self_pct": 2.0,
+   "total_pct": 3.8
+  },
+  {
+   "function": "swift_retain (libswiftCore.dylib)",
+   "self_pct": 1.7,
+   "total_pct": 1.7
+  },
+  {
+   "function": "_platform_memmo\u2026 (libsystem_p\u2026, truncated)",
+   "self_pct": 1.7,
+   "total_pct": 1.7
+  },
+  {
+   "function": "AG::Subgraph::update(unsi\u2026 (truncated)",
+   "self_pct": 1.6,
+   "total_pct": 7.8
+  },
+  {
+   "function": "swift_getEnumCaseMultiPay\u2026 (truncated)",
+   "self_pct": 1.6,
+   "total_pct": 1.6
+  },
+  {
+   "function": "Substring.index(afte\u2026 (truncated)",
+   "self_pct": 1.5,
+   "total_pct": 2.2
+  },
+  {
+   "function": "swift::RefCounts<\u2026>::doDe\u2026 (truncated)",
+   "self_pct": 1.4,
+   "total_pct": 9.0
+  }
+ ],
+ "terms": {
+  "CodeMapRootManifestStore": {
+   "shot": "e_code_structure_nosig__t_CodeMapRootManifestStore.png",
+   "match_count": 0,
+   "search_share_pct": 0.0,
+   "selected_function": null,
+   "total_pct": null,
+   "total_samples": null,
+   "self_pct": null,
+   "self_samples": null,
+   "top_rows": []
+  },
+  "openat": {
+   "shot": "e_code_structure_nosig__t_openat.png",
+   "match_count": 0,
+   "search_share_pct": 0.0,
+   "selected_function": null,
+   "total_pct": null,
+   "total_samples": null,
+   "self_pct": null,
+   "self_samples": null,
+   "top_rows": []
+  },
+  "scanLocked": {
+   "shot": "e_code_structure_nosig__t_scanLocked.png",
+   "match_count": 0,
+   "search_share_pct": 0.0,
+   "selected_function": null,
+   "total_pct": null,
+   "total_samples": null,
+   "self_pct": null,
+   "self_samples": null,
+   "top_rows": []
+  }
+ },
+ "notes": "Header: 'Rep\u2026 13579 6,995 samples \u00b7 20.0 s \u00b7 every 1 ms \u00b7 9\u2026' (rest of header truncated). Bottom-up Functions count shown: 2,987 (matches evidence functions). Function names in the Functions table are truncated by column width; truncated names transcribed as visible. Next rows beyond 12 (e.g. ___chkstk_darw\u2026 1.4/1.4, swift_bridgeObjectRele\u2026 1.3/1.3, static PathMatcher.comput\u2026 1.1/15.6, static PathMatcher.findBe\u2026 1.1/19.0) also visible. All three term searches show 'Functions 0', search box share 0.0%, no function selected, bottom bar absent, no highlighted flame boxes -> the CodeMapRootManifestStore/openat/scanLocked functions do not appear in the nosig profile (consistent with evidence functions_matching=0). Top-down flame view with search shows columns 'com.apple.root.user-initiated-qos.cooperative' (worker thread, left/center) and 'Main thread' (right), nothing highlighted. Bottom-up flame graph (All threads) top roots AG::Graph\u2026; no highlighted boxes."
+}

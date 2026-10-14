@@ -1,0 +1,213 @@
+{
+ "scenario": "b_search_content_regex",
+ "non_idle_samples": 14186,
+ "hidden_idle_samples": 173265,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [
+  {
+   "function": "specialized SearchLineIndex… (truncated)",
+   "self_pct": 29.5,
+   "total_pct": 30.7
+  },
+  {
+   "function": "closure #2 in PCRE2Regex… (truncated)",
+   "self_pct": 4.6,
+   "total_pct": 8.4
+  },
+  {
+   "function": "AG::Graph::propagate_dirt… (truncated)",
+   "self_pct": 3.6,
+   "total_pct": 4.1
+  },
+  {
+   "function": "AG::Graph::UpdateStack::u… (truncated)",
+   "self_pct": 3.2,
+   "total_pct": 3.9
+  },
+  {
+   "function": "??? (<unknown binar… (truncated; libs col '<unkn…')",
+   "self_pct": 2.8,
+   "total_pct": 2.8
+  },
+  {
+   "function": "swift_release (libswiftCore.dylib)",
+   "self_pct": 1.4,
+   "total_pct": 1.4
+  },
+  {
+   "function": "_platform_memmo… (libsystem_p…, truncated)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "swift_retain (libswiftCore.dylib)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "_xzm_free (libsystem_malloc.dylib)",
+   "self_pct": 1.2,
+   "total_pct": 1.6
+  },
+  {
+   "function": "swift_bridgeObjectRet… (libs…, truncated)",
+   "self_pct": 1.1,
+   "total_pct": 1.1
+  },
+  {
+   "function": "swift_bridgeObjectRele… (lib…, truncated)",
+   "self_pct": 1.0,
+   "total_pct": 1.0
+  },
+  {
+   "function": "___chkstk_darw… (libsystem_pt…, truncated)",
+   "self_pct": 0.9,
+   "total_pct": 0.9
+  }
+ ],
+ "terms": {
+  "Regex": {
+   "shot": "b_search_content_regex__t_Regex.png",
+   "match_count": 77,
+   "search_share_pct": 54.2,
+   "selected_function": "closure #1 in refillBatchWindow #1 (into:) in FileSearchActor.searchContentWithErrors(pattern:isRegex… (truncated in bottom bar)",
+   "total_pct": 54.2,
+   "total_samples": 7685,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "closure #2 in PCRE2Regex… (truncated)",
+     "self_pct": 4.6,
+     "total_pct": 8.4
+    },
+    {
+     "function": "closure #1 in static Data… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 1.9
+    },
+    {
+     "function": "_RegexFactory.zeroOrOne<… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.2
+    },
+    {
+     "function": "icu::RegexMatcher::MatchA… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "static RegexComponentBuil… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "highlighted box (row 4) is on 'com.apple.root.user-initiated-qos.cooperative' thread column (header visible); Main thread column visible at right, not highlighted"
+  },
+  "SearchLineIndex": {
+   "shot": "b_search_content_regex__t_SearchLineIndex.png",
+   "match_count": 3,
+   "search_share_pct": 30.7,
+   "selected_function": "specialized SearchLineIndex.init(content:)",
+   "total_pct": 30.7,
+   "total_samples": 4351,
+   "self_pct": 29.5,
+   "self_samples": 4190,
+   "top_rows": [
+    {
+     "function": "specialized SearchLineInd… (truncated)",
+     "self_pct": 29.5,
+     "total_pct": 30.7
+    },
+    {
+     "function": "@objc SearchLineIndexBox… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 0.1
+    },
+    {
+     "function": "initializeWithCopy for Se… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "highlighted box is on 'com.apple.root.user-initiated-qos.cooperative' thread column (row 7, leftmost); Main thread column not highlighted"
+  },
+  "FileHandle": {
+   "shot": "b_search_content_regex__t_FileHandle.png",
+   "match_count": 9,
+   "search_share_pct": 0.2,
+   "selected_function": "specialized static FileContentFingerprintReader.openReadOnlyFileHandle(atPath:)",
+   "total_pct": 0.2,
+   "total_samples": 28,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "specialized static FileCo… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 0.2
+    },
+    {
+     "function": "@nonobjc NSFileHandle.__a… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "+[NSFileHandle fileHandle… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "-[NSConcreteFileHandle in… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "__33-[NSConcreteFileHandl… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "tiny orange highlight at ~x=625,y=817 (display coords) sits in a worker-thread column between the leftmost cooperative column and Main thread (Main thread column starts ~x=862, not highlighted); that column's thread header not visible"
+  },
+  "JSONEncoder": {
+   "shot": "b_search_content_regex__t_JSONEncoder.png",
+   "match_count": 20,
+   "search_share_pct": 2.2,
+   "selected_function": "JSONEncoder.encode<A>(_:) (Foundation)",
+   "total_pct": 0.9,
+   "total_samples": 134,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "__JSONEncoder.wrapGeneric… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 1.4
+    },
+    {
+     "function": "outlined copy of JSONEnco… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "get_enum_tag_for_layout_s… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "outlined consume of JSONE… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "__JSONEncoder.takeValu… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.2
+    }
+   ],
+   "flame_note": "bottom bar for selected node: total 0.9% · 134, self 0.0% · 0, '2.2% in 7 places' (Functions table row for JSONEncoder.encode<…>(… shows self 0.0% total 2.2%). Highlighted (orange/yellow) boxes are small ones in worker-thread columns left of Main thread (~x=643,y=455 and ~x=780,y=365); Main thread column (starts ~x=862) not highlighted"
+  }
+ },
+ "notes": "Percentages are shares of non-idle samples. Bottom-up function names are truncated in the UI (ellipsis); only the visible text is transcribed. Highlighted flame boxes: Regex and SearchLineIndex terms sit on the 'com.apple.root.user-initiated-qos.cooperative' (Swift concurrency worker) thread column (leftmost); FileHandle and JSONEncoder highlights are small boxes in worker columns left of the Main thread column; none are on the Main thread (starts ~x=862 in 1568-px display). Match counts (77/20/9/3) agree with evidence.jsonl functions_matching. Overview shots not transcribed (header: 14,186 samples · 20.0 s · every 1 ms)."
+}

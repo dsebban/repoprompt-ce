@@ -1,0 +1,66 @@
+{
+ "scenario": "f_workspace_context",
+ "non_idle_samples": 9101,
+ "hidden_idle_samples": 138003,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [],
+ "terms": {
+  "Regex": {
+   "shot": "f_workspace_context__t_Regex.png",
+   "match_count": null,
+   "match_count_evidence_jsonl": 40,
+   "search_share_pct": 9.0,
+   "selected_function": "Regex.prefixMatch(in:) (libswift_StringProcessin\u2026 truncated)",
+   "total_pct": 4.8,
+   "total_samples": 440,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "extra": "bottom bar also says '9.0% in 25 places'",
+   "top_rows": [],
+   "flame_note": "Functions sidebar not shown in this shot; flame pane scrolled deep (left worker-thread region x~480-800 in view, i.e. the 'com.apple.root.user-initiated-qos.cooperative' column, JSONDecoder/Decodable chain); highlighted green-bordered box 'Regex\u2026' at bottom ~x575,y886 with a second 'Regex\u2026' above. Thread column header not visible."
+  },
+  "JSONEncoder": {
+   "shot": "f_workspace_context__t_JSONEncoder.png",
+   "match_count": null,
+   "match_count_evidence_jsonl": 18,
+   "search_share_pct": 6.1,
+   "selected_function": "dispatch thunk of JSONEncoder.encode<A>(_:) (Foundation)",
+   "total_pct": 3.6,
+   "total_samples": 329,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "extra": "bottom bar also says '6.1% in 6 places'; search box text shows 'JSONEnc' (clipped)",
+   "top_rows": [],
+   "flame_note": "Functions sidebar not shown. Highlighted orange-bordered box 'dis\u2026' at ~x362,y178 sits in the LEFT worker-thread region (columns of com.apple.root.user-initiated-qos.cooperative, under 'static MCPTermin\u2026' / 'spe\u2026' chain, near the 'JSO\u2026' box); Main thread column (right, '-[NSApplication run]' etc.) has no highlight."
+  },
+  "MCPRoutingStateStore": {
+   "shot": "f_workspace_context__t_MCPRoutingStateStore.png",
+   "match_count": null,
+   "match_count_evidence_jsonl": 1,
+   "search_share_pct": 4.3,
+   "selected_function": "specialized static MCPRoutingStateStore.save(_:) (RepoPrompt)",
+   "total_pct": 4.3,
+   "total_samples": 387,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "extra": "no 'in N places' text (single match); search box shows 'MCPRou' (clipped)",
+   "top_rows": [],
+   "flame_note": "Functions sidebar not shown. Highlighted solid orange box 'spec\u2026' at ~x367,y178 in the LEFT worker-thread region (com.apple.root.user-initiated-qos.cooperative, under ServerNetworkMan\u2026/MCPServer\u2026 chain); Main thread column (right) no highlight."
+  },
+  "AG::Graph::UpdateStack::update": {
+   "shot": "f_workspace_context__t_AG__Graph__UpdateStack__update.png",
+   "match_count": null,
+   "match_count_evidence_jsonl": 1,
+   "search_share_pct": 10.1,
+   "selected_function": "AG::Graph::UpdateStack::update() (AttributeGraph)",
+   "total_pct": 7.9,
+   "total_samples": 720,
+   "self_pct": 7.1,
+   "self_samples": 650,
+   "extra": "bottom bar also says '10.1% in 17 places'; search box text shows 'AG::Gra' (clipped)",
+   "top_rows": [],
+   "flame_note": "Functions sidebar not shown. Highlighted teal box 'AG::Graph\u2026' at ~x1240,y886 sits in the RIGHT column, under the '-[NSApplication run]' / NSRunLoop / ViewGraphRootValueUpdater / GraphHost.flushTransactions chain, i.e. the Main thread column (column header itself scrolled out of view)."
+  }
+ },
+ "notes": "non_idle_samples/hidden_idle_samples from evidence.jsonl summary (the screenshots for this scenario do NOT show the recording header or the Functions table: the sidebar is collapsed and only the flame graph with a 'All threads' header, search box and bottom bar is visible). Therefore top_self_bottom_up is EMPTY (01_bottomup_selftime and 00_overview shots show only a flame graph with no numbers; 5 flame columns left to right: AG::Graph\u2026/GraphHost\u2026/ViewGraph\u2026 stacks etc.), match_count from the screenshots is not visible (evidence.jsonl values given as match_count_evidence_jsonl: Regex 40, JSONEncoder 18, MCPRoutingStateStore 1, AG::Graph::UpdateStack::update 1; evidence summary functions=3271). recording_seconds 20.0 taken from task description (header not visible). Search box text is clipped for long terms (JSONEnc, MCPRou, AG::Gra). Thread columns: JSONEncoder and MCPRoutingStateStore highlights are in the left worker-thread region (MCPServer/ServerNetworkMan\u2026 chain); AG::Graph::UpdateStack::update highlight is in the right Main-thread column (NSApplication run loop/ViewGraphRootValueUpdater chain); Regex highlight in left worker region (JSONDecoder chain), header not visible. In the all-threads bottom-up flame (01 shot) the leaf-level boxes shown are AG::Graph\u2026, AG::Subg\u2026, speciali\u2026, GraphHost\u2026 etc. (no percentages visible)."
+}

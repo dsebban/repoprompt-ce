@@ -1,0 +1,193 @@
+{
+ "scenario": "c_search_path",
+ "non_idle_samples": 18780,
+ "hidden_idle_samples": 209976,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [
+  {
+   "function": "swift_release (libswiftCore.dylib)",
+   "self_pct": 13.9,
+   "total_pct": 13.9
+  },
+  {
+   "function": "swift_retain (libswiftCore.dylib)",
+   "self_pct": 11.7,
+   "total_pct": 11.7
+  },
+  {
+   "function": "wildmatch (RepoPrompt)",
+   "self_pct": 5.2,
+   "total_pct": 6.9
+  },
+  {
+   "function": "Substring.subscript.ge… (truncated)",
+   "self_pct": 3.7,
+   "total_pct": 5.3
+  },
+  {
+   "function": "AG::Graph::UpdateStack::u… (truncated)",
+   "self_pct": 3.2,
+   "total_pct": 3.6
+  },
+  {
+   "function": "AG::Graph::propagate_dirt… (truncated)",
+   "self_pct": 3.0,
+   "total_pct": 3.6
+  },
+  {
+   "function": "_xzm_free (libsystem_malloc.dylib)",
+   "self_pct": 1.6,
+   "total_pct": 2.0
+  },
+  {
+   "function": "Substring.index(_:offset… (truncated)",
+   "self_pct": 1.4,
+   "total_pct": 1.4
+  },
+  {
+   "function": "_xzm_xzone_malloc_t… (libsyst…, truncated)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "specialized Bidirectional… (truncated)",
+   "self_pct": 1.3,
+   "total_pct": 9.8
+  },
+  {
+   "function": "Hasher.combine(byte… (libswi…, truncated)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "swift_retain… (libswiftCore.dyl…, truncated; second swift_retain-prefixed row)",
+   "self_pct": 1.2,
+   "total_pct": 1.2
+  }
+ ],
+ "terms": {
+  "posix_spawn": {
+   "shot": "c_search_path__t_posix_spawn.png",
+   "match_count": 3,
+   "search_share_pct": 0.1,
+   "selected_function": "posix_spawn (libsystem_kernel.dylib)",
+   "total_pct": "<0.1",
+   "total_samples": 9,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "__posix_spa… (libsystem_kernel…, truncated)",
+     "self_pct": 0.1,
+     "total_pct": 0.1
+    },
+    {
+     "function": "posix_spawnp (libsystem_c.dylib)",
+     "self_pct": 0.0,
+     "total_pct": 0.1
+    },
+    {
+     "function": "posix_spa… (libsystem_kernel.d…, truncated; selected row)",
+     "self_pct": 0.0,
+     "total_pct": 0.1
+    }
+   ],
+   "flame_note": "bottom bar also shows '0.1% in 7 places'. No clearly visible highlighted flame box (9 samples is sub-pixel); cannot attribute to a thread column from the image"
+  },
+  "Regex": {
+   "shot": "c_search_path__t_Regex.png",
+   "match_count": 50,
+   "search_share_pct": 60.6,
+   "selected_function": "partial apply for closure #1 in refillBatchWindow #1 (into:) in FileSearchActor.searchPaths(pattern:l… (truncated in bottom bar)",
+   "total_pct": 60.6,
+   "total_samples": 11388,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "icu::RegexCompile::compil… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "icu::RegexMatcher::MatchA… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "closure #1 in static Data… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 1.8
+    },
+    {
+     "function": "static RegexComponent<…>.… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.2
+    },
+    {
+     "function": "partial apply for closure… (truncated; selected row)",
+     "self_pct": "<0.1",
+     "total_pct": 60.6
+    }
+   ],
+   "flame_note": "bottom bar also shows '60.6% in 2 places'. Highlighted bright-orange box is row 3 (partial apply for closure #1 in refillBatchWindow) on the leftmost 'com.apple.root.user-initiated-qos.cooperative' thread column, spanning ~x=8-636 of 1048-px flame area; Main thread column (~x=900+) not highlighted"
+  },
+  "JSONEncoder": {
+   "shot": "c_search_path__t_JSONEncoder.png",
+   "match_count": 17,
+   "search_share_pct": 2.0,
+   "selected_function": "JSONEncoder.encode<A>(_:) (Foundation)",
+   "total_pct": 1.0,
+   "total_samples": 182,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "specialized __JSONEncoder… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 1.3
+    },
+    {
+     "function": "__JSONEncoder.wrapGeneric… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 1.3
+    },
+    {
+     "function": "outlined copy of JSONEnco… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "__JSONEncoder.takeValu… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "__JSONEncoder._asDirectAr… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "bottom bar: total 1.0% · 182, self 0.0% · 0, '2.0% in 8 places'; Functions-table row for JSONEncoder.encode<…>(… shows self 0.0% total 2.0%. Bright-orange highlighted box at ~x=797,y=455 plus small yellow ticks at ~x=737,y=365 and ~x=827,y=425, all in worker columns (cooperative-pool region) left of the Main thread column (~x=900+), which is not highlighted"
+  },
+  "MCPRoutingStateStore": {
+   "shot": "c_search_path__t_MCPRoutingStateStore.png",
+   "match_count": 1,
+   "search_share_pct": 1.4,
+   "selected_function": "specialized static MCPRoutingStateStore.save(_:)",
+   "total_pct": 1.3,
+   "total_samples": 247,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "specialized static MCPRou… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 1.4
+    }
+   ],
+   "flame_note": "bottom bar: total 1.3% · 247, self 0.0% · 0, '1.4% in 2 places' (table row total 1.4%). Bright-orange highlighted box at ~x=799,y=395 sits in a worker column left of the Main thread column (~x=900+); Main thread not highlighted. Search box text is truncated to 'MCPRoutingStateStor'"
+  }
+ },
+ "notes": "Percentages are shares of non-idle samples. Function names truncated by the UI are marked '(truncated)'. Highlighted flame boxes: the Regex term highlights the 'partial apply for closure #1 in refillBatchWindow' box on the leftmost 'com.apple.root.user-initiated-qos.cooperative' column; JSONEncoder and MCPRoutingStateStore highlights are small boxes in worker columns left of Main thread; posix_spawn (9 samples) has no visible highlighted box. Main thread column (~x=900+ in the 1568-px display) was not highlighted in any shot. Match counts (50/17/1/3) agree with evidence.jsonl functions_matching. Overview not transcribed (header: 18,780 samples · 20.0 s · every 1 ms). Bottom-up row 12 is a second 'swift_retain…'-prefixed row (truncated)."
+}

@@ -1,0 +1,196 @@
+{
+ "scenario": "e_code_structure_dir",
+ "non_idle_samples": 5654,
+ "hidden_idle_samples": 162388,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [
+  {
+   "function": "__posix_spa\u2026 (libsystem_kernel\u2026, truncated)",
+   "self_pct": 6.3,
+   "total_pct": 6.3
+  },
+  {
+   "function": "swift_retain (libswiftCore.dylib)",
+   "self_pct": 4.7,
+   "total_pct": 4.7
+  },
+  {
+   "function": "__openat (libsystem_kernel.dylib)",
+   "self_pct": 4.2,
+   "total_pct": 4.2
+  },
+  {
+   "function": "swift_release (libswiftCore.dylib)",
+   "self_pct": 3.3,
+   "total_pct": 3.3
+  },
+  {
+   "function": "_platform_memmo\u2026 (libsystem_p\u2026, truncated)",
+   "self_pct": 2.9,
+   "total_pct": 2.9
+  },
+  {
+   "function": "Hasher.combine(byte\u2026 (libswi\u2026, truncated)",
+   "self_pct": 2.6,
+   "total_pct": 2.6
+  },
+  {
+   "function": "_dispatch_lane_invo\u2026 (libdisp\u2026, truncated)",
+   "self_pct": 1.6,
+   "total_pct": 2.7
+  },
+  {
+   "function": "AccelerateCrypto_SHA256_c\u2026 (truncated)",
+   "self_pct": 1.5,
+   "total_pct": 1.5
+  },
+  {
+   "function": "AG::Graph::UpdateStack::u\u2026 (truncated)",
+   "self_pct": 1.4,
+   "total_pct": 27.3
+  },
+  {
+   "function": "swift_bridgeObjectRele\u2026 (lib\u2026, truncated)",
+   "self_pct": 1.4,
+   "total_pct": 1.4
+  },
+  {
+   "function": "<deduplicated_symbo\u2026 (SwiftU\u2026, truncated)",
+   "self_pct": 1.4,
+   "total_pct": 29.7
+  },
+  {
+   "function": "pread (libsystem_kernel.dylib)",
+   "self_pct": 1.2,
+   "total_pct": 1.2
+  }
+ ],
+ "terms": {
+  "CodeMapRootManifestStore": {
+   "shot": "e_code_structure_dir__t_CodeMapRootManifestStore.png",
+   "match_count": 19,
+   "search_share_pct": 13.1,
+   "selected_function": "CodeMapRootManifestStore.mergeCurrentManifest(namespace:authority:writerAuthority:replacingPreviously\u2026 (truncated in bottom bar)",
+   "total_pct": 13.1,
+   "total_samples": 743,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "CodeMapRootManifestStore.\u2026 (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 4.1
+    },
+    {
+     "function": "CodeMapRootManifestStore.\u2026 (truncated; highlighted/selected row)",
+     "self_pct": 0.0,
+     "total_pct": 13.1
+    },
+    {
+     "function": "CodeMapRootManifestStore.\u2026 (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 13.1
+    },
+    {
+     "function": "CodeMapRootManifestStore.\u2026 (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 3.0
+    },
+    {
+     "function": "CodeMapRootManifestStore.\u2026 (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 2.8
+    }
+   ],
+   "flame_note": "orange highlighted box 'CodeMapRoot\u2026' sits in the worker column 'com.apple.root.user-initiated-qos.cooperative' (left), under WorkspaceCodemapBindingEngine chain; Main thread column (right) has no highlight"
+  },
+  "Regex": {
+   "shot": "e_code_structure_dir__t_Regex.png",
+   "match_count": 15,
+   "search_share_pct": 0.5,
+   "selected_function": "Regex.Program.loweredProgram.getter (lib: libswift_StringProcessin\u2026 truncated)",
+   "total_pct": 0.2,
+   "total_samples": 12,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "extra": "bottom bar also says '0.5% in 8 places'",
+   "top_rows": [
+    {
+     "function": "icu::RegexCompile::matchS\u2026 (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "Regex.wholeMatch(i\u2026 (libswift\u2026)",
+     "self_pct": 0.0,
+     "total_pct": 0.5
+    },
+    {
+     "function": "Regex.prefixMatch(i\u2026 (libswif\u2026)",
+     "self_pct": 0.0,
+     "total_pct": 0.5
+    },
+    {
+     "function": "Regex.Program.loweredProg\u2026 (highlighted/selected row; truncated)",
+     "self_pct": 0.0,
+     "total_pct": 0.5
+    },
+    {
+     "function": "Regex.init<\u2026>(_\u2026 (libswiftRege\u2026)",
+     "self_pct": 0.0,
+     "total_pct": 0.2
+    }
+   ],
+   "flame_note": "flame pane scrolled deep; only a small orange highlighted sliver at the bottom near x~523 is visible; thread column header (worker vs Main) not visible in this shot"
+  },
+  "openat": {
+   "shot": "e_code_structure_dir__t_openat.png",
+   "match_count": 3,
+   "search_share_pct": 4.2,
+   "selected_function": "openat (libsystem_kernel.dylib)",
+   "total_pct": 1.1,
+   "total_samples": 60,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "extra": "bottom bar also says '4.2% in 31 places'",
+   "top_rows": [
+    {
+     "function": "__openat (libsystem_kernel.dylib)",
+     "self_pct": 4.2,
+     "total_pct": 4.2
+    },
+    {
+     "function": "openat (libsystem_kernel.dylib) [highlighted/selected row]",
+     "self_pct": "<0.1",
+     "total_pct": 4.2
+    },
+    {
+     "function": "_fcntl_overlay_ope\u2026 (libswift\u2026, truncated)",
+     "self_pct": 0.0,
+     "total_pct": 4.2
+    }
+   ],
+   "flame_note": "small orange highlighted box at ~x192,y575 in the worker column 'com.apple.root.user-initiated-qos.cooperative' (left); Main thread column (right) shows no highlight"
+  },
+  "scanLocked": {
+   "shot": "e_code_structure_dir__t_scanLocked.png",
+   "match_count": 1,
+   "search_share_pct": 4.1,
+   "selected_function": "CodeMapRootManifestStore.scanLocked(layout:maximumEntries:mutate:)",
+   "total_pct": 2.8,
+   "total_samples": 160,
+   "self_pct": "<0.1",
+   "self_samples": 1,
+   "extra": "bottom bar also says '4.1% in 2 places'",
+   "top_rows": [
+    {
+     "function": "CodeMapRootManifestStore.\u2026 (truncated; highlighted/selected row)",
+     "self_pct": "<0.1",
+     "total_pct": 4.1
+    }
+   ],
+   "flame_note": "two orange highlighted boxes (~x358 and ~x380, y516) in the worker column 'com.apple.root.user-initiated-qos.cooperative' (left), under CodeMapRoot\u2026 boxes; Main thread column (right) no highlight"
+  }
+ },
+ "notes": "Header: 'Rep\u2026 13579 5,654 samples \u00b7 20.0 s \u00b7 every 1 ms \u00b7 9\u2026' (header truncated). Bottom-up Functions count 4,390. Function names in the Functions table are truncated by column width; transcribed as visible, truncation marked. Thread column for highlighted flame boxes: in CodeMapRootManifestStore, openat and scanLocked shots the highlighted boxes sit on the worker column 'com.apple.root.user-initiated-qos.cooperative' (left); the 'Main thread' column (right) shows no highlight. In the Regex shot the flame pane is scrolled deep and the column header is not visible (only a small highlighted sliver near the bottom). CodeMapRoot\u2026 boxes sit under WorkspaceCodemapBindingEngine\u2026 chain. Evidence: get_code_structure load calls took 11.2 s and 10.717 s (rc 0). Per-row self/total values in bottom_up were read from the screenshot at display size; verify against shot if exactness matters."
+}

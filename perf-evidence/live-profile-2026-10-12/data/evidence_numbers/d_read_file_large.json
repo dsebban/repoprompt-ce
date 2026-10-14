@@ -1,0 +1,223 @@
+{
+ "scenario": "d_read_file_large",
+ "non_idle_samples": 5156,
+ "hidden_idle_samples": 135596,
+ "recording_seconds": 20.0,
+ "top_self_bottom_up": [
+  {
+   "function": "newJSONString (Foundation)",
+   "self_pct": 13.4,
+   "total_pct": 23.9
+  },
+  {
+   "function": "__CFFromUTF8 (CoreFoundation)",
+   "self_pct": 10.2,
+   "total_pct": 10.2
+  },
+  {
+   "function": "AG::Graph::propagate_dirt… (truncated)",
+   "self_pct": 5.9,
+   "total_pct": 6.9
+  },
+  {
+   "function": "JSONWriter.serializeStrin… (truncated)",
+   "self_pct": 5.8,
+   "total_pct": 7.0
+  },
+  {
+   "function": "AG::Graph::UpdateStack::u… (truncated)",
+   "self_pct": 5.8,
+   "total_pct": 7.0
+  },
+  {
+   "function": "_platform_memmo… (libsystem_p…, truncated)",
+   "self_pct": 2.4,
+   "total_pct": 2.4
+  },
+  {
+   "function": "_xzm_free (libsystem_malloc.dylib)",
+   "self_pct": 1.6,
+   "total_pct": 2.1
+  },
+  {
+   "function": "AG::Subgraph::update(unsi… (truncated)",
+   "self_pct": 1.4,
+   "total_pct": 7.1
+  },
+  {
+   "function": "specialized static JSONSc… (truncated)",
+   "self_pct": 1.4,
+   "total_pct": 4.6
+  },
+  {
+   "function": "swift_release (libswiftCore.dylib)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "JSONScanner.DocumentReade… (truncated)",
+   "self_pct": 1.3,
+   "total_pct": 1.3
+  },
+  {
+   "function": "objc_msgSend (libobjc.A.dylib)",
+   "self_pct": 1.0,
+   "total_pct": 1.0
+  }
+ ],
+ "terms": {
+  "Regex": {
+   "shot": "d_read_file_large__t_Regex.png",
+   "match_count": 31,
+   "search_share_pct": 6.4,
+   "selected_function": "Regex.prefixMatch(in:) (libswift_StringProcessin… , truncated badge)",
+   "total_pct": 3.5,
+   "total_samples": 182,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "CharacterClass.regex.ge… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.2
+    },
+    {
+     "function": "closure #1 in static Data… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 3.1
+    },
+    {
+     "function": "_RegexFactory.zeroOrOne<… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.4
+    },
+    {
+     "function": "_RegexFactory.capture<…>… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "static RegexSemanticLevel… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "bottom bar: total 3.5% · 182, self 0.0% · 0, '6.4% in 17 places' (table row Regex.prefixMatch(i… shows self 0.0% total 6.4%). Flame view is scrolled down; no thread header visible. Highlighted box (green with orange outline) at ~x=457,y=885 in a narrow worker column (~x=440-560); Main thread column not visible/highlighted in this shot"
+  },
+  "JSONDecoder": {
+   "shot": "d_read_file_large__t_JSONDecoder.png",
+   "match_count": 33,
+   "search_share_pct": 20.0,
+   "selected_function": "closure #1 in JSONDecoder._decode<A>(_:from:) (Foundation)",
+   "total_pct": 15.8,
+   "total_samples": 815,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "specialized JSONDecoderIm… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 5.7
+    },
+    {
+     "function": "JSONDecoderImpl.unwrap<…>… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 17.0
+    },
+    {
+     "function": "specialized JSONDecoderIm… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 3.5
+    },
+    {
+     "function": "JSONDecoderImpl.KeyedCont… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.2
+    },
+    {
+     "function": "dispatch thunk of JSONDec… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 20.0
+    }
+   ],
+   "flame_note": "bottom bar: total 15.8% · 815, self 0.0% · 0, '20.0% in 5 places'. Flame is scrolled; selected box (orange outline, 'closure #1 in…') at ~x=520,y=178 in a worker column (~x=440-600). Main-thread-looking stacks (NSApplication/_DPSNextEvent/CFRunLoop, ~x=790-990) are not highlighted"
+  },
+  "JSONEncoder": {
+   "shot": "d_read_file_large__t_JSONEncoder.png",
+   "match_count": 14,
+   "search_share_pct": 10.1,
+   "selected_function": "JSONEncoder.encode<A>(_:) (Foundation)",
+   "total_pct": 2.5,
+   "total_samples": 127,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "__JSONEncoder.wrapGeneric… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 2.5
+    },
+    {
+     "function": "$defer #1 <A>() in __JSON… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": 0.1
+    },
+    {
+     "function": "__JSONEncoder.takeValu… (truncated; 'Fo…' badge)",
+     "self_pct": "<0.1",
+     "total_pct": 0.3
+    },
+    {
+     "function": "protocol witness for Enco… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    },
+    {
+     "function": "outlined copy of JSONEnco… (truncated)",
+     "self_pct": "<0.1",
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "bottom bar: total 2.5% · 127, self 0.0% · 0, '10.1% in 6 places'; table row JSONEncoder.encode<…>(… shows self 0.0% total 10.1%. Flame is scrolled; highlighted boxes are small: orange at ~x=395,y=178, yellow at ~x=358,y=208 and ~x=714,y=178, all in worker columns left of the Main-thread-like stacks (NSApplication/_DPSNextEvent, ~x=790-990), which are not highlighted"
+  },
+  "MCPExternalEventsMonitor": {
+   "shot": "d_read_file_large__t_MCPExternalEventsMonitor.png",
+   "match_count": 5,
+   "search_share_pct": 1.9,
+   "selected_function": "MCPExternalEventsMonitor.findLatestEventFile()",
+   "total_pct": 1.9,
+   "total_samples": 97,
+   "self_pct": 0.0,
+   "self_samples": 0,
+   "top_rows": [
+    {
+     "function": "partial apply for closure… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 1.9
+    },
+    {
+     "function": "closure #1 in closure #1 … (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 1.9
+    },
+    {
+     "function": "MCPExternalEventsMonitor.… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": 1.9
+    },
+    {
+     "function": "MCPExternalEventsMonitor.… (truncated; selected row = findLatestEventFile())",
+     "self_pct": 0.0,
+     "total_pct": 1.9
+    },
+    {
+     "function": "MCPExternalEventsMonitor.… (truncated)",
+     "self_pct": 0.0,
+     "total_pct": "<0.1"
+    }
+   ],
+   "flame_note": "Search box text truncated to 'MCPExternalEventsM'. Bright-orange highlighted box at ~x=1000,y=178 (top row) sits immediately right of the 'NSApplicationMain' column (the AppKit run-loop / main-thread-looking stack, ~x=790-990), i.e. in a narrow column adjacent to the Main-thread stack; exact thread header not visible. Flame is scrolled"
+  }
+ },
+ "notes": "Percentages are shares of non-idle samples. Function names truncated by the UI are marked '(truncated)'. Header reads '5,156 samples · 20.0 s · every 1 ms · 9…' (trailing hidden-idle count truncated in UI; 135,596 from evidence.jsonl). Flame views for the term shots are scrolled so thread headers are not visible: Regex and JSONDecoder highlights are in worker columns (~x=440-600) left of the NSApplication/_DPSNextEvent Main-thread-looking stacks (~x=790-990); JSONEncoder highlights are small boxes in worker columns; MCPExternalEventsMonitor highlight is a narrow box just right of the NSApplicationMain column (possibly main-thread adjacent; not certain). Match counts (31/33/14/5) agree with evidence.jsonl functions_matching. Overview not transcribed."
+}
