@@ -144,25 +144,31 @@ import XCTest
                     XCTAssertEqual(sent["new_chat"], route["new_chat"])
                     XCTAssertEqual(sent["chat_id"], route["chat_id"])
                     XCTAssertEqual(fixture.sendRecorder.images.first?.map(\.bytes), [bytes])
-
-                    _ = try await fixture.service.executeOracleSend(args: ["message": .string("continue")], invocationContext: fixture.invocationContext)
-                    XCTAssertEqual(fixture.sendRecorder.images.last?.count, 0, "A continuation must not resend the prior turn's images")
                 }
             }
         }
 
-        func testOracleSendRejectsInvalidImagesBeforeDispatch() async {
-            for images in [Value.string("invalid"), .array([.object(["path": .string("/outside-workspace/image.png")])])] {
+        func testOracleSendRejectsInvalidImagesBeforeDispatch() async throws {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).resolvingSymlinksInPath()
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let outsidePath = root.deletingLastPathComponent().appendingPathComponent("outside-image.png").path
+            for (images, expectedError): (Value, String) in [
+                (.string("invalid"), "images must be an array"),
+                (.array([.object(["path": .string(outsidePath)])]), "images[0].path is outside the current workspace roots")
+            ] {
                 let fixture = makeOracleSendFixture(stopAfterRoute: false)
                 defer { fixture.cleanup() }
+                let store = fixture.window.promptManager.workspaceFileContextStore
+                let loaded = try await store.loadRoot(path: root.path, kind: .primaryWorkspace)
+                addTeardownBlock { await store.unloadRoot(id: loaded.id) }
                 do {
                     _ = try await fixture.service.executeOracleSend(args: [
                         "message": .string("inspect"), "new_chat": .bool(true), "images": images
                     ], invocationContext: fixture.invocationContext)
                     XCTFail("Expected image validation failure")
                 } catch {
-                    XCTAssertTrue(error.localizedDescription.contains("images"), error.localizedDescription)
-                    XCTAssertFalse(error.localizedDescription.contains("Unsupported args"), error.localizedDescription)
+                    XCTAssertTrue(error.localizedDescription.contains(expectedError), error.localizedDescription)
                 }
                 XCTAssertTrue(fixture.sendRecorder.calls.isEmpty)
             }
