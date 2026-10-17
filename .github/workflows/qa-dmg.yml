@@ -27,7 +27,9 @@ jobs:
   build:
     if: github.repository_owner == 'dsebban'
     runs-on: macos-26
-    timeout-minutes: 120
+    # Universal release build plus notarization has taken ~2h on macos-26;
+    # 120 minutes cancelled runs mid-stage. Keep headroom for slower runners.
+    timeout-minutes: 240
     steps:
       - name: Resolve label
         id: source
