@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Copy to ~/Library/LaunchAgents/com.repoprompt.pi-overseer-bridge.plist, fill in the
+     placeholders, then: launchctl load ~/Library/LaunchAgents/com.repoprompt.pi-overseer-bridge.plist -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.repoprompt.pi-overseer-bridge</string>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/TO/repoprompt-ce/Integrations/pi-overseer/bridge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/npm</string>
+    <string>start</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>OVERSEER_URL</key><string>wss://pi-overseer.YOUR-SUBDOMAIN.workers.dev/bridge</string>
+    <key>BRIDGE_TOKEN</key><string>REPLACE_WITH_BRIDGE_TOKEN</string>
+    <key>RPCE_MCP_COMMAND</key><string>/usr/local/bin/rpce-cli-debug</string>
+    <key>RP_WINDOW_ID</key><string>1</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/tmp/pi-overseer-bridge.log</string>
+  <key>StandardErrorPath</key><string>/tmp/pi-overseer-bridge.log</string>
+</dict>
+</plist>

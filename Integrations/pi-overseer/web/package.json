@@ -1,0 +1,23 @@
+{
+  "name": "pi-overseer-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Svelte 5 phone app for Pi Overseer",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "check": "svelte-check --tsconfig ./tsconfig.json",
+    "test": "tsx --test test/*.test.ts",
+    "verify": "vite build && node test/verify-ui.mjs"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^7.3.1",
+    "playwright": "^1.56.1",
+    "svelte": "^5.57.1",
+    "svelte-check": "^4.7.6",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0",
+    "vite": "^8.3.2"
+  }
+}
