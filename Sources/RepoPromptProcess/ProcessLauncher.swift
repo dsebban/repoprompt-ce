@@ -44,8 +44,6 @@ package enum ProcessLauncherError: Error {
 }
 
 package enum ProcessLauncher {
-    package static let childProcessRegistry = AppChildProcessRegistry()
-
     package static func spawn(
         command: String,
         arguments: [String],
@@ -328,7 +326,6 @@ package enum ProcessLauncher {
             throw ProcessLauncherError.spawnFailed(errno: spawnResult)
         }
 
-        childProcessRegistry.register(pid: pid)
         close(stdinPipe[0])
         close(stdoutPipe[1])
         close(stderrPipe[1])

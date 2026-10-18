@@ -24,7 +24,6 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
     typealias DomainRuntimeShutdownOperation = @Sendable () async -> Void
     /// Prevents re-entrant termination (Cmd+Q twice, menu + dock quit, etc.)
     private var terminationInProgress = false
-    private let terminationCoordinator = AppTerminationCoordinator()
     private let dockMenuController = DockMenuController()
     /// The app delegate retains signal routing so its Dispatch sources remain active for the
     /// entire application lifetime.
@@ -231,7 +230,7 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
 
         // 2) Persist the final restorable window session before async shutdown begins.
         // Using .terminateLater lets us do async work without deadlocking.
-        terminationCoordinator.start(operation: {
+        Task { @MainActor in
             if !AppLaunchConfiguration.current.suppressesWindowPersistence {
                 await WindowStatesManager.shared.persistWindowSessionImmediately(reason: "appShouldTerminate")
             }
@@ -246,14 +245,10 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
             // so child processes are terminated and reaped rather than orphaned on quit.
             await WindowStatesManager.shared.shutdownAllAgentSessions()
             await WindowStatesManager.shared.stopAllServers()
-            await self.shutdownDomainRuntimeForTermination()
+            await shutdownDomainRuntimeForTermination()
             await NotificationService.shared.prepareForTermination()
-        }, emergencyCleanup: {
-            print("Application shutdown deadline expired; killing owned child processes")
-            ProcessLauncher.childProcessRegistry.killAllForAppExit()
-        }, reply: {
             sender.reply(toApplicationShouldTerminate: true)
-        })
+        }
 
         return .terminateLater
     }
