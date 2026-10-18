@@ -31,7 +31,11 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
     private lazy var terminationSignalRouter = AppTerminationSignalRouter(
         observer: DispatchTerminationSignalObserver()
     ) {
-        NSApp.terminate(nil)
+        // terminate: with .terminateLater spins a nested run loop. Run from a main-queue
+        // callout it would hold the main queue, so the @MainActor work that replies never runs.
+        RunLoop.main.perform(inModes: [.common]) {
+            NSApp.terminate(nil)
+        }
     }
 
     /// App startup owns one explicit registration attempt; readiness only observes it.
@@ -226,10 +230,7 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
         AgentSessionLinkRuntimeBridge.shared.freezeForTermination()
 
         // 2) Persist the final restorable window session before async shutdown begins.
-        // Using .terminateLater lets us do async work without deadlocking. The coordinator bounds
-        // the whole sequence: provider teardown awaits actors that a blocking stdin write to an
-        // unresponsive agent child can pin indefinitely, and SIGTERM is routed here (not fatal),
-        // so an unbounded join would leave the app unkillable short of SIGKILL.
+        // Using .terminateLater lets us do async work without deadlocking.
         terminationCoordinator.start(operation: {
             if !AppLaunchConfiguration.current.suppressesWindowPersistence {
                 await WindowStatesManager.shared.persistWindowSessionImmediately(reason: "appShouldTerminate")
@@ -247,11 +248,9 @@ class AppDelegate: NSObject, ObservableObject, NSApplicationDelegate {
             await WindowStatesManager.shared.stopAllServers()
             await self.shutdownDomainRuntimeForTermination()
             await NotificationService.shared.prepareForTermination()
-            // Sweep any launcher-owned children omitted by, or racing with, graceful owners.
-            await ProcessLauncher.childProcessRegistry.terminateForAppExit()
         }, emergencyCleanup: {
-            print("Application shutdown deadline expired; terminating owned child processes")
-            await ProcessLauncher.childProcessRegistry.terminateForAppExit()
+            print("Application shutdown deadline expired; killing owned child processes")
+            ProcessLauncher.childProcessRegistry.killAllForAppExit()
         }, reply: {
             sender.reply(toApplicationShouldTerminate: true)
         })
