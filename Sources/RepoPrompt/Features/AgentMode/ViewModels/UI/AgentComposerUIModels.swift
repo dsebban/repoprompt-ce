@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptSettingsCore
 
 struct AgentComposerDraftRestorationOperation: Equatable {
     struct Fragment: Equatable {
@@ -274,6 +275,7 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
     let configID: String
     let displayName: String
     let selectedValueRaw: String
+    var savedValueRaw: String?
     let selectedDisplayName: String
     let choices: [ACPModelParameterChoice]
     /// OpenCode only: the demand-scoped discovery key this control's metadata came from. The
@@ -291,7 +293,7 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
     }
 
     var isSavedValueUnavailable: Bool {
-        providerID == .openCode && !choices.contains { $0.rawValue == selectedValueRaw }
+        (providerID == .openCode || providerID == .cursor) && !choices.contains { $0.rawValue == selectedValueRaw }
     }
 
     var tooltip: String {
@@ -305,7 +307,28 @@ struct AgentComposerModelParameterControlProps: Equatable, Identifiable {
     }
 }
 
+struct AgentComputerUseComposerProps: Equatable {
+    let isVisible: Bool
+    let isOn: Bool
+    let isBusy: Bool
+    static let hidden = Self(isVisible: false, isOn: false, isBusy: false)
+}
+
 struct AgentComposerProps: Equatable {
+    enum ManualEffortControl: Equatable {
+        case codex
+        case claude
+    }
+
+    /// Auto Effort status is informational; users can still choose the fallback effort.
+    var manualEffortControl: ManualEffortControl? {
+        guard hasAvailableAgentProviders, !isGlobalModelRouterControllingFreshTask else { return nil }
+        if selectedAgent == .codexExec { return .codex }
+        if selectedAgent.usesClaudeTooling, providerControls?.claudeTools != nil { return .claude }
+        return nil
+    }
+
+    var computerUse: AgentComputerUseComposerProps = .hidden
     let currentTabID: UUID?
     let submitTarget: AgentComposerSubmitTarget?
     let attachments: AgentAttachmentStripSnapshot
@@ -322,13 +345,15 @@ struct AgentComposerProps: Equatable {
     let canSendWithCurrentProvider: Bool
     let isRoutingFreshTask: Bool
     let isGlobalModelRouterControllingFreshTask: Bool
+    let automaticRouterServiceName: String?
+    let autoEffortServiceName: String?
     let unavailableSelectedAgentMessage: String?
     let selectedAgent: AgentProviderKind
-    let selectedModelRaw: String
-    let selectedModelDisplayName: String
-    let selectedReasoningEffortRaw: String?
-    let selectedReasoningEffortDisplayName: String
-    let acpModelParameterControls: [AgentComposerModelParameterControlProps]
+    var selectedModelRaw: String
+    var selectedModelDisplayName: String
+    var selectedReasoningEffortRaw: String?
+    var selectedReasoningEffortDisplayName: String
+    var acpModelParameterControls: [AgentComposerModelParameterControlProps]
     let availableAgents: [AgentProviderKind]
     let isProviderPickerLockedForCurrentTab: Bool
     let lockedAgentSelectionMessage: String?
@@ -357,6 +382,8 @@ struct AgentComposerProps: Equatable {
         canSendWithCurrentProvider: false,
         isRoutingFreshTask: false,
         isGlobalModelRouterControllingFreshTask: false,
+        automaticRouterServiceName: nil,
+        autoEffortServiceName: nil,
         unavailableSelectedAgentMessage: nil,
         selectedAgent: .claudeCode,
         selectedModelRaw: AgentModel.defaultModel.rawValue,

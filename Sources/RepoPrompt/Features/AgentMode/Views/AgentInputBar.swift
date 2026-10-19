@@ -1,3 +1,5 @@
+import RepoPromptSettingsCore
+
 //
 //  AgentInputBar.swift
 //  RepoPrompt
@@ -12,6 +14,7 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct AgentComposerActions {
+    var toggleComputerUse: (UUID, ObjectIdentifier) async -> Void = { _, _ in }
     let storeDraft: (_ tabID: UUID, _ text: String, _ acknowledgedSequence: UInt64) -> Void
     let loadDraft: (_ tabID: UUID) -> AgentComposerDraftSnapshot
     let claimSubmit: (_ attempt: AgentComposerSubmitAttempt) -> AgentModeViewModel.AgentComposerSubmitClaimResult
@@ -30,6 +33,8 @@ struct AgentComposerActions {
     let reasoningEffortOptionsForCurrentSelection: () -> [CodexReasoningEffort]
     let selectReasoningEffort: (_ effort: CodexReasoningEffort?) -> Void
     let selectACPModelParameter: (_ target: ACPModelParameterSelection, _ openCodeDiscoveryKey: OpenCodeACPModelParameterKey?) -> Void
+    var clearCursorModelParameter: (ACPModelParameterIdentity) -> Void = { _ in }
+    var canMutateCursorModel: (_ tabID: UUID?) -> Bool = { _ in false }
     let setAutoEditEnabled: (_ enabled: Bool) -> Void
     let setProviderPermissionLevel: (_ id: AgentProviderPermissionLevelID) -> Void
     let applyCodexToolSettingMutation: (_ mutation: CodexToolSettingMutation) -> Void
@@ -109,7 +114,11 @@ struct AgentInputBar: View {
     }
 
     private var composerActions: AgentComposerActions {
-        AgentComposerActions(
+        // Composer props carry the source session identity in submitTarget, so replacing
+        // an idle session also invalidates the equatable view's retained actions.
+        let cursorSession = agentModeVM.activeSession
+        return AgentComposerActions(
+            toggleComputerUse: { tabID, identity in await agentModeVM.toggleComputerUse(tabID: tabID, expectedSessionIdentity: identity) },
             storeDraft: { tabID, text, sequence in
                 agentModeVM.storeDraftText(for: tabID, text, acknowledgingThrough: sequence)
             },
@@ -148,6 +157,10 @@ struct AgentInputBar: View {
             selectACPModelParameter: { target, openCodeDiscoveryKey in
                 agentModeVM.selectACPModelParameter(target, openCodeDiscoveryKey: openCodeDiscoveryKey)
             },
+            clearCursorModelParameter: { agentModeVM.clearCursorModelParameter($0) },
+            canMutateCursorModel: { tabID in
+                agentModeVM.canMutateCursorComposerModel(expectedSession: cursorSession, expectedTabID: tabID)
+            },
             setAutoEditEnabled: { enabled in agentModeVM.setAutoEditEnabled(enabled) },
             setProviderPermissionLevel: { id in agentModeVM.setProviderPermissionLevel(id) },
             applyCodexToolSettingMutation: { mutation in
@@ -175,6 +188,9 @@ struct AgentInputBar: View {
         AgentStatusPillsRow(
             agentModeVM: agentModeVM,
             statusPillsUI: statusPillsUI,
+            computerUse: composerUI.props.computerUse,
+            computerUseTarget: composerUI.props.submitTarget,
+            toggleComputerUse: composerActions.toggleComputerUse,
             openContextDrawerFiles: openContextDrawerFiles,
             oracleViewModel: oracleViewModel,
             promptManager: promptManager,
@@ -667,11 +683,19 @@ struct AgentComposerView: View, Equatable {
                     if props.hasAvailableAgentProviders {
                         if props.isGlobalModelRouterControllingFreshTask {
                             automaticRouterTargetChip
+                            if let autoEffortServiceName = props.autoEffortServiceName {
+                                automaticEffortChip(serviceName: autoEffortServiceName)
+                            }
                         } else {
                             agentProviderModelPicker
                             acpModelParameterPickers
                             reasoningEffortPicker
                             claudeEffortPicker
+                            if let autoEffortServiceName = props.autoEffortServiceName,
+                               props.manualEffortControl != nil
+                            {
+                                automaticEffortChip(serviceName: autoEffortServiceName)
+                            }
                             codexToolsButton
                             claudeToolsButton
                         }
@@ -749,22 +773,60 @@ struct AgentComposerView: View, Equatable {
     // MARK: - Agent Pickers
 
     private var automaticRouterTargetChip: some View {
-        HStack(spacing: 5) {
-            Image(systemName: "arrow.triangle.branch")
-                .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
-            Text("Automatic · Jev")
-                .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
+        let serviceName = props.automaticRouterServiceName
+        return Button {
+            openAgentDecisionsSettings(section: .modelRouter)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "arrow.triangle.branch")
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
+                Text(serviceName.map { "Model Router · \($0)" } ?? "Model Router")
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
+            }
+            .foregroundColor(.accentColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.accentColor.opacity(0.10))
+            .cornerRadius(6)
         }
-        .foregroundColor(.accentColor)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Color.accentColor.opacity(0.10))
-        .cornerRadius(6)
-        .accessibilityElement(children: .combine)
+        .buttonStyle(.plain)
         .accessibilityLabel("Model Router")
-        .accessibilityValue("Automatic with Jev")
-        .hoverTooltip("Jev will choose the provider, model, and reasoning effort after you send. Turn off Router to choose them manually.")
+        .accessibilityValue(serviceName.map { "Using \($0)" } ?? "On")
+        .hoverTooltip("Model Router asks \(serviceName ?? "the selected service") to choose a model and reasoning effort for this new task. Click to open Model Router settings.")
         .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func automaticEffortChip(serviceName: String) -> some View {
+        Button {
+            openAgentDecisionsSettings(section: .autoEffort)
+        } label: {
+            HStack(spacing: 5) {
+                Image(systemName: "gauge.open.with.lines.needle.33percent")
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .regular))
+                Text("Auto Effort · \(serviceName)")
+                    .font(fontPreset.swiftUIFont(sizeAtNormal: 11, weight: .medium))
+            }
+            .foregroundColor(.accentColor)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Color.accentColor.opacity(0.10))
+            .cornerRadius(6)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Auto Effort")
+        .accessibilityValue("Using \(serviceName)")
+        .hoverTooltip("Auto Effort uses \(serviceName) before eligible turns; otherwise, your current effort applies. Click to open Auto Effort settings.")
+        .fixedSize(horizontal: true, vertical: false)
+    }
+
+    private func effortPickerLabel(_ manualDisplayName: String) -> some View {
+        Text(manualDisplayName)
+            .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
+            .foregroundColor(.secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(pickerChipColor)
+            .cornerRadius(4)
     }
 
     private enum LayoutMetrics {
@@ -801,7 +863,7 @@ struct AgentComposerView: View, Equatable {
         return "\(props.selectedAgent.displayName) · \(truncatedModelName)"
     }
 
-    private var isSelectedCodexFastModel: Bool {
+    private var isSelectedCodexSpeedTier: Bool {
         AgentModelSelectionWarningVisuals.showsWarning(
             agent: props.selectedAgent,
             rawModel: props.selectedModelRaw
@@ -816,8 +878,8 @@ struct AgentComposerView: View, Equatable {
         } else {
             "Choose agent and model"
         }
-        guard isSelectedCodexFastModel else { return baseTooltip }
-        return "\(baseTooltip)\n\(AgentModelSelectionWarningVisuals.warningTooltip)"
+        guard isSelectedCodexSpeedTier else { return baseTooltip }
+        return "\(baseTooltip)\n\(AgentModelSelectionWarningVisuals.tooltip(agent: props.selectedAgent, rawModel: props.selectedModelRaw))"
     }
 
     private var inputBarSelectedModelDisplayName: String {
@@ -847,6 +909,17 @@ struct AgentComposerView: View, Equatable {
         actions.openCLIProvidersSettings()
     }
 
+    private func openAgentDecisionsSettings(section: SettingsWindowCoordinator.AgentDecisionsSection) {
+        NotificationCenter.default.post(
+            name: .showModelRouterSettingsTab,
+            object: nil,
+            userInfo: [
+                "windowID": windowID,
+                "agentDecisionsSection": section
+            ]
+        )
+    }
+
     @ViewBuilder
     private var agentProviderModelPicker: some View {
         let isLocked = props.isProviderPickerLockedForCurrentTab
@@ -859,10 +932,11 @@ struct AgentComposerView: View, Equatable {
             HStack(spacing: 4) {
                 Image(systemName: props.selectedAgent.iconName)
                     .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
-                if isSelectedCodexFastModel {
-                    Image(systemName: AgentModelSelectionWarningVisuals.iconSystemName)
-                        .font(fontPreset.swiftUIFont(sizeAtNormal: 9, weight: .semibold))
-                        .foregroundStyle(AgentModelSelectionWarningVisuals.warningColor)
+                if isSelectedCodexSpeedTier {
+                    AgentModelSpeedIcon(
+                        agent: props.selectedAgent, rawModel: props.selectedModelRaw,
+                        font: fontPreset.swiftUIFont(sizeAtNormal: 9, weight: .semibold)
+                    )
                 }
                 Text(providerChipTitle)
                     .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
@@ -877,7 +951,7 @@ struct AgentComposerView: View, Equatable {
                     .foregroundColor(.secondary)
             }
             .frame(maxWidth: providerChipMaxWidth, alignment: .leading)
-            .foregroundColor(isSelectedCodexFastModel ? .orange : .primary)
+            .foregroundColor(isSelectedCodexSpeedTier ? AgentModelSelectionWarningVisuals.color(agent: props.selectedAgent, rawModel: props.selectedModelRaw) : .primary)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
         }
@@ -923,6 +997,40 @@ struct AgentComposerView: View, Equatable {
             return [.action("Use \(agent.displayName)", isEnabled: true, imageSystemName: agent.iconName) {
                 actions.selectAgentModel(agent, "")
             }]
+        }
+        if agent == .cursor {
+            return AgentModelStableMenuItems.cursorModelItems(
+                options: options,
+                selectedModelRaw: props.selectedAgent == .cursor ? ((try? CursorAIModelCatalog.ModelSpecifier(raw: props.selectedModelRaw).baseModelRaw) ?? props.selectedModelRaw) : "",
+                selections: props.acpModelParameterControls.filter { $0.providerID == .cursor }.compactMap {
+                    guard let savedValueRaw = $0.savedValueRaw else { return nil }
+                    return ACPModelParameterSelection(
+                        providerID: .cursor,
+                        baseModelRaw: $0.baseModelRaw,
+                        kind: $0.kind,
+                        configID: $0.configID,
+                        valueRaw: savedValueRaw
+                    )
+                },
+                onSelectModel: { model in
+                    guard !modelControlsDisabled, actions.canMutateCursorModel(props.currentTabID), actions.canSelectAgentInCurrentChat(.cursor) else { return }
+                    actions.selectAgentModel(.cursor, model.rawValue)
+                },
+                onSelectParameter: { model, parameter in
+                    guard !modelControlsDisabled, actions.canMutateCursorModel(props.currentTabID), actions.canSelectAgentInCurrentChat(.cursor) else { return }
+                    if props.selectedAgent != .cursor || (try? CursorAIModelCatalog.ModelSpecifier(raw: props.selectedModelRaw).baseModelRaw) != model.rawValue {
+                        actions.selectAgentModel(.cursor, model.rawValue)
+                    }
+                    actions.selectACPModelParameter(parameter, nil)
+                },
+                onClearParameter: { model, identity in
+                    guard !modelControlsDisabled, actions.canMutateCursorModel(props.currentTabID), actions.canSelectAgentInCurrentChat(.cursor) else { return }
+                    if props.selectedAgent != .cursor || (try? CursorAIModelCatalog.ModelSpecifier(raw: props.selectedModelRaw).baseModelRaw) != model.rawValue {
+                        actions.selectAgentModel(.cursor, model.rawValue)
+                    }
+                    actions.clearCursorModelParameter(identity)
+                }
+            )
         }
         if agent == .devin {
             return DevinModelCatalog.current.menuGroups(for: options).flatMap { group -> [StableMenuItem] in
@@ -1009,7 +1117,7 @@ struct AgentComposerView: View, Equatable {
 
     @ViewBuilder
     private var reasoningEffortPicker: some View {
-        if props.selectedAgent == .codexExec {
+        if props.manualEffortControl == .codex {
             let efforts = actions.reasoningEffortOptionsForCurrentSelection()
             Menu {
                 ForEach(efforts, id: \.rawValue) { effort in
@@ -1026,15 +1134,7 @@ struct AgentComposerView: View, Equatable {
                     }
                 }
             } label: {
-                HStack(spacing: 4) {
-                    Text(props.selectedReasoningEffortDisplayName)
-                        .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(pickerChipColor)
-                .cornerRadius(4)
+                effortPickerLabel(props.selectedReasoningEffortDisplayName)
             }
             .menuStyle(.borderlessButton)
             .disabled(efforts.isEmpty || modelControlsDisabled)
@@ -1099,7 +1199,7 @@ struct AgentComposerView: View, Equatable {
 
     @ViewBuilder
     private var claudeEffortPicker: some View {
-        if props.selectedAgent.usesClaudeTooling,
+        if props.manualEffortControl == .claude,
            let claudeTools = props.providerControls?.claudeTools
         {
             let efforts = AgentModelCatalog.supportedClaudeEfforts(
@@ -1121,15 +1221,7 @@ struct AgentComposerView: View, Equatable {
                     }
                 }
             } label: {
-                HStack(spacing: 4) {
-                    Text(claudeTools.effortLevel.displayName)
-                        .font(fontPreset.swiftUIFont(sizeAtNormal: 11))
-                }
-                .foregroundColor(.secondary)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(pickerChipColor)
-                .cornerRadius(4)
+                effortPickerLabel(claudeTools.effortLevel.displayName)
             }
             .menuStyle(.borderlessButton)
             .disabled(modelControlsDisabled || efforts.isEmpty)
@@ -1544,15 +1636,14 @@ struct AgentComposerView: View, Equatable {
         }
     }
 
+    @ViewBuilder
     private var imageDropOutline: some View {
-        Group {
-            if isImageDropTargeted {
-                RoundedRectangle(cornerRadius: 12)
-                    .stroke(style: StrokeStyle(lineWidth: 2, dash: [8]))
-                    .foregroundColor(.accentColor)
-                    .padding(.horizontal, 2)
-                    .padding(.bottom, Self.footerHeight)
-            }
+        if isImageDropTargeted {
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(style: StrokeStyle(lineWidth: 2, dash: [8]))
+                .foregroundColor(.accentColor)
+                .padding(.horizontal, 2)
+                .padding(.bottom, Self.footerHeight)
         }
     }
 

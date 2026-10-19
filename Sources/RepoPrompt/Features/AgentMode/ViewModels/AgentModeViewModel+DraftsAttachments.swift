@@ -186,7 +186,8 @@ extension AgentModeViewModel {
         guard let tabID,
               CodexGoalSupport.isEnabled
         else { return nil }
-        let session = session(for: tabID, createIfNeeded: false)
+        // Presentation reads must not recreate a runtime while its saved carrier is retiring.
+        let session = sessions[tabID]
         let targetAgent = session?.selectedAgent ?? (tabID == currentTabID ? selectedAgent : nil)
         guard targetAgent == .codexExec else { return nil }
         let draftText = draftTextOverride ?? session?.draftText ?? tabDraftText[tabID] ?? ""
@@ -399,6 +400,44 @@ extension AgentModeViewModel {
         guard !attachments.isEmpty else { return }
         guard let workspaceDirectory = attachmentWorkspaceDirectoryURL() else { return }
         attachmentStore.clearConsumedLocalFiles(attachments, workspaceDirectory: workspaceDirectory)
+    }
+
+    /// Local image files this tab's Agent session attached itself — the in-flight turn plus any
+    /// earlier user turns whose copies still exist — restricted to the app-managed attachment
+    /// store. Used as exact-file Oracle image authority; returns nothing unless the tab is still
+    /// bound to `agentSessionID`, so another session's attachments are never authorized.
+    func oracleAuthorizedAttachmentPaths(tabID: UUID, agentSessionID: UUID?) -> [String] {
+        guard let agentSessionID,
+              let session = session(for: tabID, createIfNeeded: false),
+              session.activeAgentSessionID == agentSessionID,
+              let workspaceDirectory = attachmentWorkspaceDirectoryURL()
+        else { return [] }
+        let storagePrefix = AgentAttachmentStore.managedStorageRootURL(for: workspaceDirectory).path + "/"
+
+        var candidates: [AgentImageAttachment] = []
+        switch session.attachmentTurnState {
+        case .idle:
+            break
+        case let .reserved(_, attachments), let .consumed(_, attachments):
+            candidates.append(contentsOf: attachments)
+        }
+        candidates.append(contentsOf: session.attachmentsPendingProviderConsumptionCleanup)
+        for item in session.items where item.kind == .user {
+            candidates.append(contentsOf: item.attachments)
+        }
+
+        var seen: Set<String> = []
+        var paths: [String] = []
+        for attachment in candidates {
+            guard case let .localFile(path) = attachment.source else { continue }
+            let standardized = URL(fileURLWithPath: path).standardizedFileURL.path
+            guard standardized.hasPrefix(storagePrefix),
+                  !standardized.dropFirst(storagePrefix.count).contains("/"),
+                  seen.insert(standardized).inserted
+            else { continue }
+            paths.append(standardized)
+        }
+        return paths
     }
 
     @discardableResult

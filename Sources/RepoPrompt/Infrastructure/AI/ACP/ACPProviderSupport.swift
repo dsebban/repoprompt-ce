@@ -1,6 +1,7 @@
 import CryptoKit
 import Foundation
 import RepoPromptProcess
+import RepoPromptSettingsCore
 
 enum ACPRuntimeEventParsing {
     static func extractContentText(from value: Any?) -> String? {
@@ -241,7 +242,13 @@ enum ACPDefaultSessionUpdateNormalizer {
         let progressText = ACPRuntimeEventParsing.extractContentText(from: payload["content"])?
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if status == "completed" || status == "failed" {
+        if let status, status == "completed" || status == "failed" {
+            // Some agents (Devin) finish with empty JSON after streaming results in
+            // running updates. Agree with retention's empty-output classification so
+            // the terminal marker finishes the lifecycle without erasing its content.
+            let outputJSON = AgentToolResultPayloadRetention.isThin(outputJSON)
+                ? ACPRuntimeEventParsing.serializeJSON(["status": status])
+                : outputJSON
             return [
                 .stream(
                     AIStreamResult(
@@ -630,8 +637,10 @@ enum ACPPermissionOptionPolicy {
     /// bare kind match would otherwise select it and broaden approval beyond the request.
     static func denylistedAutoSelectOptionIDs(for providerID: ACPProviderID) -> Set<String> {
         switch providerID {
-        case .openCode, .cursor, .antigravity, .devin:
+        case .openCode, .cursor, .antigravity:
             []
+        case .devin:
+            ["allow_always", "allow_always_global", "allow_server_session", "allow_server_always"]
         case .grokBuild:
             ["enable-always-approve"]
         }

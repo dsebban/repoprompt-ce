@@ -10,18 +10,22 @@ import RepoPromptDomainRuntime
 /// derived only from server-owned run routing, the target's immutable spawn provenance is looked up
 /// independently, and the decision matrix lives in the domain runtime.
 ///
-/// Every denial reuses the exact "not found" wording so an unauthorized UUID is indistinguishable
-/// from a nonexistent one.
+/// Every denial reuses the same scope-unavailable wording so an unauthorized UUID is
+/// indistinguishable from a nonexistent one.
 @MainActor
 enum AgentSessionTargetOperationGuard {
-    typealias RequestMetadata = MCPServerViewModel.RequestMetadata
-    typealias SpawnParentSessionResolver = (RequestMetadata, WindowState) async -> UUID?
+    typealias RequestMetadata = MCPRequestMetadata
+    typealias SpawnParentSessionResolver = (MCPRequestMetadata, WindowState) async -> UUID?
     /// Resolves the caller's **exact endpoint incarnation** from server-owned run routing.
     typealias ObserverEndpointResolver =
-        (RequestMetadata, WindowState) async -> DomainAgentSessionLinkEndpointIdentity?
+        (MCPRequestMetadata, WindowState) async -> DomainAgentSessionLinkEndpointIdentity?
+    /// Immutable spawn provenance for one explicitly named target session.
+    typealias TargetProvenanceResolver = (UUID) async -> DomainAgentSessionTargetProvenance
+    /// True only when the exact observer endpoint holds a live Manage grant over the target.
+    typealias ManageGrantResolver = (DomainAgentSessionLinkEndpointIdentity, UUID) async -> Bool
 
     static func denialError(reference: String) -> MCPError {
-        MCPError.invalidParams("Session '\(reference)' was not found in the active workspace.")
+        MCPError.invalidParams("Session '\(reference)' is not available to this caller's scope. For a directly linked lane, use agent_session_link poll/wait/read, or steer/respond/stop with its Manage capability. For scope administration, call session_admin scope_status to inspect grants and operation requirements; request_scope asks the user for missing capabilities. If oversight tools are absent, call become_overseer and retry next turn from the original requesting session.")
     }
 
     static func denialError(sessionID: UUID) -> MCPError {
@@ -42,7 +46,7 @@ enum AgentSessionTargetOperationGuard {
     /// `.administrativePrincipal` is the permissive outcome, so it is selected only when *every*
     /// run-scoped signal is absent rather than merely inconclusive.
     static func resolveCaller(
-        metadata: RequestMetadata,
+        metadata: MCPRequestMetadata,
         targetWindow: WindowState,
         resolveSpawnParentSessionID: SpawnParentSessionResolver
     ) async -> DomainAgentSessionCallerIdentity {
@@ -66,7 +70,7 @@ enum AgentSessionTargetOperationGuard {
     /// Every non-Agent principal, every Agent run whose routing does not resolve exactly, and every
     /// tab without a live durable binding fails closed to `nil`.
     static func resolveObserverEndpoint(
-        metadata: RequestMetadata,
+        metadata: MCPRequestMetadata,
         targetWindow: WindowState,
         resolveObserverEndpoint: ObserverEndpointResolver
     ) async -> DomainAgentSessionLinkEndpointIdentity? {
@@ -101,7 +105,7 @@ enum AgentSessionTargetOperationGuard {
     /// - Parameter targetWindow: the routed window, used only to consult its server-owned tab-context
     ///   store. Omitting it narrows the check to the purpose triple.
     static func isAgentOriginConnection(
-        metadata: RequestMetadata,
+        metadata: MCPRequestMetadata,
         targetWindow: WindowState? = nil
     ) async -> Bool {
         guard metadata.connectionID != nil else {
@@ -114,7 +118,7 @@ enum AgentSessionTargetOperationGuard {
     }
 
     /// The captured/live/cached run-purpose triple, reconciled with a rehydration attempt.
-    private static func hasAuthoritativeAgentRunPurpose(metadata: RequestMetadata) async -> Bool {
+    private static func hasAuthoritativeAgentRunPurpose(metadata: MCPRequestMetadata) async -> Bool {
         guard let connectionID = metadata.connectionID else {
             return metadata.runPurpose.map { $0 != .unknown } ?? false
         }
@@ -179,14 +183,53 @@ enum AgentSessionTargetOperationGuard {
         provenance: DomainAgentSessionTargetProvenance,
         reference: String
     ) throws {
-        let decision = DomainAgentSessionOperationAuthorizer.authorize(
-            operation: operation,
-            caller: caller,
-            target: provenance
-        )
-        guard decision.isAuthorized else {
+        // The decision (full access, direct-child and human-only rules) is the engine's.
+        guard OverseerAuthorizationEngine.current.authorizesTargetOperation(operation, caller: caller, provenance: provenance) else {
             throw denialError(reference: reference)
         }
+    }
+
+    /// Execution-time authority for a `manage_worktree` binding mutation that names its target
+    /// session explicitly (`bind` / `select` / `unbind`, or `create` with `bind=true`).
+    ///
+    /// Rebinding redirects where the target's provider reads and writes, so a full session UUID plus
+    /// same-window routing must not be enough to reach an unrelated session. The allowed callers are:
+    ///
+    /// - an **administrative principal** (an ordinary external MCP client with no run-scoped routing),
+    ///   exactly as before;
+    /// - the **target itself**, proven by server-owned run routing;
+    /// - the target's **spawn parent**, from immutable spawn provenance;
+    /// - an **overseer** whose exact endpoint holds a live Manage grant over the target.
+    ///
+    /// Unresolved Agent-run routing always fails closed. Every denial reuses the scope-unavailable
+    /// wording so an unauthorized UUID is indistinguishable from a nonexistent one.
+    static func requireWorktreeBindingAuthority(
+        targetSessionID: UUID,
+        metadata: MCPRequestMetadata,
+        targetWindow: WindowState,
+        resolveSpawnParentSessionID: SpawnParentSessionResolver,
+        resolveObserverEndpoint: ObserverEndpointResolver,
+        resolveTargetProvenance: TargetProvenanceResolver,
+        hasManageGrant: ManageGrantResolver
+    ) async throws {
+        let caller = await resolveCaller(
+            metadata: metadata,
+            targetWindow: targetWindow,
+            resolveSpawnParentSessionID: resolveSpawnParentSessionID
+        )
+        let authorized = await OverseerAuthorizationEngine.current.authorizesWorktreeBinding(
+            caller: caller,
+            targetSessionID: targetSessionID,
+            spawnParentSessionID: { await resolveTargetProvenance(targetSessionID).parentSessionID },
+            callerHoldsManageGrant: {
+                guard case let .agentSession(callerSessionID) = caller,
+                      let endpoint = await resolveObserverEndpoint(metadata, targetWindow),
+                      endpoint.sessionID == callerSessionID
+                else { return false }
+                return await hasManageGrant(endpoint, targetSessionID)
+            }
+        )
+        guard authorized else { throw denialError(sessionID: targetSessionID) }
     }
 
     /// Resolves provenance and authorizes one target in a single step.

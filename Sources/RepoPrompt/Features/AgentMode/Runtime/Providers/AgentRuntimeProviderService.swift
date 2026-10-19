@@ -1,6 +1,7 @@
 import Foundation
 import Logging
 import RepoPromptProcess
+import RepoPromptSettingsCore
 
 enum ClaudeCodeRuntimeVariant: String {
     case standard
@@ -51,15 +52,16 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
     static let claudeMCPClientID = "claude-code"
     static let codexMCPClientID = "codex-mcp-client"
     static let openCodeMCPClientID = "opencode"
-    static let cursorMCPClientID = "cursor"
+    /// Cursor's ACP MCP child reports this exact initialize name; pending discovery contexts use exact keys.
+    static let cursorMCPClientID = "Cursor"
     /// Devin's built-in Rust MCP client reports this exact initialize name.
     static let devinMCPClientID = "rmcp"
-    /// Grok Build presents `grok-shell-<injected server name>` (e.g. `grok-shell-RepoPromptCE`)
+    /// Grok Build presents `grok-shell-<injected server name>` (here `grok-shell-RepoPromptCEGrokRuntime`)
     /// to MCP servers. The hint must equal that exact registered name: the pending run-scoped
     /// tab-context store keys are raw client names (no family canonicalization), so a
     /// family-only hint would never bind the run's frozen tab context. The canonical
     /// `grok-shell` family in `MCPClientIdentity` still covers family-level matching.
-    static let grokBuildMCPClientID = "grok-shell-\(RepoPromptMCPServerConfiguration.defaultServerName)"
+    static let grokBuildMCPClientID = "grok-shell-\(RepoPromptMCPServerConfiguration.grokBuildRuntimeServerName)"
 
     var commandName: String {
         switch self {
@@ -178,7 +180,7 @@ enum AgentProviderKind: String, CaseIterable, Hashable {
         case .codexExec:
             return "OpenAI's Codex CLI agent. Optimized for tool-driven engineering workflows. Supports configurable reasoning effort levels per model."
         case .antigravity:
-            return "Google Antigravity ACP agent. Available for interactive Agent Mode; headless Context Builder and delegated runs are not supported."
+            return "Google Antigravity ACP agent. Supports interactive Agent Mode through the managed ACP bridge."
         case .openCode:
             return "OpenCode ACP agent. Interactive Agent Mode uses RepoPrompt MCP tools; headless discovery/delegate runs use RepoPrompt's managed no-native-tools mode."
         case .cursor:
@@ -261,8 +263,8 @@ final class AgentRuntimeProviderService {
     ///   - runType: The type of run — determines CLI tool config
     /// - Note: MCP tool restrictions are handled via ServerNetworkManager connection policies,
     ///   not via CLI flags. Use installClientConnectionPolicy before starting the agent run.
-    /// - Important: OpenCode and Cursor use their ACP runtimes for headless
-    ///   discovery while keeping broader chat-provider wiring separate.
+    /// - Important: ACP-backed providers use their shared one-shot bridge for
+    ///   headless discovery while keeping broader chat-provider wiring separate.
     func makeProvider(
         for agent: AgentProviderKind,
         modelString: String? = nil,
@@ -325,7 +327,8 @@ final class AgentRuntimeProviderService {
                 enableDebugLogging: Self.enableDebugLogging,
                 modelString: modelString,
                 includeRepoPromptMCPServer: true,
-                cleanupProjectMCPApproval: true
+                cleanupProjectMCPApproval: true,
+                modelOverrides: modelParameterSelections.map { .init(configID: $0.configID, valueRaw: $0.valueRaw) }
             )
             if Self.enableDebugLogging {
                 Self.logger.debug("Created CursorACPHeadlessAgentProvider")
@@ -335,16 +338,16 @@ final class AgentRuntimeProviderService {
             let config = GrokBuildAgentConfig(
                 enableDebugLogging: Self.enableDebugLogging,
                 modelString: modelString,
-                alwaysApproveTools: GrokBuildAgentToolPreferences.permissionLevel() == .fullAccess
+                alwaysApproveTools: false,
+                discoveryMode: true,
+                backgroundFeatureEnvironment: GrokBuildAgentConfig.managedBackgroundFeatureEnvironment
             )
             if Self.enableDebugLogging {
                 Self.logger.debug("Created GrokBuildACPHeadlessAgentProvider")
             }
             return GrokBuildACPHeadlessAgentProvider(config: config, workspacePath: workspacePath)
         case .antigravity:
-            return UnsupportedHeadlessAgentProvider(
-                reason: "Google Antigravity is currently supported only in interactive Agent Mode. Choose another provider for Context Builder or delegated headless runs."
-            )
+            return UnsupportedHeadlessAgentProvider(reason: "Headless execution is not supported for this provider.")
         case .devin:
             return DevinACPHeadlessAgentProvider(
                 config: DevinAgentConfig(

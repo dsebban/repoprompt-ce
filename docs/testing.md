@@ -2,6 +2,24 @@
 
 Use this guide for contributor-facing XCTest changes. Follow `AGENTS.md` for coordinated daemon use, style checks, and lifecycle approvals. Use `$rpce-test-quality` when deciding whether coverage is worth adding, retaining, consolidating, or removing.
 
+## Claude status-line compatibility experiment (debug only)
+
+This is an explicit one-process probe, not a replacement quota source or persistent usage cache. It tests whether the installed Claude CLI invokes its documented status-line command during RepoPrompt's native headless run. It makes no independent account HTTP requests and reads no credentials.
+
+Prepare a new private directory (the path must not already exist):
+
+```bash
+python3 Scripts/diagnostics/claude_statusline_probe.py prepare /tmp/rpce-statusline-probe-UNIQUE
+python3 Tests/Diagnostics/test_claude_statusline_probe.py
+make dev-test FILTER=ClaudeStatusLineCompatibilityProbeTests
+```
+
+After separately authorizing and building/launching the debug app, pass `--claude-statusline-probe /tmp/rpce-statusline-probe-UNIQUE/settings.json` as an app launch argument. Only the first new first-party Claude native process claims it; existing processes and compatible backends are not instrumented. Start one ordinary user-requested Claude turn, then inspect `invocations.ndjson` in that private directory. Do not launch synthetic turns just to collect usage. There is no installation into user/project settings: `--settings` supplies only the session's status-line override. The probe deliberately does not run the user's original status-line script.
+
+Records contain receipt time, byte count, sanitized CLI version, and only five-hour/seven-day percentages and reset timestamps. Percentages remain 0–100; omitted values remain unknown. Receipt time and repeated identical values do not establish measurement freshness or account identity. No records feed the usage UI or router. The collector has a two-second timeout, 64 KiB input limit and 256 KiB log cap. Its fixed `RPCE_STATUSLINE_PROBE` stdout sentinel is deliberate: check whether it leaks into the native event stream or affects the turn. Do not ship that sentinel as a production status line.
+
+Managed settings can override the probe. Zero invocations are inconclusive without a known-working authorized interactive control, and results apply only to the tested CLI version/configuration. Keep the output private; remove the temporary directory manually after inspection. The `claimed` marker is intentionally not automatically reset, including after a failed launch.
+
 ## Quality gate before adding a test
 
 Add a test only when all four answers are concrete:
@@ -52,6 +70,90 @@ make dev-provider-test
 ```
 
 A focused green run is evidence for the named contract, not a substitute for full-suite or CI coverage when the changed boundary is broad. The hosted root-test workflow discovers one current root XCTest population through `swift test list`, counts methods per suite, assigns every discovered suite to one of four deterministic method-count-weighted LPT shards, and executes each suite in its own XCTest process. Root CI has no contract/integration tier split or contributor-maintained registry; provider-package tests remain a separate lane.
+
+## Provider subprocess isolation
+
+Provider CLI launches fail closed in processes hosting the XCTest runtime, including nested
+XCTest runners and release-mode test bundles. Detection does not inspect user arguments or
+inherited XCTest environment variables, so those production inputs cannot cause a refusal.
+**Separate non-XCTest child processes spawned by tests are not guarded.** Such fixtures must
+use synthetic commands or injected provider doubles, never an installed provider CLI.
+
+Inject controller/provider doubles rather than relying on an installed CLI. Intentional fixture-process
+tests can set `allowsProviderProcessLaunchForTesting: true` on their `CLIProcessConfiguration`
+or `ACPAgentSessionController`, or scope a launch/probe with
+`ProviderProcessLaunchPolicy.$allowsLaunchForTesting.withValue(true)`. These opt-ins are local
+to the configured instance or task, not a process-global environment switch. Mark a process
+`.tool` only for genuinely non-provider tooling, such as Git worktree operations.
+
+## Oracle settled-response recovery
+
+| Reach / drive | Observable proof | Prerequisites / traps |
+| --- | --- | --- |
+| App-backed `ask_oracle` / `oracle_send` with `export_response:true`; `make dev-test FILTER=OracleGroupBoundaryTests` | Optional export failure retains the settled answer and chat IDs with a safe `oracle_export_error`; no automatic paid replay | Pre-settlement validation/send failures still throw. Recover through returned chat IDs. The deterministic fixture is not live filesystem proof. |
+
+## Oracle reconciliation and progress lifetime
+
+| Reach / drive | Observable proof | Prerequisites / traps |
+| --- | --- | --- |
+| Reopen an Agent Mode transcript and open a saved `ask_oracle` / `oracle_send` card; `make dev-test FILTER=OracleLaneCoverageTests` | Fresh disk restoration routes to the exact primary chat for both fitting lane digests and summary-budget fallback, while preserving lane coverage | Conflicting or malformed lane identities must not route to another chat or fall back to the latest chat |
+| Complete or fail an Oracle request during progress delivery; `make dev-test FILTER=MCPToolHeartbeatTests` | A gated in-flight heartbeat drains before the tool call returns or rethrows; cancellation preserves the operation's settled result | Cancellation alone does not complete an already-running async progress callback; the deterministic gate is not live transport proof |
+
+The inventory-first reconciliation guidance in `OracleGroupDeliveryContract` showed a paired GPT score gain in the local r02 experiment, but failed its final holdout factual/format gates (more false acceptances) and produced longer answers. Delivery-string tests verify the guidance contract, not reconciliation accuracy.
+
+## Oracle reconciliation settings editor
+
+| Reach / drive | Observable proof | Prerequisites / traps |
+| --- | --- | --- |
+| Settings → Agent Models → beneath Oracle roster; background Cua controls labeled `Oracle reconciliation guidance`, `Save Oracle reconciliation guidance`, `Restore default Oracle reconciliation guidance`, `Reload Oracle reconciliation guidance`; `make dev-test FILTER=AgentModelsSettingsViewModelStaleEditTests` | Typing does not write; Save persists only guidance in the selected whole profile; blank/Restore Default removes the override. Dirty drafts survive unrelated refreshed profile edits (including same-page Add Oracle), and Save preserves those edits. Conflict is derived from guidance baseline or actual write-destination mismatch; Reload Current Text discards a conflicting draft. Switching between workspaces using the same global profile does not invalidate a global draft. The whole-profile cache/live guard refuses an uncached edit without retrying that click; after refresh, a new explicit Save succeeds if guidance and destination still match, preserving unrelated edits. Clean drafts follow settings notifications. | Global/workspace routing is authoritative; nil workspace guidance uses the built-in default, not global fieldwise inheritance. The existing Settings persistence banner owns pending-save/recovery warnings. GUI driving requires an authorized matching artifact; VM tests are not GUI proof. |
+| Save guidance, start grouped `ask_oracle` / `oracle_send` or Context Builder plan/question/review, then change settings while discovery/lanes are pending; inspect returned text and optional export; `make dev-test FILTER='OraclePresetExecutionTests\|ContextBuilderOraclePresetTests\|ContextBuilderOracleGroupStateTests\|OracleGuidanceContractTests\|OracleGroupDeliveryContractTests\|OracleGroupBoundaryTests'` | The pending request retains its captured guidance in inline and exported results; a later continuation uses new scoped text without changing the conversation roster/prompt. Absent/blank overrides use unchanged default delivery; an explicit override equal to the default remains metadata. N=1 delivery is unchanged. | Caller-facing policy only: lane prompts and canonical history contain no guidance. Direct headless delivery retains the built-in default. Live provider uploads/paid requests and app lifecycle need separate authorization; deterministic transport hooks prove capture/serialization, not live model behavior. |
+
+## Oracle image delivery
+
+Feature map (app-backed only):
+
+| Reach / drive | Observable proof | Prerequisites / traps |
+| --- | --- | --- |
+| App-backed CE MCP `oracle_send`, or Agent Mode-bound `ask_oracle`, with `images:[{path,title?}]` | Correct description of a pattern absent from filename/title/question; thumbnail visible, saved and restored without original bytes/path; persisted `ask_oracle.images` / `oracle_send.images` redacted; outside-root path rejected with indexed error and no new turn | Already-running matching debug artifact/CLI with verified repository/worktree, commit and dirty-patch provenance (CLI version alone is insufficient), exclusive coordination for the singleton app, loaded authorized fixture root, supported credentials and inspected **entire** Oracle roster. Coordinator approval immediately before uploads/paid prompts; lifecycle approval separately. |
+| Paste/drop an image into an Agent Mode composer (Devin, Codex and Grok receive its path as a text note; `@path` agents already see it), then ask the agent to consult the Oracle | Agent passes the listed attachment path in `ask_oracle.images`; every lane describes the pasted pattern; transcripts keep thumbnails only | Only the owning agent session's own files in the managed `agent_attachments` store are authorized, at their exact path; sibling attachments and other outside-root paths stay rejected. Consumed attachment files are deleted when the turn ends, so only in-flight turn images are reliably available. Same app/approval prerequisites as above. |
+
+Tool discovery and CLI help (`rpce-cli-debug -l` / `-e 'describe oracle_send'`; `describe ask_oracle` on the owning Agent Mode connection) consume the app's tool schema; direct-headless discovery uses the canonical schema and explicitly rejects images. The generated reference is `docs/spec/mcp-domain-canonical-tool-definitions.generated.json`. Neither CLI adds automatic attachment forwarding: the agent must supply `images:[{path,title?}]`.
+
+`make dev-test FILTER='OracleGroupBoundaryTests|OracleImageContractTests|MCPAskOracleWorktreeTests|OracleImageAttachmentLoaderTests'` exercises image loading, start/continuation dispatch, invalid-path rejection, and transcript redaction. The dispatch fixture captures original bytes without a provider call; it is not live image-delivery proof.
+
+Ordinary smoke and packaged initialize/tools-list are **not image-delivery proof**.
+Ordinary CLI connections use `oracle_send`; `ask_oracle` requires an owning Agent Mode session. Both accept images on starts and continuations, and apply the same workspace-root, exact session-attachment, and provider capability checks. Supply a fresh `mode:"chat"`,
+`new_chat:true`, `message`, and nonempty `images` JSON request. Do not include keys,
+raw image bytes or base64. Inspect roster/settings before approval: `model` changes
+only the primary lane; additional Oracle lanes can multiply uploads and cost.
+Use a small generated PNG in a disposable loaded root (neutral filename/title),
+with a simple colored shape/count pattern and a separately recorded expected answer.
+Run this once per approved route; capture command and returned answer/error as
+evidence. A successful RPC alone remains **INCONCLUSIVE**.
+
+Then inspect the resulting preview and saved/restored history through the real app
+(Cua Driver background delivery only). Inspect the disposable session's JSON for
+thumbnail-only storage and redacted tool arguments; retain only sanitized evidence,
+never full prompt/base64 payloads. Submit a second request pointing outside the loaded
+root only with approval; expect indexed loader rejection and no added Oracle turn.
+Unit regressions prove pre-read/pre-dispatch ordering; screenshots cannot prove it.
+Clean up only the created fixtures/session/workspace after evidence capture (use
+`trash` for files); do not stop a visible app. No production profile or keys should be
+copied into fixtures. Direct-headless Oracle rejects images. Originals are this-turn-only;
+continuations do not automatically resend them or use saved thumbnails. Missing
+credentials, unsupported negotiated capabilities or unapproved uploads mean **not run**,
+not PASS.
+
+## Cursor model controls: live verification map
+
+Use conductor for build/health checks (`make dev-build`, `make dev-smoke`); launch/relaunch requires approval. Drive the UI with Cua Driver in background delivery.
+
+| Feature | User / agent path | Observable proof | Prerequisites / traps |
+| --- | --- | --- | --- |
+| Cursor model refresh | Settings → CLI Providers → expand Cursor CLI → Refresh Models | Spinner finishes; result reports models advertised by Cursor, or a retryable error; previous models/selections survive failure | Authenticated `agent acp`. Advertised count is not selectable count: model membership remains release-gated. |
+| Cursor effort pins | Settings → Agent Models (or Models popover) → choose Cursor and an effort-bearing model → effort chip → select advertised choice | Chip reflects choice; reopen surface and inspect persisted model parameters via `agent_manage list_agents`; run applies the advertised config ID / wire value | Models such as Composer may advertise speed only, so no effort chip. Switch models and confirm pins stay per-model. Unsupported saved pins must not be erased by discovery. |
+
+Focused checks: `make dev-test FILTER=Cursor` covers discovery, refresh failure/retry, runtime parameter resolution, per-model persistence, and exact ACP binding. A successful metadata probe alone does not prove the UI or effective inference routing.
 
 ## Workspace projection decode diagnostics
 

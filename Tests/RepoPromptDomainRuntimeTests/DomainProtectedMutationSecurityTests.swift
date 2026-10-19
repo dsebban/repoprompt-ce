@@ -1,5 +1,6 @@
 import Foundation
 import MCP
+import os
 @testable import RepoPromptDomainRuntime
 import XCTest
 
@@ -84,7 +85,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             ephemeralGrantedToolNames: []
         )
         do {
-            _ = try await MCPDomainInvocationSecurityContext.$current.withValue(unverified) {
+            _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(unverified) {
                 try await binding(["op": .string("set")])
             }
             XCTFail("Expected unverified-principal denial")
@@ -97,7 +98,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             assurance: .verifiedProcess,
             ephemeralGrantedToolNames: []
         )
-        let result = try await MCPDomainInvocationSecurityContext.$current.withValue(verified) {
+        let result = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(verified) {
             try await binding(["op": .string("set")])
         }
         XCTAssertEqual(result.stringValue, "ok")
@@ -118,7 +119,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             ephemeralGrantedToolNames: []
         )
         do {
-            _ = try await MCPDomainInvocationSecurityContext.$current.withValue(replacedHelper) {
+            _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(replacedHelper) {
                 try await binding(["op": .string("set")])
             }
             XCTFail("Expected replaced-helper denial")
@@ -143,7 +144,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             ephemeralGrantedToolNames: []
         )
         do {
-            _ = try await MCPDomainInvocationSecurityContext.$current.withValue(denied) {
+            _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(denied) {
                 try await binding(["op": .string("bind")])
             }
             XCTFail("Expected missing-grant denial")
@@ -156,7 +157,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             assurance: .verifiedProcess,
             ephemeralGrantedToolNames: ["bind_context"]
         )
-        _ = try await MCPDomainInvocationSecurityContext.$current.withValue(allowed) {
+        _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(allowed) {
             try await binding(["op": .string("bind")])
         }
         let runCallCount = await calls.value
@@ -208,7 +209,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
         )
 
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(context) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(context) {
                 try await protectedBinding([
                     "action": .string("delete"),
                     "path": .string(target.path)
@@ -289,7 +290,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
         )
 
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(context) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(context) {
                 try await protectedBinding([
                     "op": .string("export"),
                     "path": .string("export.md")
@@ -321,11 +322,11 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             ephemeralGrantedOperations: ["prompt.set"]
         )
 
-        _ = try await MCPDomainInvocationSecurityContext.$current.withValue(exactOperation) {
+        _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(exactOperation) {
             try await binding(["op": .string("set")])
         }
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(exactOperation) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(exactOperation) {
                 try await binding(["op": .string("append")])
             }
         ) { error in
@@ -365,7 +366,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             stableKey: "client:test",
             ephemeralGrantedToolNames: []
         )
-        _ = try await MCPDomainInvocationSecurityContext.$current.withValue(principal) {
+        _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(principal) {
             try await binding(["op": .string("set")])
         }
         let grantedCallCount = await calls.value
@@ -380,7 +381,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
         )
         XCTAssertEqual(revoked.revision, 2)
         do {
-            _ = try await MCPDomainInvocationSecurityContext.$current.withValue(principal) {
+            _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(principal) {
                 try await binding(["op": .string("set")])
             }
             XCTFail("Expected revoked-grant denial")
@@ -400,7 +401,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             expectedRevision: 2,
             administrator: administrator
         )
-        _ = try await MCPDomainInvocationSecurityContext.$current.withValue(principal) {
+        _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(principal) {
             try await binding(["op": .string("set")])
         }
         let replacementCallCount = await calls.value
@@ -435,7 +436,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             ephemeralGrantedToolNames: []
         )
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(spoofed) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(spoofed) {
                 try await binding(["op": .string("set")])
             }
         ) { error in
@@ -449,7 +450,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             verifiedIdentityFingerprint: "verified:fingerprint:one",
             ephemeralGrantedToolNames: []
         )
-        _ = try await MCPDomainInvocationSecurityContext.$current.withValue(verified) {
+        _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(verified) {
             try await binding(["op": .string("set")])
         }
         let callCount = await calls.value
@@ -472,18 +473,19 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             authorizedCanonicalRoots: [allowedRoot],
             ephemeralGrantedToolNames: ["manage_workspaces"]
         )
-        _ = try await MCPDomainInvocationSecurityContext.$current.withValue(allowed) {
+        _ = try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(allowed) {
             try await binding(["action": .string("add_folder"), "folder_path": .string(inside)])
         }
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(allowed) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(allowed) {
                 try await binding(["action": .string("add_folder"), "folder_path": .string(outside)])
             }
         ) { error in
             XCTAssertEqual(error as? DomainMutationPolicyError, .grantMissing)
         }
 
-        let staleRouting = fixture.context(
+        // An unresolved run-scoped binding fails closed without assuming publication is pending.
+        let unavailableBinding = fixture.context(
             kind: .runScoped,
             assurance: .hostLaunchToken,
             authorizedCanonicalRoots: [allowedRoot],
@@ -491,11 +493,11 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
             ephemeralGrantedToolNames: ["manage_workspaces"]
         )
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(staleRouting) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(unavailableBinding) {
                 try await binding(["action": .string("add_folder"), "folder_path": .string(inside)])
             }
         ) { error in
-            XCTAssertEqual(error as? DomainMutationPolicyError, .routingContextUnavailable)
+            XCTAssertEqual(error as? DomainMutationPolicyError, .routingBindingUnavailable)
         }
         let callCount = await calls.value
         XCTAssertEqual(callCount, 1)
@@ -537,7 +539,7 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
         )
 
         await XCTAssertThrowsErrorAsync(
-            try await MCPDomainInvocationSecurityContext.$current.withValue(context) {
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(context) {
                 try await binding(["op": .string("set")])
             }
         ) { error in
@@ -590,6 +592,144 @@ final class DomainProtectedMutationSecurityTests: XCTestCase {
         } catch let error as DomainMutationPolicyError {
             XCTAssertEqual(error, .policyRevisionConflict(expected: 0, actual: 1))
         }
+    }
+
+    func testMissingRunScopedBindingAndNonRunScopedRoutingFailClosed() async throws {
+        let fixture = try RuntimeFixture(mode: .standalone)
+        let calls = CallCounter()
+        let binding = fixture.protectedBinding(toolName: "bind_context", calls: calls)
+
+        // Missing routing is not evidence of an in-flight publish, including in headless mode.
+        let runScopedUnavailable = fixture.context(
+            kind: .runScoped,
+            assurance: .verifiedProcess,
+            hasAuthoritativeRoutingContext: false,
+            ephemeralGrantedToolNames: ["bind_context"]
+        )
+        await XCTAssertThrowsErrorAsync(
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(runScopedUnavailable) {
+                try await binding(["op": .string("bind")])
+            }
+        ) { error in
+            XCTAssertEqual(error as? DomainMutationPolicyError, .routingBindingUnavailable)
+            let rendered = error.localizedDescription
+            XCTAssertTrue(rendered.contains("unavailable"), rendered)
+            XCTAssertFalse(rendered.contains("has not been published yet"), rendered)
+            XCTAssertFalse(rendered.contains("Retry after"), rendered)
+        }
+
+        // Non-run-scoped connections retain their existing fail-closed denial.
+        let appProxyNoRouting = fixture.context(
+            kind: .appProxy,
+            assurance: .verifiedProcess,
+            hasAuthoritativeRoutingContext: false,
+            ephemeralGrantedToolNames: []
+        )
+        await XCTAssertThrowsErrorAsync(
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(appProxyNoRouting) {
+                try await binding(["op": .string("bind")])
+            }
+        ) { error in
+            XCTAssertEqual(error as? DomainMutationPolicyError, .routingContextUnavailable)
+        }
+
+        let callCount = await calls.value
+        XCTAssertEqual(callCount, 0)
+    }
+
+    func testPartialSuccessAfterCommitCarriesUnderlyingErrorCategory() async throws {
+        let fixture = try RuntimeFixture(mode: .standalone)
+        // manage_worktree.select is a durable mutation that does not require physical admission,
+        // so willCommit() succeeds and the binding can fail post-commit to exercise the category.
+        let context = fixture.context(
+            kind: .runScoped,
+            assurance: .hostLaunchToken,
+            authorizedCanonicalRoots: [],
+            ephemeralGrantedToolNames: ["manage_worktree"]
+        )
+        let binding = MCPDomainToolBinding(
+            definition: MCPDomainToolDefinition(
+                name: "manage_worktree",
+                description: "fixture",
+                inputSchema: .object(["type": .string("object")]),
+                annotations: .init(readOnlyHint: false, destructiveHint: true)
+            ),
+            operation: { _ in
+                try await MCPDomainMutationCommitContext.willCommit()
+                // Fail after commit has begun; settlement must be indeterminate and carry
+                // a bounded error category derived from the underlying error type.
+                throw DomainMutationPolicyError.routingBindingUnavailable
+            }
+        )
+        let protectedBinding = fixture.runtime.protectedMutationProvider.protectedBinding(binding)
+
+        let settlementState = OSAllocatedUnfairLock<DomainProtectedMutationState?>(initialState: nil)
+        await XCTAssertThrowsErrorAsync(
+            try await MCPDomainProtectedMutationSettlementContext.$observer.withValue({ settlement in
+                settlementState.withLock { $0 = settlement.state }
+            }) {
+                try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(context) {
+                    try await protectedBinding(["op": .string("select"), "name": .string("main")])
+                }
+            }
+        ) { error in
+            guard let mutationError = error as? DomainProtectedMutationError,
+                  case let .partialSuccessAfterCommit(_, category) = mutationError
+            else {
+                XCTFail("Expected partialSuccessAfterCommit, got \(error)")
+                return
+            }
+            XCTAssertEqual(category, "policyError")
+            let rendered = "\(mutationError)"
+            XCTAssertTrue(rendered.contains("policyError"), rendered)
+            XCTAssertTrue(rendered.contains("Inspect state"), rendered)
+            XCTAssertEqual(rendered, error.localizedDescription)
+            XCTAssertEqual("\(error)", rendered)
+        }
+        XCTAssertEqual(settlementState.withLock { $0 }, .indeterminateAfterCommit)
+
+        let journal = try await fixture.runtime.mutationJournal.snapshot()
+        let record = try XCTUnwrap(journal.recordSnapshots.first)
+        XCTAssertEqual(record.toolName, "manage_worktree")
+        XCTAssertEqual(record.status, .indeterminateAfterCommit)
+    }
+
+    func testJournalErrorCategoryInPartialSuccessAfterCommit() async throws {
+        // A post-commit journal error retains a bounded category without leaking error internals.
+        let fixture = try RuntimeFixture(mode: .standalone)
+        let context = fixture.context(
+            kind: .runScoped,
+            assurance: .hostLaunchToken,
+            authorizedCanonicalRoots: [],
+            ephemeralGrantedToolNames: ["manage_worktree"]
+        )
+        var capturedCategory: String?
+        let binding = MCPDomainToolBinding(
+            definition: MCPDomainToolDefinition(
+                name: "manage_worktree",
+                description: "fixture",
+                inputSchema: .object(["type": .string("object")]),
+                annotations: .init(readOnlyHint: false, destructiveHint: true)
+            ),
+            operation: { _ in
+                try await MCPDomainMutationCommitContext.willCommit()
+                throw DomainMutationJournalError.writerConflict
+            }
+        )
+        let protectedBinding = fixture.runtime.protectedMutationProvider.protectedBinding(binding)
+        await XCTAssertThrowsErrorAsync(
+            try await MCPDomainInvocationSecurityContext.currentTaskLocal.withValue(context) {
+                try await protectedBinding(["op": .string("select"), "name": .string("main")])
+            }
+        ) { error in
+            if let mutationError = error as? DomainProtectedMutationError,
+               case let .partialSuccessAfterCommit(_, category) = mutationError
+            {
+                capturedCategory = category
+            }
+        }
+        // Journal errors map to "journalError" category.
+        XCTAssertEqual(capturedCategory, "journalError")
     }
 
     private func operation(_ toolName: String, _ arguments: [String: Value]) -> DomainProtectedMutationOperation? {

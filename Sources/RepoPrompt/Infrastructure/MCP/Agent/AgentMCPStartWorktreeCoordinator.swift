@@ -2,6 +2,8 @@ import Foundation
 import MCP
 import RepoPromptInstrumentation
 import RepoPromptProcess
+import RepoPromptSettingsCore
+import RepoPromptVCS
 import RepoPromptWorkspaceCore
 
 @MainActor
@@ -348,7 +350,7 @@ struct AgentMCPStartWorktreeCoordinator {
                     let metricTag = startupContext.flatMap {
                         WorktreeStartupInstrumentation.benchmarkMetricTag(correlationID: $0.correlationID)
                     }
-                    _ = try await WorktreeStartupInstrumentation.$currentBenchmarkMetricTag.withValue(metricTag) {
+                    _ = try await WorktreeStartupInstrumentation.currentBenchmarkMetricTagTaskLocal.withValue(metricTag) {
                         try await agentModeVM.transitionWorktreeBindings(
                             desiredBindings,
                             forSessionID: targetSessionID,
@@ -441,15 +443,24 @@ struct AgentMCPStartWorktreeCoordinator {
     ) async throws {
         let runner = CLIProcessRunner(config: CLIProcessConfiguration(
             command: "git",
+            processPurpose: .tool,
             workingDirectory: repository.rootPath,
             enableDebugLogging: false
         ))
-        let result = try await runner.run(
-            args: ["worktree", "remove", "--force", "--", worktree.path],
-            stdin: nil,
-            outputMode: .none,
-            timeout: 30
-        )
+        let result: CLIProcessRunner.Result
+        do {
+            result = try await runner.run(
+                args: ["worktree", "remove", "--force", "--", worktree.path],
+                stdin: nil,
+                outputMode: .none,
+                timeout: 30
+            )
+        } catch {
+            await vcsService.invalidateCache(for: URL(fileURLWithPath: worktree.path))
+            throw error
+        }
+        // The removal bypasses VCSService; drop the removed path's caches and all shared listings.
+        await vcsService.invalidateCache(for: URL(fileURLWithPath: worktree.path))
         guard result.status == 0 else {
             let stderr = String(data: result.stderr, encoding: .utf8)?
                 .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -690,7 +701,7 @@ struct AgentMCPStartWorktreeCoordinator {
         }
         let result: GitWorktreeCreateResult
         #if DEBUG
-            result = try await WorktreeStartupInstrumentation.$currentBenchmarkMetricTag.withValue(benchmarkMetricTag) {
+            result = try await WorktreeStartupInstrumentation.currentBenchmarkMetricTagTaskLocal.withValue(benchmarkMetricTag) {
                 try await vcsService.createGitWorktreeWithResult(
                     request: plan.createRequest,
                     at: context.repo.rootURL,

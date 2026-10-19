@@ -18,6 +18,9 @@ struct AgentModelRouterPillProps: Equatable {
     let isAvailable: Bool
     let isRouting: Bool
     let disabledReason: String?
+    /// Usage balancing is independent of Jev; the router pill surfaces it as a badge.
+    let routedModelDisplayName: String?
+    var usageBalancing = false
 }
 
 struct AgentAutoEffortPillProps: Equatable {
@@ -60,7 +63,8 @@ struct AgentStatusPillsSnapshot: Equatable {
             isOn: false,
             isAvailable: false,
             isRouting: false,
-            disabledReason: "Configure Model Router in Settings."
+            disabledReason: "Configure Model Router in Settings.",
+            routedModelDisplayName: nil
         ),
         autoEffort: AgentAutoEffortPillProps(
             isOn: false,

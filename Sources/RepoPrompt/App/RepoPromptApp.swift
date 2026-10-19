@@ -2,8 +2,11 @@ import AppKit
 import Darwin
 import Foundation
 import Logging
+import RepoPromptFileSystem
 import RepoPromptProcess
 import RepoPromptSecureStorage
+import RepoPromptSettingsCore
+import RepoPromptShared
 import Sparkle
 import SwiftUI
 
@@ -58,6 +61,8 @@ struct RepoPromptFileLogHandler: LogHandler {
 
 struct RepoPromptSwiftUIApp: App {
     init() {
+        let appInitSpan = StartupPhaseLog.begin(.appInit)
+        defer { appInitSpan.end() }
         LoggingSystem.bootstrap { label in
             var handler = RepoPromptFileLogHandler(label: label)
             #if DEBUG
@@ -67,6 +72,9 @@ struct RepoPromptSwiftUIApp: App {
             #endif
             return handler
         }
+        // Do not initialize the settings-backed property before the state boundary
+        // check (stored-property default initializers run before this init body).
+        _fontScale = StateObject(wrappedValue: FontScaleManager.shared)
         // Avoid process-killing SIGPIPE when the child closes stdin while we're still writing.
         signal(SIGPIPE, SIG_IGN)
 
@@ -124,11 +132,16 @@ struct RepoPromptSwiftUIApp: App {
     /// Global version manager for the entire app
     @StateObject private var versionManager = VersionManager()
 
-    /// Tracks all WindowState objects across multiple windows (singleton)
-    @StateObject private var windowStatesManager = WindowStatesManager.shared
+    /// Tracks all WindowState objects across multiple windows (singleton).
+    /// Deliberately not observed: the scene and commands only read it inside actions, and observing
+    /// it here re-evaluated the whole App scene body on every window open/close. Computed rather than
+    /// stored so the singleton is still first created after `init()` bootstraps logging/telemetry.
+    private var windowStatesManager: WindowStatesManager {
+        WindowStatesManager.shared
+    }
 
     /// Root font scaling source so inherited SwiftUI text updates when the preset changes.
-    @StateObject private var fontScale = FontScaleManager.shared
+    @StateObject private var fontScale: FontScaleManager
 
     // MARK: - Body
 
@@ -195,7 +208,26 @@ struct RepoPromptSwiftUIApp: App {
 
 @MainActor
 public enum RepoPromptApplication {
+    private static func checkDebugStateBoundary() {
+        do {
+            try DebugStateBootstrap.runIfNeeded()
+        } catch {
+            let alert = NSAlert()
+            alert.messageText = "Debug state snapshot could not be prepared"
+            alert.informativeText = "\(error.localizedDescription)\nProduction and prior debug state were preserved. Retry when release is idle, or launch with --debug-clean-slate for an isolated empty profile."
+            alert.addButton(withTitle: "Quit")
+            alert.runModal()
+            exit(EXIT_FAILURE)
+        }
+    }
+
     public static func main() {
+        if let code = ClaudeCLIUsageCollector.runIfInvoked(arguments: ProcessInfo.processInfo.arguments) { exit(code) }
+        // Before defaults migration, provider launch snapshots, property wrappers,
+        // or any settings/session singleton can observe or normalize this profile.
+        Self.checkDebugStateBoundary()
+        let bootstrapSpan = StartupPhaseLog.begin(.bootstrap)
+        GlobalSettingsStore.installApplicationModelIdentityPolicy()
         let defaultsReport = BundleIdentityDefaultsMigration.migrateIfNeeded()
         let defaultsOutcome: IdentityTransitionDiagnosticEvent.Outcome = switch defaultsReport.outcome {
         case .skipped: .skipped
@@ -218,6 +250,9 @@ public enum RepoPromptApplication {
         CodexRuntimeAuthority.initializeLaunchSnapshot()
 
         SecureStorageIdentityMigrationBootstrap.prepareIfConfigured()
+        GlobalSettingsStore.installProcessApplicationEventBridge()
+        FileSystemAppIntegration.installHooks()
+        bootstrapSpan.end()
         RepoPromptSwiftUIApp.main()
     }
 }

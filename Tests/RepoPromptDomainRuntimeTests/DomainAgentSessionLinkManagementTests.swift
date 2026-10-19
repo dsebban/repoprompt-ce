@@ -65,6 +65,74 @@ final class DomainAgentSessionLinkManagementTests: XCTestCase {
         return activated.grant
     }
 
+    func testSetModelOriginalManageLeaseCannotSurviveRevokeRelinkOrAuthorizeWatchOnly() async throws {
+        let authority = makeAuthority()
+        let observer = makeEndpoint(windowID: 1)
+        let target = makeEndpoint(windowID: 2)
+        let grant = try await activateLink(authority, observer: observer, target: target)
+        let lease = try await authority.authorize(
+            operation: .monitorSetModel, observerEndpoint: observer, targetSessionID: target.sessionID
+        ).get()
+        XCTAssertEqual(DomainAgentSessionTargetOperation.monitorSetModel.family, .monitor)
+        XCTAssertFalse(DomainAgentSessionTargetOperation.monitorSetModel.isObserverScoped)
+        XCTAssertTrue(DomainAgentSessionTargetOperation.monitorSetModel.mutatesTarget)
+        let initial = await authority.validate(lease: lease)
+        XCTAssertNil(initial)
+        _ = await authority.revoke(linkID: grant.id, generation: grant.generation, reason: .userRequested)
+        _ = try await activateLink(
+            authority,
+            observer: observer,
+            target: target,
+            restrictedCapabilities: DomainAgentSessionLinkCapability.version1
+        )
+        let stale = await authority.validate(lease: lease)
+        XCTAssertNotNil(stale)
+        let restricted = await authority.authorize(
+            operation: .monitorSetModel, observerEndpoint: observer, targetSessionID: target.sessionID
+        )
+        XCTAssertEqual(restricted, .failure(.capabilityDenied))
+    }
+
+    func testWorktreeBindingRequiresTheExactManageGrant() async throws {
+        let operation = DomainAgentSessionTargetOperation.monitorWorktreeBinding
+        XCTAssertEqual(operation.family, .monitor)
+        XCTAssertFalse(operation.isObserverScoped)
+        XCTAssertTrue(operation.mutatesTarget)
+        XCTAssertEqual(operation.requiredMonitorCapability, .manage)
+
+        let authority = makeAuthority()
+        let observer = makeEndpoint(windowID: 1)
+        let target = makeEndpoint(windowID: 2)
+        let unlinked = makeEndpoint(windowID: 3)
+        _ = try await activateLink(authority, observer: observer, target: target)
+        let lease = try await authority.authorize(
+            operation: operation, observerEndpoint: observer, targetSessionID: target.sessionID
+        ).get()
+        XCTAssertEqual(lease.capability, .manage)
+        XCTAssertEqual(lease.target, target)
+
+        let notLinked = await authority.authorize(
+            operation: operation, observerEndpoint: unlinked, targetSessionID: target.sessionID
+        )
+        XCTAssertEqual(notLinked, .failure(.noActiveLink))
+        let reversed = await authority.authorize(
+            operation: operation, observerEndpoint: target, targetSessionID: observer.sessionID
+        )
+        XCTAssertEqual(reversed, .failure(.noActiveLink), "links are directional")
+
+        let watchOnlyAuthority = makeAuthority()
+        _ = try await activateLink(
+            watchOnlyAuthority,
+            observer: observer,
+            target: target,
+            restrictedCapabilities: DomainAgentSessionLinkCapability.version1
+        )
+        let watchOnly = await watchOnlyAuthority.authorize(
+            operation: operation, observerEndpoint: observer, targetSessionID: target.sessionID
+        )
+        XCTAssertEqual(watchOnly, .failure(.capabilityDenied))
+    }
+
     func testNewGrantsStartManagedAndKeepWatchOperationsAvailable() async throws {
         let authority = makeAuthority()
         let observer = makeEndpoint(windowID: 1)
@@ -72,7 +140,7 @@ final class DomainAgentSessionLinkManagementTests: XCTestCase {
         let grant = try await activateLink(authority, observer: observer, target: target)
 
         XCTAssertEqual(grant.capabilities, DomainAgentSessionLinkCapability.managed)
-        for operation in [DomainAgentSessionTargetOperation.monitorRespond, .monitorSteer] {
+        for operation in [DomainAgentSessionTargetOperation.monitorRespond, .monitorSteer, .monitorSetModel] {
             let lease = try await authority.authorize(
                 operation: operation,
                 observerEndpoint: observer,
