@@ -74,7 +74,7 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
         let decoded = try JSONDecoder().decode(StoredMessage.self, from: encoded)
         XCTAssertEqual(decoded.fileAttachments?.count, 1)
         let attachmentObject = try XCTUnwrap((JSONSerialization.jsonObject(with: encoded) as? [String: Any])?["imageAttachments"] as? [[String: Any]])
-        XCTAssertEqual(Set(attachmentObject[0].keys), ["id", "thumbnailData"])
+        XCTAssertEqual(Set(attachmentObject[0].keys), ["id", "thumbnailData", "kind", "fileName", "byteCount"])
         XCTAssertEqual(decoded.fileAttachments?.first?.thumbnailData, attachment.thumbnailData)
 
         // Legacy payloads without the field must still decode.
@@ -116,6 +116,14 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
         XCTAssertEqual(decoded.fileAttachments?.count, 1)
         XCTAssertEqual(attachment.id, UUID(uuidString: attachmentID))
         XCTAssertEqual(attachment.thumbnailData, Data([0xFF, 0xD8, 0xFF, 0xE0]))
+        XCTAssertEqual(attachment.kind, .image)
+        XCTAssertEqual(attachment.fileName, "")
+        XCTAssertEqual(attachment.byteCount, 0)
+        let presentation = AttachmentPresentation.make(facts: attachment.facts, preview: .available)
+        XCTAssertEqual(presentation.face, .preview)
+        XCTAssertFalse(presentation.title.isEmpty)
+        let withoutPreview = AttachmentPresentation.make(facts: attachment.facts, preview: .unavailable)
+        XCTAssertEqual(withoutPreview.face, .glyph(.photo))
     }
 
     func testTransientImageThumbnailsProduceBoundedOpaqueJPEGPreviews() async throws {

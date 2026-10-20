@@ -1,37 +1,72 @@
 import Foundation
 
-/// A persisted preview of an image that was attached to a user message. Stores
-/// only a small downscaled thumbnail — never the full-resolution bytes — so
-/// transcripts can render what was sent without bloating session files.
+/// A persisted record of a file that was attached to a user message: what it was and a small
+/// downscaled preview when one could be rendered — never the file's bytes — so transcripts can show
+/// what was sent without bloating session files or leaking a path.
 package struct AIChatFileAttachment: Codable, Equatable, Identifiable {
     package let id: UUID
-    /// Downscaled preview bytes (JPEG), capped in dimension and size.
+    /// Downscaled preview bytes (JPEG), capped in dimension and size. Empty when none could be rendered.
     package let thumbnailData: Data
+    package let kind: AttachmentKind
+    /// Last path component only. Empty for rows written before file names were recorded.
+    package let fileName: String
+    /// Zero for rows written before sizes were recorded.
+    package let byteCount: Int
 
     package init(
         id: UUID = UUID(),
-        thumbnailData: Data
+        thumbnailData: Data,
+        kind: AttachmentKind = .image,
+        fileName: String = "",
+        byteCount: Int = 0
     ) {
         self.id = id
         self.thumbnailData = thumbnailData
+        self.kind = kind
+        self.fileName = AttachmentFacts.lastPathComponent(fileName)
+        self.byteCount = max(0, byteCount)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, thumbnailData, kind, fileName, byteCount
+    }
+
+    /// Rows persisted before this type recorded facts were image-only, so they decode as images.
+    package init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(
+            id: container.decode(UUID.self, forKey: .id),
+            thumbnailData: container.decode(Data.self, forKey: .thumbnailData),
+            kind: container.decodeIfPresent(AttachmentKind.self, forKey: .kind) ?? .image,
+            fileName: container.decodeIfPresent(String.self, forKey: .fileName) ?? "",
+            byteCount: container.decodeIfPresent(Int.self, forKey: .byteCount) ?? 0
+        )
+    }
+
+    package var facts: AttachmentFacts {
+        AttachmentFacts(kind: kind, fileName: fileName, byteCount: byteCount)
     }
 }
 
 package extension AIChatFileAttachment {
-    static let thumbnailMaxPixelSize = OracleImageThumbnail.maxPixelSize
+    static let thumbnailMaxPixelSize = AttachmentPreviewRenderer.maxPixelSize
 
-    /// Builds transcript thumbnails from request-scoped Oracle images off the
-    /// caller's actor. Full bytes are never retained; each attachment stores a
-    /// downscaled JPEG so session files stay small.
+    /// Builds transcript records from request-scoped Oracle attachments off the caller's actor. Full
+    /// bytes are never retained; each attachment stores its facts and a downscaled JPEG preview when
+    /// one can be rendered, so session files stay small.
     static func thumbnails(from oracleAttachments: [OracleAttachment]) async throws -> [AIChatFileAttachment] {
         try Task.checkCancellation()
         guard !oracleAttachments.isEmpty else { return [] }
         let worker = Task.detached(priority: .userInitiated) {
             var attachments: [AIChatFileAttachment] = []
             for oracleAttachment in oracleAttachments {
-                let data = try autoreleasepool { try OracleImageThumbnail.jpegData(from: oracleAttachment) }
-                // Keep a path-free indicator even when bounded decoding cannot make a preview.
-                attachments.append(AIChatFileAttachment(thumbnailData: data ?? Data()))
+                let data = try autoreleasepool { try AttachmentPreviewRenderer.jpegData(from: oracleAttachment) }
+                attachments.append(AIChatFileAttachment(
+                    thumbnailData: data ?? Data(),
+                    kind: oracleAttachment.kind,
+                    fileName: oracleAttachment.fileName,
+                    byteCount: oracleAttachment.payload.byteCount
+                ))
             }
             try Task.checkCancellation()
             return attachments

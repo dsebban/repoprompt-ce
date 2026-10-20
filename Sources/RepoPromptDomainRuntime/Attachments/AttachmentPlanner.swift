@@ -36,11 +36,16 @@ package struct AttachmentRefusal: Equatable {
     package let reason: AttachmentRefusalReason
 
     package var message: String {
+        "attachments[\(index)] \(fileName): \(reasonText)"
+    }
+
+    /// The refusal without its `attachments[i] name:` prefix, for surfaces that already show the file name.
+    package var reasonText: String {
         switch reason {
         case .routeCannotCarry:
-            "attachments[\(index)] \(fileName): \(routeDisplayName) cannot carry a \(Self.kindNoun(kind)) attachment."
+            "\(routeDisplayName) cannot carry a \(Self.kindNoun(kind)) attachment."
         case let .textExceedsInlineLimit(byteCount, limit):
-            "attachments[\(index)] \(fileName): text file is \(Self.kibibytes(byteCount)) KiB, over the "
+            "text file is \(Self.kibibytes(byteCount)) KiB, over the "
                 + "\(Self.kibibytes(limit)) KiB inline limit for \(routeDisplayName). "
                 + "Attach a smaller excerpt, or let the Oracle use read_file on the original."
         }
@@ -159,6 +164,41 @@ package enum AttachmentPlanner {
         case .binary:
             switch capability.binary {
             case .unsupported: .failure(.routeCannotCarry)
+            }
+        }
+    }
+
+    /// Whether a file of `kind` and `byteCount` is refused on a route before any bytes are read, so a
+    /// surface that only knows the persisted facts can warn ahead of the request. A test holds this
+    /// equal to the refusals `plan` produces for every route and kind.
+    package static func refusalReason(
+        kind: AttachmentKind,
+        byteCount: Int,
+        capability: AttachmentRouteCapability,
+        limits: OracleAttachmentLimits
+    ) -> AttachmentRefusalReason? {
+        switch kind {
+        case .image:
+            switch capability.image {
+            case .nativeImage: nil
+            case .unsupported: .routeCannotCarry
+            }
+        case .pdf:
+            switch capability.pdf {
+            case .nativeDocument: nil
+            case .unsupported: .routeCannotCarry
+            }
+        case .text:
+            switch capability.text {
+            case .inlineText:
+                byteCount > limits.maxInlineTextBytes
+                    ? .textExceedsInlineLimit(byteCount: byteCount, limit: limits.maxInlineTextBytes)
+                    : nil
+            case .unsupported: .routeCannotCarry
+            }
+        case .binary:
+            switch capability.binary {
+            case .unsupported: .routeCannotCarry
             }
         }
     }
