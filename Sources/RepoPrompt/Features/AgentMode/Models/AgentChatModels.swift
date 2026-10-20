@@ -148,21 +148,21 @@ public struct AgentCrossSessionAttribution: Codable, Sendable, Equatable, Hashab
 enum AgentToolArgumentPersistencePolicy {
     static func sanitizedArgsJSON(toolName: String?, argsJSON: String?) -> String? {
         guard let argsJSON else { return nil }
-        guard isOracleImageTool(toolName) else { return argsJSON }
-        return OracleImageToolArguments.removingImages(fromArgsJSON: argsJSON)
+        guard isOracleSendTool(toolName) else { return argsJSON }
+        return OracleAttachmentContract.redactingArgsJSON(argsJSON)
     }
 
-    /// Whether the tool name resolves to an Oracle image send, using the canonical MCP
+    /// Whether the tool name resolves to an Oracle send, using the canonical MCP
     /// name resolver plus a fail-closed suffix check for server prefixes the resolver does
     /// not own.
-    private static func isOracleImageTool(_ toolName: String?) -> Bool {
+    private static func isOracleSendTool(_ toolName: String?) -> Bool {
         guard let toolName else { return false }
-        let imageTools = ["ask_oracle", "oracle_send"]
-        if let canonical = MCPIntegrationHelper.canonicalRepoPromptToolName(toolName), imageTools.contains(canonical) {
+        let oracleTools = OracleAttachmentContract.oracleToolNames
+        if let canonical = MCPIntegrationHelper.canonicalRepoPromptToolName(toolName), oracleTools.contains(canonical) {
             return true
         }
         let lowered = toolName.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return imageTools.contains { name in
+        return oracleTools.contains { name in
             lowered == name
                 || lowered.hasSuffix("__\(name)")
                 || lowered.hasSuffix(":\(name)")

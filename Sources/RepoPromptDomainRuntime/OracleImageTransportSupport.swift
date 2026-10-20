@@ -257,20 +257,3 @@ package struct OracleTransientImageStaging {
         try? FileManager.default.removeItem(at: directory)
     }
 }
-
-// MARK: - Persisted tool arguments
-
-package enum OracleImageToolArguments {
-    /// Drops the `images` key from serialized `ask_oracle` arguments. Fails closed: malformed or
-    /// truncated arguments may hide an unparseable `images` key, so nil is returned instead.
-    package static func removingImages(fromArgsJSON argsJSON: String) -> String? {
-        guard let data = argsJSON.data(using: .utf8),
-              var object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-        else { return nil }
-        guard object.removeValue(forKey: "images") != nil else { return argsJSON }
-        guard JSONSerialization.isValidJSONObject(object),
-              let sanitized = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-        else { return nil }
-        return String(data: sanitized, encoding: .utf8)
-    }
-}

@@ -118,18 +118,9 @@ struct MCPOracleToolService {
     // MARK: - ask_oracle (agent-mode only)
 
     func executeAskOracle(args: [String: Value], invocationContext: ToolInvocationContext) async throws -> Value {
-        let allowedArgs: Set = ["message", "mode", "chat_id", "new_chat", "model", "images", "export_response"]
-        let unsupported = args.keys
-            .filter { !$0.hasPrefix("_") && !allowedArgs.contains($0) }
-            .sorted()
-        if !unsupported.isEmpty {
-            throw MCPError.invalidParams(
-                "ask_oracle only accepts: message, mode, chat_id, new_chat, model, images, export_response. Unsupported args: \(unsupported.joined(separator: ", "))"
-            )
-        }
-
+        try Self.validateOracleArguments(toolName: MCPWindowToolName.askOracle, args: args)
         try validateCommonOracleArgs(args)
-        let imageRequests = try Self.parseOracleImageRequests(args["images"])
+        let imageRequests = try OracleAttachmentContract.parse(args[OracleAttachmentContract.argumentName])
 
         guard let connectionID = invocationContext.connectionID else {
             throw MCPError.invalidParams("ask_oracle requires an active MCP connection")
@@ -308,18 +299,9 @@ struct MCPOracleToolService {
     // MARK: - oracle_send
 
     func executeOracleSend(args: [String: Value], invocationContext: ToolInvocationContext) async throws -> Value {
-        let allowedArgs: Set = ["message", "mode", "chat_id", "new_chat", "model", "images", "export_response"]
-        let unsupported = args.keys
-            .filter { !$0.hasPrefix("_") && !allowedArgs.contains($0) }
-            .sorted()
-        if !unsupported.isEmpty {
-            throw MCPError.invalidParams(
-                "oracle_send only accepts: message, mode, chat_id, new_chat, model, images, export_response. Unsupported args: \(unsupported.joined(separator: ", "))"
-            )
-        }
-
+        try Self.validateOracleArguments(toolName: MCPWindowToolName.oracleSend, args: args)
         try validateCommonOracleArgs(args)
-        let imageRequests = try Self.parseOracleImageRequests(args["images"])
+        let imageRequests = try OracleAttachmentContract.parse(args[OracleAttachmentContract.argumentName])
         let message = (args["message"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let modeRaw = args["mode"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "chat"
         let exportResponse = try parseExportResponseFlag(args)
@@ -401,7 +383,7 @@ struct MCPOracleToolService {
 
         var chatArgs = args
         chatArgs.removeValue(forKey: "export_response")
-        chatArgs.removeValue(forKey: "images")
+        chatArgs.removeValue(forKey: OracleAttachmentContract.argumentName)
 
         let capturedTabContext = tabContext
         let capturedChatArgs = chatArgs
@@ -485,49 +467,22 @@ struct MCPOracleToolService {
         return boolValue
     }
 
-    static func parseOracleImageRequests(_ value: Value?) throws -> [OracleImageRequest] {
-        guard let value else { return [] }
-        guard case let .array(items) = value else {
-            throw MCPError.invalidParams("images must be an array of objects.")
+    private static let oracleArgumentNames = [
+        "message", "mode", "chat_id", "new_chat", "model", OracleAttachmentContract.argumentName, "export_response"
+    ]
+
+    /// Rejects the retired `images` argument by name, then any argument outside the accepted set.
+    private static func validateOracleArguments(toolName: String, args: [String: Value]) throws {
+        guard args[OracleAttachmentContract.retiredArgumentName] == nil else {
+            throw MCPError.invalidParams(OracleAttachmentContract.retiredArgumentMessage(toolName: toolName))
         }
-        guard !items.isEmpty else { return [] }
-        guard items.count <= OracleAttachmentLimits.production.maxCount else {
+        let unsupported = args.keys
+            .filter { !$0.hasPrefix("_") && !oracleArgumentNames.contains($0) }
+            .sorted()
+        if !unsupported.isEmpty {
             throw MCPError.invalidParams(
-                "images supports at most \(OracleAttachmentLimits.production.maxCount) items."
+                "\(toolName) only accepts: \(oracleArgumentNames.joined(separator: ", ")). Unsupported args: \(unsupported.joined(separator: ", "))"
             )
-        }
-        return try items.enumerated().map { index, item in
-            guard case let .object(object) = item else {
-                throw MCPError.invalidParams("images[\(index)] must be an object.")
-            }
-            let unsupported = object.keys
-                .filter { !["path", "title"].contains($0) }
-                .sorted()
-            guard unsupported.isEmpty else {
-                throw MCPError.invalidParams(
-                    "images[\(index)] unsupported keys: \(unsupported.joined(separator: ", "))."
-                )
-            }
-            guard let rawPath = object["path"]?.stringValue else {
-                throw MCPError.invalidParams("images[\(index)].path must be a string.")
-            }
-            guard !rawPath.isEmpty else {
-                throw MCPError.invalidParams("images[\(index)].path must be a non-empty local file path.")
-            }
-            let title: String?
-            if let titleValue = object["title"] {
-                guard let rawTitle = titleValue.stringValue else {
-                    throw MCPError.invalidParams("images[\(index)].title must be a string.")
-                }
-                let normalized = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard normalized.count <= 200 else {
-                    throw MCPError.invalidParams("images[\(index)].title exceeds 200 characters.")
-                }
-                title = normalized.isEmpty ? nil : normalized
-            } else {
-                title = nil
-            }
-            return OracleImageRequest(index: index, path: rawPath, title: title)
         }
     }
 

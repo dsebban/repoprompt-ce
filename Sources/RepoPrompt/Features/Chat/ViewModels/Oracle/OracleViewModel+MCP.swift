@@ -517,10 +517,10 @@ extension OracleViewModel {
         return true
     }
 
-    static func validateRawImageDispatchInvariant(_ args: [String: Value]) throws {
-        guard args["images"] == nil else {
+    static func validateRawAttachmentDispatchInvariant(_ args: [String: Value]) throws {
+        guard args[OracleAttachmentContract.argumentName] == nil else {
             throw ChatToolError.internalError(
-                "Raw ask_oracle image arguments must be consumed before Oracle dispatch."
+                "Raw ask_oracle attachment arguments must be consumed before Oracle dispatch."
             )
         }
     }
@@ -836,7 +836,7 @@ extension OracleViewModel {
     {
         try contextBuilderScope?.checkpoint()
         // ────────── 1. Validate & extract parameters ──────────
-        try Self.validateRawImageDispatchInvariant(args)
+        try Self.validateRawAttachmentDispatchInvariant(args)
         let removedArgs = ["selected_paths", "git_scope", "git_base"].filter { args[$0] != nil }
         if !removedArgs.isEmpty {
             throw ChatToolError.invalidParams(
