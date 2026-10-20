@@ -71,6 +71,10 @@ package struct AttachmentPresentation: Equatable {
     package let status: AttachmentStatus
     package let accessibilityLabel: String
 
+    package var refusalReason: String? {
+        if case let .refused(reason) = status { reason } else { nil }
+    }
+
     package static let previewUnavailableCaption = "Preview unavailable"
     private static let maxBadgeLength = 6
 

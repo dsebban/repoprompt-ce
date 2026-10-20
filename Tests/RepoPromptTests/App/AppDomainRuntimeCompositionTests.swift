@@ -473,7 +473,7 @@ extension DebugStateBootstrapTests {
         bitmap.setColor(.red, atX: 0, y: 0)
         let imageBytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
         try f.write(imageBytes, image)
-        let imported = try AgentAttachmentStore().importImageFile(sourceURL: image, workspaceDirectory: source)
+        let imported = try AgentAttachmentStore().importFile(sourceURL: image, workspaceDirectory: source)
         let external = AgentFileAttachment(source: .localFile(path: image.path))
         let remote = AgentFileAttachment(source: .url("https://example.invalid/image.png"))
         let item = AgentChatItem(kind: .user, text: imported.fileURL.path, attachments: [imported.attachment, external, remote])

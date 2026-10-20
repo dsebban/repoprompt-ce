@@ -558,7 +558,7 @@ private struct ForkButtonOverlay: View {
     }
 }
 
-/// Ordered, bounded previews of this user message's image attachments.
+/// Ordered, bounded previews of this user message's attachments.
 private struct FileAttachmentStrip: View {
     let attachments: [AIChatFileAttachment]
 
@@ -566,20 +566,11 @@ private struct FileAttachmentStrip: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 6) {
                 ForEach(attachments) { attachment in
-                    Group {
-                        if let image = NSImage(data: attachment.thumbnailData) {
-                            Image(nsImage: image)
-                                .resizable()
-                                .aspectRatio(contentMode: .fill)
-                        } else {
-                            Image(systemName: "photo")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .frame(width: 48, height: 48)
-                    .clipped()
-                    .cornerRadius(8)
-                    .hoverTooltip("Attached image")
+                    AttachmentTile(
+                        facts: attachment.facts,
+                        preview: .rendered(attachment.thumbnailData),
+                        geometry: .chip
+                    )
                 }
             }
         }

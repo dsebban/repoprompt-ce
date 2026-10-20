@@ -1,5 +1,4 @@
 import Foundation
-import UniformTypeIdentifiers
 
 package struct AgentAttachmentStore {
     private static let attachmentsDirectoryName = "agent_attachments"
@@ -11,17 +10,17 @@ package struct AgentAttachmentStore {
 
     package enum Error: LocalizedError {
         case invalidSourceURL
-        case sourceIsNotImage
+        case sourceIsNotFile
         case failedToCopy
 
         package var errorDescription: String? {
             switch self {
             case .invalidSourceURL:
-                "Image source must be a local file URL."
-            case .sourceIsNotImage:
-                "Only image files can be attached."
+                "Attachment source must be a local file URL."
+            case .sourceIsNotFile:
+                "Only files can be attached, not folders."
             case .failedToCopy:
-                "Failed to import the selected image."
+                "Failed to import the selected file."
             }
         }
     }
@@ -36,22 +35,24 @@ package struct AgentAttachmentStore {
             .standardizedFileURL
     }
 
-    package func importImageFile(sourceURL: URL, workspaceDirectory: URL) throws -> ImportResult {
+    /// Copies any regular file into managed storage and records what it is. The kind comes from the
+    /// file's bytes through `AttachmentClassifier`, never from its extension.
+    package func importFile(sourceURL: URL, workspaceDirectory: URL) throws -> ImportResult {
         let sourceURL = sourceURL.standardizedFileURL
         guard sourceURL.isFileURL else {
             throw Error.invalidSourceURL
         }
-        guard isImageFile(at: sourceURL) else {
-            throw Error.sourceIsNotImage
+        guard let byteCount = regularFileByteCount(at: sourceURL) else {
+            throw Error.sourceIsNotFile
         }
 
         let storageRoot = Self.managedStorageRootURL(for: workspaceDirectory)
         try fileManager.createDirectory(at: storageRoot, withIntermediateDirectories: true)
 
-        let fileExtension = normalizedFileExtension(for: sourceURL)
+        let kind = classifiedKind(of: sourceURL, byteCount: byteCount)
         let destinationURL = storageRoot
             .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension(fileExtension)
+            .appendingPathExtension(fileExtension(for: sourceURL, kind: kind))
 
         do {
             try fileManager.copyItem(at: sourceURL, to: destinationURL)
@@ -61,7 +62,10 @@ package struct AgentAttachmentStore {
 
         let attachment = AgentFileAttachment(
             source: .localFile(path: destinationURL.path),
-            title: sourceURL.lastPathComponent
+            title: sourceURL.lastPathComponent,
+            kind: kind,
+            fileName: sourceURL.lastPathComponent,
+            byteCount: byteCount
         )
         return ImportResult(attachment: attachment, fileURL: destinationURL)
     }
@@ -84,21 +88,33 @@ package struct AgentAttachmentStore {
         }
     }
 
-    private func normalizedFileExtension(for sourceURL: URL) -> String {
+    private func regularFileByteCount(at url: URL) -> Int? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey]),
+              values.isRegularFile == true
+        else { return nil }
+        return values.fileSize ?? 0
+    }
+
+    /// Reads at most one request's worth of the file, so a very large file is named from its prefix
+    /// instead of being loaded whole.
+    private func classifiedKind(of url: URL, byteCount: Int) -> AttachmentKind {
+        let probeLimit = OracleAttachmentLimits.production.maxBytesPerFile
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return .binary }
+        defer { try? handle.close() }
+        let probe = (try? handle.read(upToCount: probeLimit)) ?? Data()
+        return AttachmentClassifier.kind(ofProbe: probe, totalByteCount: max(byteCount, probe.count))
+    }
+
+    private func fileExtension(for sourceURL: URL, kind: AttachmentKind) -> String {
         let ext = sourceURL.pathExtension.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if !ext.isEmpty {
             return ext
         }
-        return "png"
-    }
-
-    private func isImageFile(at url: URL) -> Bool {
-        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
-            return type.conforms(to: .image)
+        switch kind {
+        case .image: return "png"
+        case .pdf: return "pdf"
+        case .text: return "txt"
+        case .binary: return "bin"
         }
-        if let type = UTType(filenameExtension: url.pathExtension) {
-            return type.conforms(to: .image)
-        }
-        return false
     }
 }

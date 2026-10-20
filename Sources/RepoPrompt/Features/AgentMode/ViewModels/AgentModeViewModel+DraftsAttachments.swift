@@ -220,11 +220,11 @@ extension AgentModeViewModel {
         )
     }
 
-    func attachImages(tabID: UUID, urls: [URL]) {
+    func attachFiles(tabID: UUID, urls: [URL]) {
         guard !urls.isEmpty else { return }
         let session = session(for: tabID)
         guard let workspaceDirectory = attachmentWorkspaceDirectoryURL() else {
-            let errorItem = AgentChatItem.error("Images require an active workspace.", sequenceIndex: session.nextSequenceIndex)
+            let errorItem = AgentChatItem.error("Attachments require an active workspace.", sequenceIndex: session.nextSequenceIndex)
             session.appendItem(errorItem)
             updateBindingsFromSession(session)
             scheduleSave(for: tabID)
@@ -262,7 +262,7 @@ extension AgentModeViewModel {
             }
 
             do {
-                let result = try attachmentStore.importImageFile(sourceURL: standardizedSourceURL, workspaceDirectory: workspaceDirectory)
+                let result = try attachmentStore.importFile(sourceURL: standardizedSourceURL, workspaceDirectory: workspaceDirectory)
                 if !standardizedSourceURL.path.isEmpty {
                     seenSourcePaths.insert(standardizedSourceURL.path)
                 }
@@ -278,7 +278,7 @@ extension AgentModeViewModel {
 
                 importedAttachments.append(result.attachment)
             } catch {
-                let fileName = standardizedSourceURL.lastPathComponent.isEmpty ? "image" : standardizedSourceURL.lastPathComponent
+                let fileName = standardizedSourceURL.lastPathComponent.isEmpty ? "file" : standardizedSourceURL.lastPathComponent
                 let errorItem = AgentChatItem.error("Failed to attach \(fileName): \(error.localizedDescription)", sequenceIndex: session.nextSequenceIndex)
                 session.appendItem(errorItem)
             }
@@ -296,7 +296,7 @@ extension AgentModeViewModel {
         scheduleSave(for: tabID)
     }
 
-    func removePendingImage(tabID: UUID, attachmentID: UUID) {
+    func removePendingFileAttachment(tabID: UUID, attachmentID: UUID) {
         let session = session(for: tabID)
         let beforeCount = session.pendingFileAttachments.count
         session.pendingFileAttachments.removeAll { $0.id == attachmentID }
@@ -308,7 +308,7 @@ extension AgentModeViewModel {
         scheduleSave(for: tabID)
     }
 
-    func clearPendingImages(tabID: UUID) {
+    func clearPendingFileAttachments(tabID: UUID) {
         let session = session(for: tabID)
         guard !session.pendingFileAttachments.isEmpty else {
             return

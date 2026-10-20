@@ -41,7 +41,8 @@ extension AgentModeViewModel {
             attachments: AgentAttachmentStripSnapshot(
                 scopeTabID: tabID,
                 attachments: pendingFileAttachments,
-                taggedFileAttachments: pendingTaggedFileAttachments
+                taggedFileAttachments: pendingTaggedFileAttachments,
+                route: selectedAgent.attachmentRoute
             ),
             runState: runState,
             cancelTarget: cancelTarget,

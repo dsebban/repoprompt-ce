@@ -50,6 +50,24 @@ package enum AttachmentClassifier {
         return .binary(bytes)
     }
 
+    /// The kind `classify` produces, without converting anything, so intake can name a file's kind
+    /// cheaply. Exact when `probe` is the whole file; when it is only a prefix, `totalByteCount` is the
+    /// full size and the answer is a best guess from the prefix.
+    package static func kind(ofProbe probe: Data, totalByteCount: Int) -> AttachmentKind {
+        let header = Data(probe.prefix(headerByteCount))
+        if sniffImage(header, totalByteCount: totalByteCount) != nil { return .image }
+        if header.starts(with: pdfSignature) { return .pdf }
+        let isPrefix = totalByteCount > probe.count
+        return decodesAsText(probe, allowingCutTail: isPrefix) ? .text : .binary
+    }
+
+    private static func decodesAsText(_ bytes: Data, allowingCutTail: Bool) -> Bool {
+        guard !bytes.prefix(textProbeByteCount).contains(0) else { return false }
+        // A prefix of a UTF-8 file can end inside a code point.
+        let maxCut = allowingCutTail ? min(3, bytes.count) : 0
+        return (0...maxCut).contains { String(data: bytes.dropLast($0), encoding: .utf8) != nil }
+    }
+
     private static func decodeText(_ bytes: Data) -> String? {
         guard !bytes.prefix(textProbeByteCount).contains(0) else { return nil }
         return String(data: bytes, encoding: .utf8)

@@ -2497,7 +2497,7 @@ final class CodexNativeSessionController {
     ) throws -> [[String: Any]] {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         var input: [[String: Any]] = []
-        for attachment in attachments {
+        for attachment in attachments where attachment.kind == .image {
             switch attachment.source {
             case let .localFile(path):
                 guard let path = nonEmptyString(path) else { continue }

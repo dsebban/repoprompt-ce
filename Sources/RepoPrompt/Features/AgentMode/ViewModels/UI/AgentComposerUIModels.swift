@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptDomainRuntime
 import RepoPromptSettingsCore
 
 struct AgentComposerDraftRestorationOperation: Equatable {
@@ -402,4 +403,17 @@ struct AgentComposerProps: Equatable {
             worktreeBindings: []
         ).identity
     )
+}
+
+extension AgentProviderKind {
+    /// The route that carries this agent's attachments, so the composer can warn before send about a
+    /// file the capability table says it cannot carry.
+    var attachmentRoute: AttachmentRoute {
+        switch self {
+        case .claudeCode, .claudeCodeGLM, .kimiCode, .customClaudeCompatible: .claudeCodeStreamJSON
+        case .codexExec: .codexAppServer
+        case .openCode, .cursor, .devin, .antigravity: .acp
+        case .grokBuild: .grokBuild
+        }
+    }
 }

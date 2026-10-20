@@ -1,5 +1,6 @@
 import Foundation
 @testable import RepoPromptApp
+import RepoPromptDomainRuntime
 import XCTest
 
 @MainActor
@@ -195,5 +196,56 @@ final class AgentComposerDraftRestorationTests: XCTestCase {
                 UnsupportedHeadlessAgentProvider(reason: "draft restoration test")
             }
         )
+    }
+}
+
+final class AgentAttachmentComposerWarningTests: XCTestCase {
+    private func attachment(kind: AttachmentKind, fileName: String) -> AgentFileAttachment {
+        AgentFileAttachment(
+            source: .localFile(path: "/tmp/managed/\(UUID().uuidString)"),
+            title: fileName,
+            kind: kind,
+            fileName: fileName,
+            byteCount: 1024
+        )
+    }
+
+    private func isWarned(_ attachment: AgentFileAttachment, agent: AgentProviderKind) -> Bool {
+        AttachmentPresentation.make(
+            facts: attachment.facts,
+            preview: .available,
+            route: agent.attachmentRoute
+        ).refusalReason != nil
+    }
+
+    func testEveryAgentResolvesToARouteWhoseCapabilityRowDecidesTheWarning() {
+        let pdf = attachment(kind: .pdf, fileName: "spec.pdf")
+        for agent in AgentProviderKind.allCases {
+            let capability = AttachmentRouteCapability.capability(for: agent.attachmentRoute)
+            let cannotCarry = switch capability.pdf {
+            case .nativeDocument: false
+            case .unsupported: true
+            }
+            XCTAssertEqual(isWarned(pdf, agent: agent), cannotCarry, "\(agent)")
+        }
+    }
+
+    func testSwitchingAgentChangesTheStripSnapshotSoTheWarningRedraws() {
+        let files = [attachment(kind: .pdf, fileName: "spec.pdf")]
+        let first = AgentAttachmentStripSnapshot(attachments: files, taggedFileAttachments: [], route: .grokBuild)
+        let second = AgentAttachmentStripSnapshot(attachments: files, taggedFileAttachments: [], route: .acp)
+        XCTAssertNotEqual(first, second)
+        XCTAssertEqual(first, AgentAttachmentStripSnapshot(attachments: files, taggedFileAttachments: [], route: .grokBuild))
+    }
+
+    func testLegacyAgentAttachmentDecodesAsAnImageWithItsTitleAsTheName() throws {
+        let id = UUID()
+        let json = """
+        {"id":"\(id.uuidString)","source":{"localFile":{"path":"/tmp/x.png"}},"title":"shot.png","createdAt":0}
+        """
+        let decoded = try JSONDecoder().decode(AgentFileAttachment.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.kind, .image)
+        XCTAssertEqual(decoded.facts.fileName, "shot.png")
+        XCTAssertEqual(decoded.byteCount, 0)
     }
 }

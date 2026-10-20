@@ -19506,7 +19506,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
                 bubbleText = trimmedText
             }
         } else if !attachmentsToSend.isEmpty {
-            bubbleText = "Sent \(attachmentsToSend.count) image\(attachmentsToSend.count == 1 ? "" : "s")"
+            bubbleText = "Sent \(attachmentsToSend.count) attachment\(attachmentsToSend.count == 1 ? "" : "s")"
         } else {
             bubbleText = "Included \(taggedFilesToSend.count) file\(taggedFilesToSend.count == 1 ? "" : "s")"
         }
@@ -20570,7 +20570,7 @@ final class AgentModeViewModel: ObservableObject, CodexManagedSessionShutdownPar
     }
 
     static let attachmentPathNoteHeader =
-        "Attached image files (to share one with the Oracle, pass its path in ask_oracle `images`):"
+        "Attached files (to share one with the Oracle, pass its path in ask_oracle `attachments`):"
 
     private func renderAttachmentPathNote(text: String, attachments: [AgentFileAttachment]) -> String {
         let paths = attachments.compactMap { attachment -> String? in
