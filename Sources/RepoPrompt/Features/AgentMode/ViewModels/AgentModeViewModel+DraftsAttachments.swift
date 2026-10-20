@@ -301,7 +301,9 @@ extension AgentModeViewModel {
         var outcome = AgentAttachmentIntakeOutcome(imported: [], failures: [])
         for sourceURL in urls {
             let standardizedSourceURL = sourceURL.standardizedFileURL
+            let displayName = standardizedSourceURL.lastPathComponent.isEmpty ? "file" : standardizedSourceURL.lastPathComponent
             if seenSourcePaths.contains(standardizedSourceURL.path) {
+                outcome.failures.append(AgentAttachmentFailure(fileName: displayName, reason: "it is already attached."))
                 continue
             }
             do {
@@ -309,6 +311,7 @@ extension AgentModeViewModel {
                 let admitted = try store.admit(sourceURL: standardizedSourceURL)
                 let identity = store.identity(of: admitted.url, fileName: admitted.url.lastPathComponent)
                 if let identity, seenIdentities.contains(identity) {
+                    outcome.failures.append(AgentAttachmentFailure(fileName: displayName, reason: "it is already attached."))
                     continue
                 }
                 let result = try store.importFile(sourceURL: admitted.url, workspaceDirectory: workspaceDirectory)
@@ -318,8 +321,7 @@ extension AgentModeViewModel {
                 }
                 outcome.imported.append(result.attachment)
             } catch {
-                let fileName = standardizedSourceURL.lastPathComponent.isEmpty ? "file" : standardizedSourceURL.lastPathComponent
-                outcome.failures.append(AgentAttachmentFailure(fileName: fileName, reason: error.localizedDescription))
+                outcome.failures.append(AgentAttachmentFailure(fileName: displayName, reason: error.localizedDescription))
             }
         }
         return outcome

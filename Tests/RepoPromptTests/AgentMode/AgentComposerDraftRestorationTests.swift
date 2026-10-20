@@ -293,7 +293,7 @@ final class AgentAttachmentIntakeTests: XCTestCase {
         XCTAssertEqual(names, ["config.dev.json", "config.prod.json"])
     }
 
-    func testReattachingTheSameFileDoesNotDuplicateIt() async throws {
+    func testReattachingTheSameFileSaysSoInsteadOfVanishing() async throws {
         let file = root.appendingPathComponent("table.csv")
         try Data("a,b\n1,2\n".utf8).write(to: file)
 
@@ -303,6 +303,8 @@ final class AgentAttachmentIntakeTests: XCTestCase {
         await viewModel.attachFiles(tabID: tabID, urls: [file]).value
 
         XCTAssertEqual(viewModel.session(for: tabID).pendingFileAttachments.map(\.fileName), ["table.csv"])
+        let notices = viewModel.session(for: tabID).items.filter { $0.kind == .error }.map(\.text)
+        XCTAssertEqual(notices, ["Failed to attach table.csv: it is already attached."])
     }
 
     func testDroppedFolderIsRefusedWithAReadableReason() async throws {
