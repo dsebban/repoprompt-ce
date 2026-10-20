@@ -385,8 +385,8 @@ struct MessageBubble: View {
                 } else {
                     // Normal view mode
                     VStack(alignment: .trailing, spacing: 6) {
-                        if !message.imageAttachments.isEmpty {
-                            ImageAttachmentStrip(attachments: message.imageAttachments)
+                        if !message.fileAttachments.isEmpty {
+                            FileAttachmentStrip(attachments: message.fileAttachments)
                         }
                         CollapsibleUserMessage(text: message.content)
                     }
@@ -559,8 +559,8 @@ private struct ForkButtonOverlay: View {
 }
 
 /// Ordered, bounded previews of this user message's image attachments.
-private struct ImageAttachmentStrip: View {
-    let attachments: [AIChatImageAttachment]
+private struct FileAttachmentStrip: View {
+    let attachments: [AIChatFileAttachment]
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {

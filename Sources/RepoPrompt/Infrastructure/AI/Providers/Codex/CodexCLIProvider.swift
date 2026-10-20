@@ -22,8 +22,8 @@ final class CodexCLIProvider: AIProvider {
         }
     }
 
-    private static func attachments(for staging: OracleTransientImageStaging?) -> [AgentImageAttachment] {
-        staging?.files.map { AgentImageAttachment(source: .localFile(path: $0.path), title: $0.title) } ?? []
+    private static func attachments(for staging: OracleTransientImageStaging?) -> [AgentFileAttachment] {
+        staging?.files.map { AgentFileAttachment(source: .localFile(path: $0.path), title: $0.title) } ?? []
     }
 
     private struct ReconciledTerminalTurn: Equatable {
@@ -158,7 +158,7 @@ final class CodexCLIProvider: AIProvider {
     func streamMessage(_ aiMessage: AIMessage, model: AIModel, maxTokens _: Int? = nil) async throws -> AsyncThrowingStream<AIStreamResult, Error> {
         let baseInstructions = buildBaseInstructions(from: aiMessage)
         let planned = try AttachmentEncoding.plan(aiMessage.attachments, route: .codexAppServer)
-        let prompt = promptAppendingImageTitles(buildPrompt(from: aiMessage, planned: planned), planned: planned)
+        let prompt = promptAppendingAttachmentTitles(buildPrompt(from: aiMessage, planned: planned), planned: planned)
         let requestedModelIdentifier = modelIdentifier(for: model)
         let fallbackReasoningEffort = model.defaultReasoningEffort
         let serviceTier = model.codexServiceTier
@@ -181,7 +181,7 @@ final class CodexCLIProvider: AIProvider {
                     try await streamViaAppServer(
                         baseInstructions: baseInstructions,
                         prompt: prompt,
-                        images: Self.attachments(for: imageStaging),
+                        attachments: Self.attachments(for: imageStaging),
                         requestedModelIdentifier: requestedModelIdentifier,
                         fallbackReasoningEffort: fallbackReasoningEffort,
                         serviceTier: serviceTier,
@@ -334,7 +334,7 @@ final class CodexCLIProvider: AIProvider {
     private func streamViaAppServer(
         baseInstructions: String,
         prompt: String,
-        images: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         requestedModelIdentifier: String?,
         fallbackReasoningEffort: String?,
         serviceTier: String?,
@@ -359,7 +359,7 @@ final class CodexCLIProvider: AIProvider {
                     try await runSingleStreamAttempt(
                         baseInstructions: baseInstructions,
                         prompt: prompt,
-                        images: images,
+                        attachments: attachments,
                         requestedModelIdentifier: activeModelIdentifier,
                         fallbackReasoningEffort: fallbackReasoningEffort,
                         serviceTier: serviceTier,
@@ -455,7 +455,7 @@ final class CodexCLIProvider: AIProvider {
     private func runSingleStreamAttempt(
         baseInstructions: String,
         prompt: String,
-        images: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         requestedModelIdentifier: String?,
         fallbackReasoningEffort: String?,
         serviceTier: String?,
@@ -497,7 +497,7 @@ final class CodexCLIProvider: AIProvider {
                 )
                 let turnReceipt = try await controller.startUserTurn(
                     text: prompt,
-                    images: images,
+                    attachments: attachments,
                     model: selection.model,
                     reasoningEffort: selection.reasoningEffort,
                     serviceTier: selection.serviceTier
@@ -704,7 +704,7 @@ final class CodexCLIProvider: AIProvider {
                 )
                 _ = try await controller.startUserTurn(
                     text: prompt,
-                    images: [],
+                    attachments: [],
                     model: selection.model,
                     reasoningEffort: selection.reasoningEffort,
                     serviceTier: selection.serviceTier
@@ -1056,7 +1056,7 @@ final class CodexCLIProvider: AIProvider {
         aiMessage.systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func promptAppendingImageTitles(_ prompt: String, planned: [PlannedAttachment]) -> String {
+    private func promptAppendingAttachmentTitles(_ prompt: String, planned: [PlannedAttachment]) -> String {
         let titles = planned.compactMap(\.titleAnnotation)
         guard !titles.isEmpty else { return prompt }
         return ([prompt] + titles).filter { !$0.isEmpty }.joined(separator: "\n\n")

@@ -1,19 +1,19 @@
 import Foundation
 
-public enum AgentImageSource: Codable, Sendable, Equatable {
+public enum AgentAttachmentSource: Codable, Sendable, Equatable {
     case localFile(path: String)
     case url(String)
 }
 
-public struct AgentImageAttachment: Codable, Identifiable, Sendable, Equatable {
+public struct AgentFileAttachment: Codable, Identifiable, Sendable, Equatable {
     public let id: UUID
-    public let source: AgentImageSource
+    public let source: AgentAttachmentSource
     public let title: String?
     public let createdAt: Date
 
     public init(
         id: UUID = UUID(),
-        source: AgentImageSource,
+        source: AgentAttachmentSource,
         title: String? = nil,
         createdAt: Date = Date()
     ) {

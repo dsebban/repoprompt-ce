@@ -823,7 +823,7 @@ import XCTest
 #endif
 
 @MainActor
-final class OracleImageContractTests: XCTestCase {
+final class OracleAttachmentContractTests: XCTestCase {
     func testParserAcceptsOnlyBoundedPathAndOptionalTitleObjects() throws {
         XCTAssertEqual(try OracleAttachmentContract.parse(nil), [])
         XCTAssertEqual(try OracleAttachmentContract.parse(.array([])), [])

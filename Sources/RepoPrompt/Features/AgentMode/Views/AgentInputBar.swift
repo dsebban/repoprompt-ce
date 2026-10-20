@@ -330,8 +330,8 @@ struct AgentComposerView: View, Equatable {
         )
     }
 
-    private var hasPendingImageAttachments: Bool {
-        props.attachments.hasImages
+    private var hasPendingFileAttachments: Bool {
+        props.attachments.hasAttachments
     }
 
     private var hasPendingTaggedFileAttachments: Bool {
@@ -339,7 +339,7 @@ struct AgentComposerView: View, Equatable {
     }
 
     private var hasPendingAttachments: Bool {
-        hasPendingImageAttachments || hasPendingTaggedFileAttachments
+        hasPendingFileAttachments || hasPendingTaggedFileAttachments
     }
 
     private var isCodexRunActive: Bool {
@@ -418,7 +418,7 @@ struct AgentComposerView: View, Equatable {
 
     private var mainContentHeight: CGFloat {
         editorTextFieldHeight + AgentAttachmentStripLayout.reservedHeight(
-            hasImages: hasPendingImageAttachments,
+            hasAttachments: hasPendingFileAttachments,
             hasTaggedFiles: hasPendingTaggedFileAttachments
         ) + steeringUnsupportedInfoBoxReservedHeight
     }
@@ -622,7 +622,7 @@ struct AgentComposerView: View, Equatable {
                 AgentAttachmentsStrip(
                     snapshot: props.attachments,
                     allowsRemoval: true,
-                    onRemoveImage: removeImageAttachment,
+                    onRemoveAttachment: removeAttachment,
                     onRemoveTaggedFile: removeTaggedFileAttachment
                 )
                 .equatable()
@@ -1783,7 +1783,7 @@ struct AgentComposerView: View, Equatable {
         actions.commitTaggedFile(tabID, suggestion, attachmentDisplayName)
     }
 
-    private func removeImageAttachment(_ attachmentID: UUID) {
+    private func removeAttachment(_ attachmentID: UUID) {
         guard let tabID = currentTabID else { return }
         actions.removeImage(tabID, attachmentID)
     }

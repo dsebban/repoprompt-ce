@@ -15,7 +15,7 @@ package enum ACPPromptContentBuilder {
 
     package static func blocks(
         text: String,
-        attachments: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         oracleAttachments: [OracleAttachment] = []
     ) throws -> [[String: Any]] {
         let planned = try AttachmentEncoding.plan(oracleAttachments, route: .acp)
@@ -57,7 +57,7 @@ package enum ACPPromptContentBuilder {
         return blocks
     }
 
-    private static func imageBlock(for attachment: AgentImageAttachment) throws -> [String: Any]? {
+    private static func imageBlock(for attachment: AgentFileAttachment) throws -> [String: Any]? {
         switch attachment.source {
         case let .localFile(rawPath):
             let path = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)

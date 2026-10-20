@@ -119,7 +119,7 @@ Feature map (app-backed only):
 
 Tool discovery and CLI help (`rpce-cli-debug -l` / `-e 'describe oracle_send'`; `describe ask_oracle` on the owning Agent Mode connection) consume the app's tool schema; direct-headless discovery uses the canonical schema and explicitly rejects `attachments`. The generated reference is `docs/spec/mcp-domain-canonical-tool-definitions.generated.json`. Neither CLI adds automatic attachment forwarding: the agent must supply `attachments:[{path,title?}]`.
 
-`make dev-test FILTER='OracleGroupBoundaryTests|OracleImageContractTests|MCPAskOracleWorktreeTests|OracleImageAttachmentLoaderTests'` exercises image loading, start/continuation dispatch, invalid-path rejection, and transcript redaction. The dispatch fixture captures original bytes without a provider call; it is not live image-delivery proof.
+`make dev-test FILTER='OracleGroupBoundaryTests|OracleAttachmentContractTests|MCPAskOracleWorktreeTests|OracleImageAttachmentLoaderTests'` exercises image loading, start/continuation dispatch, invalid-path rejection, and transcript redaction. The dispatch fixture captures original bytes without a provider call; it is not live image-delivery proof.
 
 Ordinary smoke and packaged initialize/tools-list are **not image-delivery proof**.
 Ordinary CLI connections use `oracle_send`; `ask_oracle` requires an owning Agent Mode session. Both accept images on starts and continuations, and apply the same workspace-root, exact session-attachment, and provider capability checks. Supply a fresh `mode:"chat"`,

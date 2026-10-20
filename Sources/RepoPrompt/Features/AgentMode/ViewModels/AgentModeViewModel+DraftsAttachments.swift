@@ -68,18 +68,18 @@ extension AgentModeViewModel {
         tabID: UUID,
         session: TabSession,
         draftText: String,
-        images: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         taggedFiles: [AgentTaggedFileAttachment],
         selectedWorkflow workflow: AgentWorkflowDefinition?,
         selectedWorkflowMutationGeneration: UInt64?,
         message: String
     ) {
         var sessionChanged = false
-        if !images.isEmpty {
-            let existingImageIDs = Set(session.pendingImageAttachments.map(\.id))
-            let restoredImages = images.filter { !existingImageIDs.contains($0.id) }
+        if !attachments.isEmpty {
+            let existingImageIDs = Set(session.pendingFileAttachments.map(\.id))
+            let restoredImages = attachments.filter { !existingImageIDs.contains($0.id) }
             if !restoredImages.isEmpty {
-                session.pendingImageAttachments = restoredImages + session.pendingImageAttachments
+                session.pendingFileAttachments = restoredImages + session.pendingFileAttachments
                 sessionChanged = true
             }
         }
@@ -232,19 +232,19 @@ extension AgentModeViewModel {
         }
 
         var seenSourcePaths: Set<String> = []
-        var seenFingerprints: Set<ImageAttachmentFingerprint> = []
-        for attachment in session.pendingImageAttachments {
+        var seenFingerprints: Set<FileAttachmentFingerprint> = []
+        for attachment in session.pendingFileAttachments {
             guard case let .localFile(path) = attachment.source else { continue }
             let fileURL = URL(fileURLWithPath: path).standardizedFileURL
             if !fileURL.path.isEmpty {
                 seenSourcePaths.insert(fileURL.path)
             }
-            if let fingerprint = imageAttachmentFingerprint(for: fileURL) {
+            if let fingerprint = fileAttachmentFingerprint(for: fileURL) {
                 seenFingerprints.insert(fingerprint)
             }
         }
 
-        var importedAttachments: [AgentImageAttachment] = []
+        var importedAttachments: [AgentFileAttachment] = []
 
         for sourceURL in urls {
             let standardizedSourceURL = sourceURL.standardizedFileURL
@@ -254,7 +254,7 @@ extension AgentModeViewModel {
                 continue
             }
 
-            let sourceFingerprint = imageAttachmentFingerprint(for: standardizedSourceURL)
+            let sourceFingerprint = fileAttachmentFingerprint(for: standardizedSourceURL)
             if let sourceFingerprint,
                seenFingerprints.contains(sourceFingerprint)
             {
@@ -267,7 +267,7 @@ extension AgentModeViewModel {
                     seenSourcePaths.insert(standardizedSourceURL.path)
                 }
 
-                let importedFingerprint = sourceFingerprint ?? imageAttachmentFingerprint(for: result.fileURL)
+                let importedFingerprint = sourceFingerprint ?? fileAttachmentFingerprint(for: result.fileURL)
                 if let importedFingerprint {
                     if seenFingerprints.contains(importedFingerprint) {
                         try? FileManager.default.removeItem(at: result.fileURL)
@@ -290,7 +290,7 @@ extension AgentModeViewModel {
             return
         }
 
-        session.pendingImageAttachments.append(contentsOf: importedAttachments)
+        session.pendingFileAttachments.append(contentsOf: importedAttachments)
         session.isDirty = true
         updateBindingsFromSession(session)
         scheduleSave(for: tabID)
@@ -298,9 +298,9 @@ extension AgentModeViewModel {
 
     func removePendingImage(tabID: UUID, attachmentID: UUID) {
         let session = session(for: tabID)
-        let beforeCount = session.pendingImageAttachments.count
-        session.pendingImageAttachments.removeAll { $0.id == attachmentID }
-        guard session.pendingImageAttachments.count != beforeCount else {
+        let beforeCount = session.pendingFileAttachments.count
+        session.pendingFileAttachments.removeAll { $0.id == attachmentID }
+        guard session.pendingFileAttachments.count != beforeCount else {
             return
         }
         session.isDirty = true
@@ -310,10 +310,10 @@ extension AgentModeViewModel {
 
     func clearPendingImages(tabID: UUID) {
         let session = session(for: tabID)
-        guard !session.pendingImageAttachments.isEmpty else {
+        guard !session.pendingFileAttachments.isEmpty else {
             return
         }
-        session.pendingImageAttachments.removeAll()
+        session.pendingFileAttachments.removeAll()
         session.isDirty = true
         updateBindingsFromSession(session)
         scheduleSave(for: tabID)
@@ -376,7 +376,7 @@ extension AgentModeViewModel {
         scheduleSave(for: tabID)
     }
 
-    private func imageAttachmentFingerprint(for fileURL: URL) -> ImageAttachmentFingerprint? {
+    private func fileAttachmentFingerprint(for fileURL: URL) -> FileAttachmentFingerprint? {
         let standardizedURL = fileURL.standardizedFileURL
         guard standardizedURL.isFileURL else { return nil }
         guard let attributes = try? FileManager.default.attributesOfItem(atPath: standardizedURL.path) else {
@@ -388,14 +388,14 @@ extension AgentModeViewModel {
         }
         let digest = SHA256.hash(data: data)
         let digestHex = digest.map { String(format: "%02x", $0) }.joined()
-        return ImageAttachmentFingerprint(byteCount: byteCount, digestHex: digestHex)
+        return FileAttachmentFingerprint(byteCount: byteCount, digestHex: digestHex)
     }
 
     private func attachmentWorkspaceDirectoryURL() -> URL? {
         attachmentWorkspaceDirectoryProvider()?.standardizedFileURL
     }
 
-    private func clearConsumedAttachmentFilesIfNeeded(_ attachments: [AgentImageAttachment]) {
+    private func clearConsumedAttachmentFilesIfNeeded(_ attachments: [AgentFileAttachment]) {
         guard clearConsumedAttachmentsAfterProviderConsumption else { return }
         guard !attachments.isEmpty else { return }
         guard let workspaceDirectory = attachmentWorkspaceDirectoryURL() else { return }
@@ -414,7 +414,7 @@ extension AgentModeViewModel {
         else { return [] }
         let storagePrefix = AgentAttachmentStore.managedStorageRootURL(for: workspaceDirectory).path + "/"
 
-        var candidates: [AgentImageAttachment] = []
+        var candidates: [AgentFileAttachment] = []
         switch session.attachmentTurnState {
         case .idle:
             break
@@ -441,7 +441,7 @@ extension AgentModeViewModel {
     }
 
     @discardableResult
-    func reserveAttachmentsForTurn(_ attachments: [AgentImageAttachment], session: TabSession) -> UUID? {
+    func reserveAttachmentsForTurn(_ attachments: [AgentFileAttachment], session: TabSession) -> UUID? {
         guard !attachments.isEmpty else {
             session.attachmentTurnState = .idle
             return nil
@@ -464,7 +464,7 @@ extension AgentModeViewModel {
         }
     }
 
-    func stageConsumedAttachmentFilesForDeferredCleanup(_ attachments: [AgentImageAttachment], session: TabSession) {
+    func stageConsumedAttachmentFilesForDeferredCleanup(_ attachments: [AgentFileAttachment], session: TabSession) {
         guard clearConsumedAttachmentsAfterProviderConsumption else { return }
         guard !attachments.isEmpty else { return }
         if session.attachmentsPendingProviderConsumptionCleanup.isEmpty {
@@ -488,7 +488,7 @@ extension AgentModeViewModel {
         reservationID: UUID? = nil,
         disposition: AttachmentTurnDisposition
     ) {
-        let attachments: [AgentImageAttachment]
+        let attachments: [AgentFileAttachment]
         switch session.attachmentTurnState {
         case .idle:
             if disposition == .deleteFiles {
@@ -505,10 +505,10 @@ extension AgentModeViewModel {
 
         switch disposition {
         case .restoreToPending:
-            let existingIDs = Set(session.pendingImageAttachments.map(\.id))
+            let existingIDs = Set(session.pendingFileAttachments.map(\.id))
             let unique = attachments.filter { !existingIDs.contains($0.id) }
             if !unique.isEmpty {
-                session.pendingImageAttachments = unique + session.pendingImageAttachments
+                session.pendingFileAttachments = unique + session.pendingFileAttachments
                 session.isDirty = true
             }
             consumeDeferredAttachmentCleanup(for: session, shouldDeleteFiles: false)

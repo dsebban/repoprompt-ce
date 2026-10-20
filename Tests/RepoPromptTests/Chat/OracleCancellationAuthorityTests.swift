@@ -41,7 +41,7 @@ final class OracleCancellationAuthorityTests: XCTestCase {
         await oracle.startNewChatSession(reuseBlankSession: false)
         let sessionID = try XCTUnwrap(oracle.currentSessionID)
         let original = OracleAttachment(payload: .image(.png, Data([1, 2, 3])), fileName: "image.png", title: "original")
-        var gates: [CheckedContinuation<[AIChatImageAttachment], Error>] = []
+        var gates: [CheckedContinuation<[AIChatFileAttachment], Error>] = []
         var sent: [AIMessage] = []
         oracle.oracleImageThumbnailsForTesting = { _ in
             try await withCheckedThrowingContinuation { gates.append($0) }
@@ -149,7 +149,7 @@ final class OracleCancellationAuthorityTests: XCTestCase {
             oracle.messagesSnapshot(for: sessionID).filter(\.isUser).map(\.content),
             ["newer", "text successor", "background", "latest"]
         )
-        XCTAssertTrue(oracle.messagesSnapshot(for: sessionID).filter(\.isUser).allSatisfy(\.imageAttachments.isEmpty))
+        XCTAssertTrue(oracle.messagesSnapshot(for: sessionID).filter(\.isUser).allSatisfy(\.fileAttachments.isEmpty))
 
         // This scenario purges a background session. Blank-session reuse can
         // otherwise keep the original foreground before autosave updates counts.
@@ -181,7 +181,7 @@ final class OracleCancellationAuthorityTests: XCTestCase {
         try await waitForCompletion(placeholderID, in: visibleSessionID)
         XCTAssertEqual(sent.count, 5)
         XCTAssertEqual(sent.last?.attachments.first?.bytes, original.bytes)
-        let previews = try XCTUnwrap(oracle.messagesSnapshot(for: visibleSessionID).first(where: \.isUser)?.imageAttachments)
+        let previews = try XCTUnwrap(oracle.messagesSnapshot(for: visibleSessionID).first(where: \.isUser)?.fileAttachments)
         XCTAssertEqual(previews.count, 1)
         XCTAssertTrue(previews[0].thumbnailData.isEmpty)
     }

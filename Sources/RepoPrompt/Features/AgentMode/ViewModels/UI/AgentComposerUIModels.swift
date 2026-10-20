@@ -366,7 +366,7 @@ struct AgentComposerProps: Equatable {
         currentTabID: nil,
         submitTarget: nil,
         attachments: AgentAttachmentStripSnapshot(
-            imageAttachments: [],
+            attachments: [],
             taggedFileAttachments: []
         ),
         runState: .idle,

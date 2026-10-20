@@ -422,7 +422,7 @@ actor MessageFinalisationHub {
 }
 
 private struct SessionRunState {
-    var pendingImagePreparationID: UUID?
+    var pendingAttachmentPreparationID: UUID?
     var activeQueryId: UUID?
     var activeStreamId: ChatStreamID?
     var isStreaming: Bool {
@@ -1090,7 +1090,7 @@ class OracleViewModel: ObservableObject {
             stream: AsyncThrowingStream<ChatStreamOutput, Error>
         )
 
-        var oracleImageThumbnailsForTesting: (@MainActor ([OracleAttachment]) async throws -> [AIChatImageAttachment])?
+        var oracleImageThumbnailsForTesting: (@MainActor ([OracleAttachment]) async throws -> [AIChatFileAttachment])?
 
         var oracleReviewPackagingTraceObserverForTesting:
             OracleReviewPackagingTraceContext.Observer?
@@ -2497,7 +2497,7 @@ class OracleViewModel: ObservableObject {
                 timestamp: Date(),
                 sequenceIndex: msg.sequenceIndex,
                 allowedFilePaths: msg.allowedFilePaths.isEmpty ? nil : msg.allowedFilePaths,
-                imageAttachments: msg.imageAttachments.isEmpty ? nil : msg.imageAttachments,
+                fileAttachments: msg.fileAttachments.isEmpty ? nil : msg.fileAttachments,
                 promptTokens: msg.promptTokens,
                 completionTokens: msg.completionTokens,
                 cost: msg.cost,
@@ -3048,7 +3048,7 @@ class OracleViewModel: ObservableObject {
                 timestamp: Date(),
                 sequenceIndex: msg.sequenceIndex,
                 allowedFilePaths: msg.allowedFilePaths.isEmpty ? nil : msg.allowedFilePaths,
-                imageAttachments: msg.imageAttachments.isEmpty ? nil : msg.imageAttachments,
+                fileAttachments: msg.fileAttachments.isEmpty ? nil : msg.fileAttachments,
                 promptTokens: msg.promptTokens,
                 completionTokens: msg.completionTokens,
                 cost: msg.cost,
@@ -3279,37 +3279,37 @@ class OracleViewModel: ObservableObject {
         // Only suspend when images are attached so the text-only path keeps
         // creating the user message synchronously on the main actor.
         let preparationID = oracleAttachments.isEmpty ? nil : UUID()
-        runStateBySession[targetSessionID]?.pendingImagePreparationID = preparationID
+        runStateBySession[targetSessionID]?.pendingAttachmentPreparationID = preparationID
         defer {
             if let preparationID,
-               runStateBySession[targetSessionID]?.pendingImagePreparationID == preparationID
+               runStateBySession[targetSessionID]?.pendingAttachmentPreparationID == preparationID
             {
-                runStateBySession[targetSessionID]?.pendingImagePreparationID = nil
+                runStateBySession[targetSessionID]?.pendingAttachmentPreparationID = nil
             }
         }
-        let imageAttachments: [AIChatImageAttachment]
+        let fileAttachments: [AIChatFileAttachment]
         do {
             if oracleAttachments.isEmpty {
-                imageAttachments = []
+                fileAttachments = []
             } else {
                 #if DEBUG
                     if let override = oracleImageThumbnailsForTesting {
-                        imageAttachments = try await override(oracleAttachments)
+                        fileAttachments = try await override(oracleAttachments)
                     } else {
-                        imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleAttachments)
+                        fileAttachments = try await AIChatFileAttachment.thumbnails(from: oracleAttachments)
                     }
                 #else
-                    imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleAttachments)
+                    fileAttachments = try await AIChatFileAttachment.thumbnails(from: oracleAttachments)
                 #endif
             }
         } catch {
             return nil
         }
         guard !Task.isCancelled, contextBuilderScope?.isLive != false,
-              preparationID == nil || runStateBySession[targetSessionID]?.pendingImagePreparationID == preparationID
+              preparationID == nil || runStateBySession[targetSessionID]?.pendingAttachmentPreparationID == preparationID
         else { return nil }
         if preparationID != nil {
-            runStateBySession[targetSessionID]?.pendingImagePreparationID = nil
+            runStateBySession[targetSessionID]?.pendingAttachmentPreparationID = nil
         }
         let userId = UUID()
         let userMessage = AIChatMessage(
@@ -3317,7 +3317,7 @@ class OracleViewModel: ObservableObject {
             content: newUserMessage,
             isUser: true,
             sequenceIndex: nextSequenceIndex(for: targetSessionID),
-            imageAttachments: imageAttachments
+            fileAttachments: fileAttachments
         )
         withSessionMessages(targetSessionID) { msgs in
             msgs.append(userMessage)
@@ -4103,7 +4103,7 @@ class OracleViewModel: ObservableObject {
         cleanupOwnerIsCurrent: (@MainActor () -> Bool)? = nil
     ) async {
         guard cleanupOwnerIsCurrent?() != false else { return }
-        runStateBySession[sessionID]?.pendingImagePreparationID = nil
+        runStateBySession[sessionID]?.pendingAttachmentPreparationID = nil
         if let query = runStateBySession[sessionID]?.activeQueryId, let scope = contextBuilderScopes[query] {
             await scope.cancelAndDrain()
             return
@@ -4206,7 +4206,7 @@ class OracleViewModel: ObservableObject {
     func cancelAllActiveSessionStreams(cleanupOwnerIsCurrent: (@MainActor () -> Bool)? = nil) async {
         guard cleanupOwnerIsCurrent?() != false else { return }
         for sessionID in Array(runStateBySession.keys) {
-            runStateBySession[sessionID]?.pendingImagePreparationID = nil
+            runStateBySession[sessionID]?.pendingAttachmentPreparationID = nil
         }
         let activeSessions = Array(streamingSessions)
         for sessionID in activeSessions {
@@ -4224,7 +4224,7 @@ class OracleViewModel: ObservableObject {
             sequenceIndex: stored.sequenceIndex,
             allowedFilePaths: stored.allowedFilePaths ?? [],
             modelName: stored.modelName,
-            imageAttachments: stored.imageAttachments ?? []
+            fileAttachments: stored.fileAttachments ?? []
         )
 
         let tokenInfo = ChatTokenInfo(

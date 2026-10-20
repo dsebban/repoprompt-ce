@@ -120,7 +120,7 @@ struct MCPOracleToolService {
     func executeAskOracle(args: [String: Value], invocationContext: ToolInvocationContext) async throws -> Value {
         try Self.validateOracleArguments(toolName: MCPWindowToolName.askOracle, args: args)
         try validateCommonOracleArgs(args)
-        let imageRequests = try OracleAttachmentContract.parse(args[OracleAttachmentContract.argumentName])
+        let attachmentRequests = try OracleAttachmentContract.parse(args[OracleAttachmentContract.argumentName])
 
         guard let connectionID = invocationContext.connectionID else {
             throw MCPError.invalidParams("ask_oracle requires an active MCP connection")
@@ -179,7 +179,7 @@ struct MCPOracleToolService {
                 owner: owner,
                 origin: .askOracle,
                 mode: modeRaw,
-                imageRequests: imageRequests
+                attachmentRequests: attachmentRequests
             )
         } else {
             guard let tabSnapshot = targetWindow.workspaceManager.composeTabSnapshot(for: tabID) else {
@@ -187,10 +187,10 @@ struct MCPOracleToolService {
             }
             let lookupContext = try await oraclePackagingLookupContext(owner: owner)
             let attachments = try await loadOracleImages(
-                imageRequests,
+                attachmentRequests,
                 lookupContext: lookupContext,
                 sessionAttachmentPaths: sessionAttachmentPaths(
-                    for: imageRequests,
+                    for: attachmentRequests,
                     tabID: tabID,
                     owner: owner
                 )
@@ -301,7 +301,7 @@ struct MCPOracleToolService {
     func executeOracleSend(args: [String: Value], invocationContext: ToolInvocationContext) async throws -> Value {
         try Self.validateOracleArguments(toolName: MCPWindowToolName.oracleSend, args: args)
         try validateCommonOracleArgs(args)
-        let imageRequests = try OracleAttachmentContract.parse(args[OracleAttachmentContract.argumentName])
+        let attachmentRequests = try OracleAttachmentContract.parse(args[OracleAttachmentContract.argumentName])
         let message = (args["message"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         let modeRaw = args["mode"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "chat"
         let exportResponse = try parseExportResponseFlag(args)
@@ -352,14 +352,14 @@ struct MCPOracleToolService {
                 owner: owner,
                 origin: .oracleSend,
                 mode: modeRaw,
-                imageRequests: imageRequests
+                attachmentRequests: attachmentRequests
             )
         } else {
             tabContext = try await oracleSendTabContext(
                 from: context,
                 origin: .oracleSend,
                 mode: modeRaw,
-                imageRequests: imageRequests
+                attachmentRequests: attachmentRequests
             )
         }
 
@@ -730,15 +730,15 @@ struct MCPOracleToolService {
         ),
         origin: OracleSendOrigin,
         mode: String,
-        imageRequests: [OracleImageRequest] = []
+        attachmentRequests: [OracleAttachmentRequest] = []
     ) async throws -> OracleViewModel.OracleSendTabContext {
         let stabilizedContext = await stabilizedVirtualContext(context)
         let lookupContext = try await oraclePackagingLookupContext(for: stabilizedContext)
         let attachments = try await loadOracleImages(
-            imageRequests,
+            attachmentRequests,
             lookupContext: lookupContext,
             sessionAttachmentPaths: sessionAttachmentPaths(
-                for: imageRequests,
+                for: attachmentRequests,
                 tabID: stabilizedContext.tabID,
                 owner: owner
             )
@@ -782,7 +782,7 @@ struct MCPOracleToolService {
 
     /// Exact image files the owning Agent session attached itself; empty without an owner.
     private func sessionAttachmentPaths(
-        for requests: [OracleImageRequest],
+        for requests: [OracleAttachmentRequest],
         tabID: UUID,
         owner: AgentOracleOwner
     ) -> [String] {
@@ -794,7 +794,7 @@ struct MCPOracleToolService {
     }
 
     private func loadOracleImages(
-        _ requests: [OracleImageRequest],
+        _ requests: [OracleAttachmentRequest],
         lookupContext: WorkspaceLookupContext,
         sessionAttachmentPaths: [String]
     ) async throws -> [OracleAttachment] {

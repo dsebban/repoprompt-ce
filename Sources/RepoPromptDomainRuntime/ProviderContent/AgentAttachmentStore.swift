@@ -5,7 +5,7 @@ package struct AgentAttachmentStore {
     private static let attachmentsDirectoryName = "agent_attachments"
 
     package struct ImportResult {
-        package let attachment: AgentImageAttachment
+        package let attachment: AgentFileAttachment
         package let fileURL: URL
     }
 
@@ -59,14 +59,14 @@ package struct AgentAttachmentStore {
             throw Error.failedToCopy
         }
 
-        let attachment = AgentImageAttachment(
+        let attachment = AgentFileAttachment(
             source: .localFile(path: destinationURL.path),
             title: sourceURL.lastPathComponent
         )
         return ImportResult(attachment: attachment, fileURL: destinationURL)
     }
 
-    package func clearConsumedLocalFiles(_ attachments: [AgentImageAttachment], workspaceDirectory: URL) {
+    package func clearConsumedLocalFiles(_ attachments: [AgentFileAttachment], workspaceDirectory: URL) {
         guard !attachments.isEmpty else { return }
         let storageRoot = Self.managedStorageRootURL(for: workspaceDirectory)
         let storagePrefix = storageRoot.path + "/"

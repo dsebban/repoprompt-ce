@@ -162,7 +162,7 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
                     modelString: nil,
                     workspacePath: workspace.path,
                     resumeSessionID: nil,
-                    attachments: [AgentImageAttachment(source: .localFile(path: "/nonexistent-must-not-read.png"))],
+                    attachments: [AgentFileAttachment(source: .localFile(path: "/nonexistent-must-not-read.png"))],
                     taskLabelKind: nil
                 )
                 do {
@@ -196,7 +196,7 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
                 modelString: nil,
                 workspacePath: workspace.path,
                 resumeSessionID: nil,
-                attachments: [AgentImageAttachment(source: .localFile(path: "/must-not-read.png"))],
+                attachments: [AgentFileAttachment(source: .localFile(path: "/must-not-read.png"))],
                 taskLabelKind: nil
             )
             try await controller.promptAdvertisedCommand("compact", expectedSessionID: bootstrap.sessionID, request: inheritedAttachments)
@@ -223,7 +223,7 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
             modelString: nil,
             workspacePath: workspace.path,
             resumeSessionID: nil,
-            attachments: [AgentImageAttachment(source: .localFile(path: "/nonexistent-must-not-read.png"))],
+            attachments: [AgentFileAttachment(source: .localFile(path: "/nonexistent-must-not-read.png"))],
             taskLabelKind: nil
         )
         let controller = try ACPAgentSessionController(

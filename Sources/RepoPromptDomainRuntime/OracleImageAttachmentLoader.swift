@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 import RepoPromptWorkspaceCore
 
-package struct OracleImageRequest: Equatable {
+package struct OracleAttachmentRequest: Equatable {
     package let index: Int
     package let path: String
     package let title: String?
@@ -204,7 +204,7 @@ package struct OracleAttachmentLoader {
     }
 
     package static func loadDetached(
-        requests: [OracleImageRequest],
+        requests: [OracleAttachmentRequest],
         authority: OracleImageWorkspaceAuthority,
         loader: OracleAttachmentLoader = .init()
     ) async throws -> [OracleAttachment] {
@@ -297,7 +297,7 @@ package struct OracleAttachmentLoader {
     }
 
     package func load(
-        requests: [OracleImageRequest],
+        requests: [OracleAttachmentRequest],
         authority: OracleImageWorkspaceAuthority
     ) throws -> [OracleAttachment] {
         guard requests.count <= limits.maxCount else {
@@ -447,7 +447,7 @@ package struct OracleAttachmentLoader {
     }
 
     private struct OpenedImage {
-        let request: OracleImageRequest
+        let request: OracleAttachmentRequest
         let rootDescriptor: Int32
         let fileDescriptor: Int32
         let resolution: Resolution
@@ -472,7 +472,7 @@ package struct OracleAttachmentLoader {
     }
 
     private func resolve(
-        request: OracleImageRequest,
+        request: OracleAttachmentRequest,
         authority: OracleImageWorkspaceAuthority
     ) throws -> Resolution {
         let rawPath = request.path

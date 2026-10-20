@@ -441,7 +441,7 @@ final class DevinPermissionLevelTests: XCTestCase {
         XCTAssertTrue(prompt.contains("Do not use any tools"))
     }
 
-    func testOracleImageRequestCarriesImagesThroughToolLessACPMessage() {
+    func testOracleAttachmentsCarryThroughToolLessACPMessage() {
         let image = OracleAttachment(payload: .image(.png, Data([1, 2, 3])), fileName: "image.png", title: "Diagram")
         let message = DevinCLIProvider.test_makeImageAgentMessage(from: AIMessage(
             systemPrompt: "Return Markdown.",

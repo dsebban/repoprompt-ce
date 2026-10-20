@@ -4,21 +4,21 @@ import SwiftUI
 
 struct AgentAttachmentStripSnapshot: Equatable {
     let scopeTabID: UUID?
-    let imageAttachments: [AgentImageAttachment]
+    let attachments: [AgentFileAttachment]
     let taggedFileAttachments: [AgentTaggedFileAttachment]
 
     init(
         scopeTabID: UUID? = nil,
-        imageAttachments: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         taggedFileAttachments: [AgentTaggedFileAttachment]
     ) {
         self.scopeTabID = scopeTabID
-        self.imageAttachments = imageAttachments
+        self.attachments = attachments
         self.taggedFileAttachments = taggedFileAttachments
     }
 
-    var hasImages: Bool {
-        !imageAttachments.isEmpty
+    var hasAttachments: Bool {
+        !attachments.isEmpty
     }
 
     var hasTaggedFiles: Bool {
@@ -26,12 +26,12 @@ struct AgentAttachmentStripSnapshot: Equatable {
     }
 
     var hasAny: Bool {
-        hasImages || hasTaggedFiles
+        hasAttachments || hasTaggedFiles
     }
 
     static func == (lhs: AgentAttachmentStripSnapshot, rhs: AgentAttachmentStripSnapshot) -> Bool {
         lhs.scopeTabID == rhs.scopeTabID
-            && lhs.imageAttachments.map(\.id) == rhs.imageAttachments.map(\.id)
+            && lhs.attachments.map(\.id) == rhs.attachments.map(\.id)
             && lhs.taggedFileAttachments.map { TaggedFileRenderKey($0) } == rhs.taggedFileAttachments.map { TaggedFileRenderKey($0) }
     }
 
@@ -59,8 +59,8 @@ enum AgentAttachmentStripLayout {
 
     static let composerVerticalSpacingWhenPresent: CGFloat = 8
 
-    static func reservedHeight(hasImages: Bool, hasTaggedFiles: Bool) -> CGFloat {
-        if hasImages {
+    static func reservedHeight(hasAttachments: Bool, hasTaggedFiles: Bool) -> CGFloat {
+        if hasAttachments {
             return imageStripHeight + composerVerticalSpacingWhenPresent
         }
         if hasTaggedFiles {
@@ -74,7 +74,7 @@ struct AgentAttachmentsStrip: View, Equatable {
     let snapshot: AgentAttachmentStripSnapshot
     var disabled: Bool = false
     var allowsRemoval: Bool = true
-    var onRemoveImage: ((UUID) -> Void)?
+    var onRemoveAttachment: ((UUID) -> Void)?
     var onRemoveTaggedFile: ((UUID) -> Void)?
     @ObservedObject private var fontScale = FontScaleManager.shared
     private var fontPreset: FontScalePreset {
@@ -85,34 +85,34 @@ struct AgentAttachmentsStrip: View, Equatable {
         snapshot: AgentAttachmentStripSnapshot,
         disabled: Bool = false,
         allowsRemoval: Bool = true,
-        onRemoveImage: ((UUID) -> Void)? = nil,
+        onRemoveAttachment: ((UUID) -> Void)? = nil,
         onRemoveTaggedFile: ((UUID) -> Void)? = nil
     ) {
         self.snapshot = snapshot
         self.disabled = disabled
         self.allowsRemoval = allowsRemoval
-        self.onRemoveImage = onRemoveImage
+        self.onRemoveAttachment = onRemoveAttachment
         self.onRemoveTaggedFile = onRemoveTaggedFile
     }
 
     init(
         scopeTabID: UUID? = nil,
-        imageAttachments: [AgentImageAttachment],
+        attachments: [AgentFileAttachment],
         taggedFileAttachments: [AgentTaggedFileAttachment],
         disabled: Bool = false,
         allowsRemoval: Bool = true,
-        onRemoveImage: ((UUID) -> Void)? = nil,
+        onRemoveAttachment: ((UUID) -> Void)? = nil,
         onRemoveTaggedFile: ((UUID) -> Void)? = nil
     ) {
         self.init(
             snapshot: AgentAttachmentStripSnapshot(
                 scopeTabID: scopeTabID,
-                imageAttachments: imageAttachments,
+                attachments: attachments,
                 taggedFileAttachments: taggedFileAttachments
             ),
             disabled: disabled,
             allowsRemoval: allowsRemoval,
-            onRemoveImage: onRemoveImage,
+            onRemoveAttachment: onRemoveAttachment,
             onRemoveTaggedFile: onRemoveTaggedFile
         )
     }
@@ -124,12 +124,12 @@ struct AgentAttachmentsStrip: View, Equatable {
     }
 
     private enum AttachmentItem: Identifiable {
-        case image(AgentImageAttachment)
+        case attachment(AgentFileAttachment)
         case file(AgentTaggedFileAttachment)
 
         var id: String {
             switch self {
-            case let .image(attachment):
+            case let .attachment(attachment):
                 "image-\(attachment.id.uuidString)"
             case let .file(attachment):
                 "file-\(attachment.id.uuidString)"
@@ -138,7 +138,7 @@ struct AgentAttachmentsStrip: View, Equatable {
 
         var createdAt: Date {
             switch self {
-            case let .image(attachment):
+            case let .attachment(attachment):
                 attachment.createdAt
             case let .file(attachment):
                 attachment.createdAt
@@ -147,7 +147,7 @@ struct AgentAttachmentsStrip: View, Equatable {
     }
 
     private var items: [AttachmentItem] {
-        (snapshot.imageAttachments.map(AttachmentItem.image) + snapshot.taggedFileAttachments.map(AttachmentItem.file))
+        (snapshot.attachments.map(AttachmentItem.attachment) + snapshot.taggedFileAttachments.map(AttachmentItem.file))
             .sorted { $0.createdAt < $1.createdAt }
     }
 
@@ -157,8 +157,8 @@ struct AgentAttachmentsStrip: View, Equatable {
                 HStack(spacing: 8) {
                     ForEach(items) { item in
                         switch item {
-                        case let .image(attachment):
-                            imageAttachmentCard(attachment)
+                        case let .attachment(attachment):
+                            attachmentCard(attachment)
                         case let .file(attachment):
                             fileAttachmentCard(attachment)
                         }
@@ -169,10 +169,10 @@ struct AgentAttachmentsStrip: View, Equatable {
         }
     }
 
-    private func imageAttachmentCard(_ attachment: AgentImageAttachment) -> some View {
+    private func attachmentCard(_ attachment: AgentFileAttachment) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack(alignment: .topTrailing) {
-                AgentImageAttachmentThumbnailView(attachment: attachment)
+                AgentFileAttachmentThumbnailView(attachment: attachment)
                     .frame(width: 76, height: 52)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
                     .overlay(
@@ -180,9 +180,9 @@ struct AgentAttachmentsStrip: View, Equatable {
                             .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
                     )
 
-                if allowsRemoval, let onRemoveImage {
+                if allowsRemoval, let onRemoveAttachment {
                     Button {
-                        onRemoveImage(attachment.id)
+                        onRemoveAttachment(attachment.id)
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 13))
@@ -242,7 +242,7 @@ struct AgentAttachmentsStrip: View, Equatable {
         .hoverTooltip(attachment.relativePath)
     }
 
-    private func title(for attachment: AgentImageAttachment) -> String {
+    private func title(for attachment: AgentFileAttachment) -> String {
         if let title = attachment.title, !title.isEmpty {
             return title
         }
@@ -255,14 +255,14 @@ struct AgentAttachmentsStrip: View, Equatable {
     }
 }
 
-private struct AgentImageAttachmentThumbnailView: View, Equatable {
-    let attachment: AgentImageAttachment
+private struct AgentFileAttachmentThumbnailView: View, Equatable {
+    let attachment: AgentFileAttachment
 
     @State private var image: NSImage?
     @State private var activeKey: AgentAttachmentThumbnailKey?
     @State private var loadToken: AgentAttachmentThumbnailLoadToken?
 
-    static func == (lhs: AgentImageAttachmentThumbnailView, rhs: AgentImageAttachmentThumbnailView) -> Bool {
+    static func == (lhs: AgentFileAttachmentThumbnailView, rhs: AgentFileAttachmentThumbnailView) -> Bool {
         lhs.attachment.id == rhs.attachment.id
     }
 

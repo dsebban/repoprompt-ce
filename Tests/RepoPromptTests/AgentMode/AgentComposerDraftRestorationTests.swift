@@ -14,7 +14,7 @@ final class AgentComposerDraftRestorationTests: XCTestCase {
             tabID: tabID,
             session: session,
             draftText: "B",
-            images: [],
+            attachments: [],
             taggedFiles: [],
             selectedWorkflow: nil,
             selectedWorkflowMutationGeneration: nil,

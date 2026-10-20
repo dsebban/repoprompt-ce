@@ -284,7 +284,7 @@ final class OracleImageAttachmentLoaderTests: XCTestCase {
         let requests = try fixtures.enumerated().map { index, fixture in
             let url = testRoot.appendingPathComponent(fixture.0)
             try fixture.1.write(to: url)
-            return OracleImageRequest(index: index, path: url.path, title: "Image \(index + 1)")
+            return OracleAttachmentRequest(index: index, path: url.path, title: "Image \(index + 1)")
         }
 
         let images = try OracleAttachmentLoader().load(
@@ -445,7 +445,7 @@ final class OracleImageAttachmentLoaderTests: XCTestCase {
         try Self.gifData.write(to: firstURL)
         try Self.gifData.write(to: secondURL)
 
-        let requests: [OracleImageRequest] = [
+        let requests: [OracleAttachmentRequest] = [
             .init(index: 0, path: firstURL.path, title: nil),
             .init(index: 1, path: secondURL.path, title: nil)
         ]

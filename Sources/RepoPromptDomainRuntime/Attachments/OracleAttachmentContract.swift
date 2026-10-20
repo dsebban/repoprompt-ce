@@ -39,7 +39,7 @@ package enum OracleAttachmentContract {
     package static func parse(
         _ value: Value?,
         limits: OracleAttachmentLimits = .production
-    ) throws -> [OracleImageRequest] {
+    ) throws -> [OracleAttachmentRequest] {
         guard let value else { return [] }
         guard case let .array(items) = value else {
             throw MCPError.invalidParams("\(argumentName) must be an array of objects.")
@@ -78,7 +78,7 @@ package enum OracleAttachmentContract {
             } else {
                 title = nil
             }
-            return OracleImageRequest(index: index, path: rawPath, title: title)
+            return OracleAttachmentRequest(index: index, path: rawPath, title: title)
         }
     }
 
