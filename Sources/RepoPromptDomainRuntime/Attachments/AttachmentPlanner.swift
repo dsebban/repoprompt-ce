@@ -43,7 +43,7 @@ package struct AttachmentRefusal: Equatable {
     package var reasonText: String {
         switch reason {
         case .routeCannotCarry:
-            "\(routeDisplayName) cannot carry a \(Self.kindNoun(kind)) attachment."
+            "\(routeDisplayName) cannot carry \(Self.kindNoun(kind)) attachment. Remove it, or choose a model that can carry it."
         case let .textExceedsInlineLimit(byteCount, limit):
             "text file is \(Self.kibibytes(byteCount)) KiB, over the "
                 + "\(Self.kibibytes(limit)) KiB inline limit for \(routeDisplayName). "
@@ -53,10 +53,10 @@ package struct AttachmentRefusal: Equatable {
 
     private static func kindNoun(_ kind: AttachmentKind) -> String {
         switch kind {
-        case .image: "image"
-        case .pdf: "PDF"
-        case .text: "text"
-        case .binary: "binary"
+        case .image: "an image"
+        case .pdf: "a PDF"
+        case .text: "a text"
+        case .binary: "a binary"
         }
     }
 

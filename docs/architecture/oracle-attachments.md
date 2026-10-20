@@ -46,9 +46,19 @@ route because inlining needs no transport support.
 whole, naming each failing file and the reason. Nothing is silently dropped, because a dropped
 attachment reads to the user as a model that ignored their file.
 
-The composer warns before send: a tile whose kind the selected model's route cannot carry shows the
-refusal reason, and switching models redraws it. The send-time refusal is the same planner call, so
-the warning cannot disagree with the outcome.
+## Agent Mode is not an Oracle route
+
+The eight rows describe Oracle one-shot encoders: a tool-less request where bytes ride the wire or the
+request is refused. Agent Mode is an interactive agent that can read files from disk. It sends native
+images where the transport advertises image input, and every other attachment reaches the agent as an
+`@path` reference in the message text. Agent Mode never calls the planner, so its tiles make no
+delivery claim and show no capability refusal. A refusal is real only where `AttachmentPlanner.plan`
+runs: Oracle sends and the one-shot providers.
+
+Agent Mode intake has its own limits, enforced before anything is read: a file larger than
+`OracleAttachmentLimits.maxBytesPerFile` is refused by its directory-entry size, a folder is refused
+by name, and both refusals appear in the transcript. Copy, content probe and identity hash run off the
+main actor. Two attachments are the same file only when file name, size and content all match.
 
 ## Presentation
 

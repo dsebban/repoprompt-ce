@@ -1,7 +1,9 @@
+import Darwin
 import Foundation
 @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import RepoPromptSecureStorage
+import RepoPromptShared
 import SwiftAnthropic
 import SwiftOpenAI
 import XCTest
@@ -635,7 +637,7 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
     }
 
     private enum Reach {
-        case appTarget(([OracleAttachment]) throws -> Set<Emitted>)
+        case appTarget(([OracleAttachment]) async throws -> Set<Emitted>)
         case domainRuntime
     }
 
@@ -644,11 +646,13 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
         case .anthropicMessages: .appTarget(Self.anthropic)
         case .openAIChat: .appTarget(Self.openAIChat)
         case .openAIResponses: .appTarget(Self.openAIResponses)
-        case .customOpenAI, .claudeCodeStreamJSON, .acp, .codexAppServer, .grokBuild: .domainRuntime
+        case .codexAppServer: .appTarget(Self.codex)
+        case .grokBuild: .appTarget(Self.grok)
+        case .customOpenAI, .claudeCodeStreamJSON, .acp: .domainRuntime
         }
     }
 
-    func testEveryAppEncoderEmitsExactlyWhatItsRowPromisesOrRefusesByName() throws {
+    func testEveryAppEncoderEmitsExactlyWhatItsRowPromisesOrRefusesByName() async throws {
         var exercised = 0
         for route in AttachmentRoute.allCases {
             guard case let .appTarget(encode) = reach(of: route) else { continue }
@@ -658,10 +662,11 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
                 let label = "\(route) × \(kind)"
                 switch Self.promised(by: row, kind: kind) {
                 case let promised?:
-                    XCTAssertEqual(try encode([attachment]), [promised], label)
+                    let emitted = try await encode([attachment])
+                    XCTAssertEqual(emitted, [promised], label)
                 case nil:
                     do {
-                        let emitted = try encode([attachment])
+                        let emitted = try await encode([attachment])
                         XCTFail("\(label) emitted \(emitted) but its row refuses it")
                     } catch let error as AttachmentAdmissionError {
                         XCTAssertTrue(
@@ -673,7 +678,7 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
                 exercised += 1
             }
         }
-        XCTAssertEqual(exercised, 3 * AttachmentKind.allCases.count)
+        XCTAssertEqual(exercised, 5 * AttachmentKind.allCases.count)
     }
 
     func testAnthropicSendsPDFCSVAndPNGInOneRequest() throws {
@@ -814,5 +819,129 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
             }
         }
         return emitted
+    }
+
+    private static func isInlineBlock(_ text: String) -> Bool {
+        text.contains("Attached file: data.csv") && text.contains("a,b\n1,2")
+    }
+
+    /// Drives `CodexCLIProvider.streamMessage` against a recording session controller. What the
+    /// controller is handed is what Codex would receive: the prompt text and the staged image files.
+    private static func codex(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
+        let controller = RecordingCodexController()
+        let provider = CodexCLIProvider(sessionControllerFactory: { _, _ in controller })
+        let stream = try await provider.streamMessage(message(attachments), model: .codexCliGpt5Low)
+        for try await _ in stream {}
+        await provider.dispose()
+
+        let turn = try XCTUnwrap(controller.recordedTurn, "Codex never started a turn")
+        var emitted = Set<Emitted>()
+        if !turn.attachmentFilesExisted.isEmpty, turn.attachmentFilesExisted.allSatisfy(\.self) {
+            emitted.insert(.image)
+        }
+        if isInlineBlock(turn.text) { emitted.insert(.inlineText) }
+        return emitted
+    }
+
+    /// Drives `GrokBuildOneShotHeadlessAgentProvider.streamAgentMessage` against a fixture CLI that
+    /// keeps a copy of the prompt file it was launched with.
+    private static func grok(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GrokMatrix-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("grok")
+        let script = #"""
+        #!/bin/sh
+        if [ "$1" = agent ] && [ "$2" = --help ]; then
+            printf 'stdio\n'
+            exit 0
+        fi
+        /bin/cat prompt.txt > "$RPCE_FIXTURE_ROOT/prompt-seen"
+        printf '%s\n' '{"text":"ok","stopReason":"end_turn","sessionId":"s","usage":{"input_tokens":1,"output_tokens":1}}'
+        """#
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let environment = [
+            "PATH": "/usr/bin:/bin",
+            "HOME": root.appendingPathComponent("home", isDirectory: true).path,
+            "GROK_HOME": root.appendingPathComponent("grok-home", isDirectory: true).path,
+            "RPCE_FIXTURE_ROOT": root.path
+        ]
+        let provider = GrokBuildOneShotHeadlessAgentProvider(
+            config: GrokBuildAgentConfig(
+                commandName: executable.path,
+                modelString: nil,
+                includeRepoPromptMCPServer: false
+            ),
+            launchResolver: GrokBuildACPLaunchResolver(environmentProvider: { _ in environment }),
+            requestTimeout: 30,
+            apiKeyProvider: { nil }
+        )
+        let agentMessage = AgentMessage(systemPrompt: "", userMessage: "Question", attachments: attachments)
+        try await ProviderProcessLaunchPolicy.$allowsLaunchForTesting.withValue(true) {
+            let stream = try await provider.streamAgentMessage(agentMessage)
+            for try await _ in stream {}
+        }
+        await provider.dispose()
+
+        let seen = try String(contentsOf: root.appendingPathComponent("prompt-seen"), encoding: .utf8)
+        return isInlineBlock(seen) ? [.inlineText] : []
+    }
+}
+
+private final class RecordingCodexController: CodexSessionControllerPassiveStubDefaults, @unchecked Sendable {
+    struct Turn {
+        let text: String
+        let attachmentFilesExisted: [Bool]
+    }
+
+    private let lock = NSLock()
+    private var turn: Turn?
+    private var active = false
+    private let stream = AsyncStream<CodexNativeSessionController.Event>.makeStream()
+
+    var hasActiveThread: Bool {
+        lock.withLock { active }
+    }
+
+    var events: AsyncStream<CodexNativeSessionController.Event> {
+        stream.stream
+    }
+
+    var recordedTurn: Turn? {
+        lock.withLock { turn }
+    }
+
+    func startOrResume(
+        existing _: CodexNativeSessionController.SessionRef?,
+        baseInstructions _: String,
+        model: String?,
+        reasoningEffort: String?,
+        serviceTier _: String?
+    ) async throws -> CodexNativeSessionController.SessionRef {
+        lock.withLock { active = true }
+        return .init(conversationID: "matrix", rolloutPath: nil, model: model, reasoningEffort: reasoningEffort)
+    }
+
+    func startUserTurn(
+        text: String,
+        attachments: [AgentFileAttachment],
+        model _: String?,
+        reasoningEffort _: String?,
+        serviceTier _: String?
+    ) async throws -> CodexTurnStartReceipt {
+        let existed = attachments.map { attachment -> Bool in
+            guard case let .localFile(path) = attachment.source else { return false }
+            return FileManager.default.fileExists(atPath: path)
+        }
+        lock.withLock { turn = Turn(text: text, attachmentFilesExisted: existed) }
+        stream.continuation.yield(.turnCompleted(turnID: "matrix", status: .completed))
+        return CodexTurnStartReceipt(provisionalSubmissionID: "matrix")
+    }
+
+    func shutdown() async {
+        lock.withLock { active = false }
+        stream.continuation.finish()
     }
 }

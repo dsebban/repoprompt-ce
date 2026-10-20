@@ -27,9 +27,7 @@ final class AttachmentRouteEncoderMatrixTests: XCTestCase {
         case .customOpenAI: .domainRuntime(Self.customOpenAI)
         case .claudeCodeStreamJSON: .domainRuntime(Self.claudeStreamJSON)
         case .acp: .domainRuntime(Self.acp)
-        case .codexAppServer: .domainRuntime(Self.codex)
-        case .grokBuild: .domainRuntime(Self.grokBuild)
-        case .anthropicMessages, .openAIChat, .openAIResponses: .appTarget
+        case .anthropicMessages, .openAIChat, .openAIResponses, .codexAppServer, .grokBuild: .appTarget
         }
     }
 
@@ -58,7 +56,7 @@ final class AttachmentRouteEncoderMatrixTests: XCTestCase {
                 exercised += 1
             }
         }
-        XCTAssertEqual(exercised, 5 * AttachmentKind.allCases.count)
+        XCTAssertEqual(exercised, 3 * AttachmentKind.allCases.count)
     }
 
     func testMixedSetsDeliverWhatTheRowCarriesAndRefuseOnlyTheRest() async throws {
@@ -158,20 +156,6 @@ final class AttachmentRouteEncoderMatrixTests: XCTestCase {
     private static func acp(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
         let blocks = try ACPPromptContentBuilder.blocks(text: "Question", attachments: [], oracleAttachments: attachments)
         return Self.emitted(fromParts: blocks)
-    }
-
-    /// The Codex provider stages native images as files and inlines text into its prompt.
-    private static func codex(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
-        let planned = try AttachmentEncoding.plan(attachments, route: .codexAppServer)
-        var emitted = Set<Emitted>()
-        if let staging = try await OracleTransientImageStaging.stage(planned, route: .codexAppServer) {
-            defer { staging.cleanup() }
-            if !staging.files.isEmpty { emitted.insert(.image) }
-        }
-        if isInlineBlock(AttachmentEncoding.prependingInlineText(of: planned, to: "Question")) {
-            emitted.insert(.inlineText)
-        }
-        return emitted
     }
 
     private static func grokBuild(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
