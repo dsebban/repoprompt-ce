@@ -15,7 +15,10 @@ package enum AttachmentRoute: String, CaseIterable {
 package enum ImageRung: Equatable { case nativeImage, unsupported }
 package enum DocumentRung: Equatable { case nativeDocument, unsupported }
 package enum TextRung: Equatable { case inlineText, unsupported }
-package enum BinaryRung: Equatable { case unsupported }
+/// `pathMention` hands the agent the file's absolute path and size as one inline line. It exists only
+/// on routes that run on this machine and can open a file themselves; a network API has no wire shape
+/// for arbitrary bytes and a local path means nothing to it.
+package enum BinaryRung: Equatable { case pathMention, unsupported }
 
 /// The initializer has no default values on purpose. Adding a field for a new kind breaks the
 /// initializer call of every row until each route answers it.
@@ -44,9 +47,10 @@ package struct AttachmentRouteCapability: Equatable {
         self.maxEncodedRequestBytes = maxEncodedRequestBytes
     }
 
-    /// Every cell is grounded in encoder code. Widen one only after a live smoke proves delivery:
-    /// Codex and ACP Oracle one-shots are tool-less, so a staged path would fail the turn, and
-    /// Claude stream-json documents and ACP embedded resources are unproven.
+    /// Every image, PDF and text cell is grounded in encoder code. Widen one only after a live smoke
+    /// proves delivery: Claude stream-json documents and ACP embedded resources are unproven. A binary
+    /// cell is `.pathMention` exactly where the agent runs locally and can open a path itself; it is
+    /// text on the wire, so no encoder is involved.
     package static func capability(for route: AttachmentRoute) -> AttachmentRouteCapability {
         switch route {
         case .anthropicMessages:
@@ -91,7 +95,7 @@ package struct AttachmentRouteCapability: Equatable {
                 image: .nativeImage,
                 pdf: .unsupported,
                 text: .inlineText,
-                binary: .unsupported,
+                binary: .pathMention,
                 maxEncodedRequestBytes: nil
             )
         case .codexAppServer:
@@ -100,7 +104,7 @@ package struct AttachmentRouteCapability: Equatable {
                 image: .nativeImage,
                 pdf: .unsupported,
                 text: .inlineText,
-                binary: .unsupported,
+                binary: .pathMention,
                 maxEncodedRequestBytes: nil
             )
         case .acp:
@@ -109,7 +113,7 @@ package struct AttachmentRouteCapability: Equatable {
                 image: .nativeImage,
                 pdf: .unsupported,
                 text: .inlineText,
-                binary: .unsupported,
+                binary: .pathMention,
                 maxEncodedRequestBytes: nil
             )
         case .grokBuild:
@@ -118,7 +122,7 @@ package struct AttachmentRouteCapability: Equatable {
                 image: .unsupported,
                 pdf: .unsupported,
                 text: .inlineText,
-                binary: .unsupported,
+                binary: .pathMention,
                 maxEncodedRequestBytes: nil
             )
         }

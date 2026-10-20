@@ -18,6 +18,11 @@ package struct AttachmentFacts: Equatable {
         return component == "/" ? "" : component
     }
 
+    /// The one human form of a byte count in this subsystem: tiles and the path mention both use it.
+    package static func humanSize(_ byteCount: Int) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(max(0, byteCount)), countStyle: .file)
+    }
+
     package var canHavePreview: Bool {
         switch kind {
         case .image, .pdf: true
@@ -201,7 +206,7 @@ package struct AttachmentPresentation: Equatable {
     }
 
     private static func sizeDescription(_ byteCount: Int) -> String? {
-        byteCount > 0 ? ByteCountFormatter.string(fromByteCount: Int64(byteCount), countStyle: .file) : nil
+        byteCount > 0 ? AttachmentFacts.humanSize(byteCount) : nil
     }
 
     private static func accessibilityLabel(

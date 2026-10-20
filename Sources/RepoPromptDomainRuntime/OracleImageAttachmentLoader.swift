@@ -434,7 +434,12 @@ package struct OracleAttachmentLoader {
             guard acceptedBytes <= limits.maxTotalBytes else {
                 throw OracleAttachmentLoadError.totalTooLarge(maximumBytes: limits.maxTotalBytes)
             }
-            attachments.append(OracleAttachment(payload: payload, fileName: fileName, title: item.request.title))
+            attachments.append(OracleAttachment(
+                payload: payload,
+                fileName: fileName,
+                title: item.request.title,
+                localPath: item.resolution.physicalFilePath
+            ))
         }
         return attachments
     }
