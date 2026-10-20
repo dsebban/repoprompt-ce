@@ -199,45 +199,7 @@ final class AgentComposerDraftRestorationTests: XCTestCase {
     }
 }
 
-final class AgentAttachmentComposerWarningTests: XCTestCase {
-    private func attachment(kind: AttachmentKind, fileName: String) -> AgentFileAttachment {
-        AgentFileAttachment(
-            source: .localFile(path: "/tmp/managed/\(UUID().uuidString)"),
-            title: fileName,
-            kind: kind,
-            fileName: fileName,
-            byteCount: 1024
-        )
-    }
-
-    private func isWarned(_ attachment: AgentFileAttachment, agent: AgentProviderKind) -> Bool {
-        AttachmentPresentation.make(
-            facts: attachment.facts,
-            preview: .available,
-            route: agent.attachmentRoute
-        ).refusalReason != nil
-    }
-
-    func testEveryAgentResolvesToARouteWhoseCapabilityRowDecidesTheWarning() {
-        let pdf = attachment(kind: .pdf, fileName: "spec.pdf")
-        for agent in AgentProviderKind.allCases {
-            let capability = AttachmentRouteCapability.capability(for: agent.attachmentRoute)
-            let cannotCarry = switch capability.pdf {
-            case .nativeDocument: false
-            case .unsupported: true
-            }
-            XCTAssertEqual(isWarned(pdf, agent: agent), cannotCarry, "\(agent)")
-        }
-    }
-
-    func testSwitchingAgentChangesTheStripSnapshotSoTheWarningRedraws() {
-        let files = [attachment(kind: .pdf, fileName: "spec.pdf")]
-        let first = AgentAttachmentStripSnapshot(attachments: files, taggedFileAttachments: [], route: .grokBuild)
-        let second = AgentAttachmentStripSnapshot(attachments: files, taggedFileAttachments: [], route: .acp)
-        XCTAssertNotEqual(first, second)
-        XCTAssertEqual(first, AgentAttachmentStripSnapshot(attachments: files, taggedFileAttachments: [], route: .grokBuild))
-    }
-
+final class AgentFileAttachmentLegacyDecodingTests: XCTestCase {
     func testLegacyAgentAttachmentDecodesAsAnImageWithItsTitleAsTheName() throws {
         let id = UUID()
         let json = """

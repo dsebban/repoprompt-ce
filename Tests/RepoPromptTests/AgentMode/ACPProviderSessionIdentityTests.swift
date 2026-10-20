@@ -208,6 +208,52 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
         }
     }
 
+    func testNonImageAttachmentsDoNotNeedImageInputAndReachThePromptAsText() async throws {
+        let workspace = try makeTemporaryDirectory()
+        let record = workspace.appendingPathComponent("requests.jsonl")
+        let builds = BuildObserver()
+        let provider = try FakeACPProvider(
+            providerID: .cursor,
+            commandPath: makeFakeACPServerScript().path,
+            environment: ["ACP_RECORD_PATH": record.path, "ACP_PROMPT_CAPABILITIES": "{}"],
+            builds: builds
+        )
+        let controller = try ACPAgentSessionController(
+            provider: provider,
+            runRequest: makeRunRequest(agentKind: .cursor, workspacePath: workspace.path),
+            requestTimeouts: .init(bootstrapSeconds: 5, operationalSeconds: 5),
+            allowsProviderProcessLaunchForTesting: true
+        )
+        _ = try await controller.bootstrap()
+        let csvBytes = Data("a,b\n1,2\n".utf8)
+        let csv = AgentFileAttachment(
+            source: .localFile(path: "/nonexistent-must-not-read.csv"),
+            kind: .text,
+            fileName: "table.csv",
+            byteCount: csvBytes.count
+        )
+        let request = ACPRunRequest(
+            agentKind: .cursor,
+            modelString: nil,
+            workspacePath: workspace.path,
+            resumeSessionID: nil,
+            attachments: [csv],
+            taskLabelKind: nil
+        )
+        try await controller.prompt(AgentMessage(userMessage: "see @table.csv"), request: request)
+        let oracleText = OracleAttachment(payload: .text("a,b\n1,2\n", csvBytes), fileName: "table.csv", title: nil)
+        try await controller.prompt(AgentMessage(userMessage: "inline", attachments: [oracleText]), request: request)
+
+        XCTAssertEqual(builds.count, 2)
+        let prompts = recordedPrompts(at: record)
+        XCTAssertEqual(prompts.count, 2)
+        for prompt in prompts {
+            let blocks = try XCTUnwrap(prompt["prompt"] as? [[String: Any]])
+            XCTAssertEqual(blocks.map { $0["type"] as? String }, ["text"])
+        }
+        await controller.shutdown()
+    }
+
     func testInheritedAttachmentsRejectBeforeReadingAndTextOverrideRecovers() async throws {
         let workspace = try makeTemporaryDirectory()
         let record = workspace.appendingPathComponent("requests.jsonl")

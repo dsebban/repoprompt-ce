@@ -38,8 +38,6 @@ struct AttachmentTile: View {
     let facts: AttachmentFacts
     let preview: AttachmentTilePreview
     let geometry: AttachmentTileGeometry
-    /// The route the attachment is about to travel, so a tile can warn that it cannot be carried.
-    var route: AttachmentRoute?
     var isDisabled = false
     var onDismiss: (() -> Void)?
 
@@ -64,21 +62,19 @@ struct AttachmentTile: View {
         facts: AttachmentFacts,
         preview: AttachmentTilePreview,
         geometry: AttachmentTileGeometry,
-        route: AttachmentRoute? = nil,
         isDisabled: Bool = false,
         onDismiss: (() -> Void)? = nil
     ) {
         self.facts = facts
         self.preview = preview
         self.geometry = geometry
-        self.route = route
         self.isDisabled = isDisabled
         self.onDismiss = onDismiss
         _loaded = State(initialValue: Self.immediatePreview(facts: facts, preview: preview))
     }
 
     private var presentation: AttachmentPresentation {
-        AttachmentPresentation.make(facts: facts, preview: loaded.availability, route: route)
+        AttachmentPresentation.make(facts: facts, preview: loaded.availability)
     }
 
     private var fontPreset: FontScalePreset {
@@ -103,26 +99,15 @@ struct AttachmentTile: View {
     }
 
     private func stripCard(_ presentation: AttachmentPresentation) -> some View {
-        let isRefused = presentation.refusalReason != nil
-        let textWidth = fontPreset.scaledMetric(isRefused ? 150 : geometry.faceSize.width)
-        return VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 4) {
             faceWithDismiss(presentation)
 
-            VStack(alignment: .leading, spacing: 1) {
-                Text(presentation.title)
-                    .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                if isRefused, let caption = presentation.caption {
-                    Text(caption)
-                        .font(fontPreset.swiftUIFont(sizeAtNormal: 9))
-                        .foregroundColor(.orange)
-                        .lineLimit(2)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-            .frame(width: textWidth, alignment: .leading)
+            Text(presentation.title)
+                .font(fontPreset.swiftUIFont(sizeAtNormal: 10))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .frame(width: fontPreset.scaledMetric(geometry.faceSize.width), alignment: .leading)
         }
         .padding(8)
         .background(Color.secondary.opacity(0.08))
@@ -168,12 +153,7 @@ struct AttachmentTile: View {
                 }
             }
             .clipShape(shape)
-            .overlay(
-                shape.stroke(
-                    presentation.refusalReason == nil ? Color.secondary.opacity(0.25) : Color.orange,
-                    lineWidth: presentation.refusalReason == nil ? 1 : 2
-                )
-            )
+            .overlay(shape.stroke(Color.secondary.opacity(0.25), lineWidth: 1))
     }
 
     @ViewBuilder

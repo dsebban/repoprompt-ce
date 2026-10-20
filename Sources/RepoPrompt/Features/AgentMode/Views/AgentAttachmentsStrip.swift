@@ -6,19 +6,15 @@ struct AgentAttachmentStripSnapshot: Equatable {
     let scopeTabID: UUID?
     let attachments: [AgentFileAttachment]
     let taggedFileAttachments: [AgentTaggedFileAttachment]
-    /// The route the selected agent sends attachments over, so tiles can warn about files it cannot carry.
-    let route: AttachmentRoute?
 
     init(
         scopeTabID: UUID? = nil,
         attachments: [AgentFileAttachment],
-        taggedFileAttachments: [AgentTaggedFileAttachment],
-        route: AttachmentRoute? = nil
+        taggedFileAttachments: [AgentTaggedFileAttachment]
     ) {
         self.scopeTabID = scopeTabID
         self.attachments = attachments
         self.taggedFileAttachments = taggedFileAttachments
-        self.route = route
     }
 
     var hasAttachments: Bool {
@@ -35,7 +31,6 @@ struct AgentAttachmentStripSnapshot: Equatable {
 
     static func == (lhs: AgentAttachmentStripSnapshot, rhs: AgentAttachmentStripSnapshot) -> Bool {
         lhs.scopeTabID == rhs.scopeTabID
-            && lhs.route == rhs.route
             && lhs.attachments.map(\.id) == rhs.attachments.map(\.id)
             && lhs.taggedFileAttachments.map { TaggedFileRenderKey($0) } == rhs.taggedFileAttachments.map { TaggedFileRenderKey($0) }
     }
@@ -104,7 +99,6 @@ struct AgentAttachmentsStrip: View, Equatable {
         scopeTabID: UUID? = nil,
         attachments: [AgentFileAttachment],
         taggedFileAttachments: [AgentTaggedFileAttachment],
-        route: AttachmentRoute? = nil,
         disabled: Bool = false,
         allowsRemoval: Bool = true,
         onRemoveAttachment: ((UUID) -> Void)? = nil,
@@ -114,8 +108,7 @@ struct AgentAttachmentsStrip: View, Equatable {
             snapshot: AgentAttachmentStripSnapshot(
                 scopeTabID: scopeTabID,
                 attachments: attachments,
-                taggedFileAttachments: taggedFileAttachments,
-                route: route
+                taggedFileAttachments: taggedFileAttachments
             ),
             disabled: disabled,
             allowsRemoval: allowsRemoval,
@@ -181,7 +174,6 @@ struct AgentAttachmentsStrip: View, Equatable {
             facts: attachment.facts,
             preview: preview(for: attachment),
             geometry: .strip,
-            route: snapshot.route,
             isDisabled: disabled,
             onDismiss: allowsRemoval ? onRemoveAttachment.map { remove in { remove(attachment.id) } } : nil
         )
