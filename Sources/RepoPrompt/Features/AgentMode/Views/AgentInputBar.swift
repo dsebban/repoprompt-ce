@@ -21,7 +21,8 @@ struct AgentComposerActions {
     let executeSubmit: (_ claim: AgentModeViewModel.AgentComposerSubmitClaim, _ text: String) async -> AgentModeViewModel.UserTurnSubmissionResult
     let cancelRun: (_ target: AgentRunCancelTarget) async -> Void
     let cancelRouting: (_ tabID: UUID) async -> Void
-    let attachFiles: (_ tabID: UUID, _ urls: [URL]) -> Void
+    let attachFiles: (_ tabID: UUID, _ urls: [URL]) async -> Void
+    let reportAttachmentFailures: (_ tabID: UUID, _ failures: [AgentAttachmentFailure]) -> Void
     let removePendingAttachment: (_ tabID: UUID, _ attachmentID: UUID) -> Void
     let commitTaggedFile: (_ tabID: UUID, _ suggestion: MentionSuggestion, _ displayName: String) -> Void
     let removeTaggedFile: (_ tabID: UUID, _ attachmentID: UUID) -> Void
@@ -129,7 +130,8 @@ struct AgentInputBar: View {
             },
             cancelRun: { target in _ = await agentModeVM.cancelAgentRun(target: target) },
             cancelRouting: { tabID in await agentModeVM.cancelFreshTaskRouting(tabID: tabID) },
-            attachFiles: { tabID, urls in agentModeVM.attachFiles(tabID: tabID, urls: urls) },
+            attachFiles: { tabID, urls in await agentModeVM.attachFiles(tabID: tabID, urls: urls).value },
+            reportAttachmentFailures: { tabID, failures in agentModeVM.reportAttachmentFailures(tabID: tabID, failures) },
             removePendingAttachment: { tabID, attachmentID in agentModeVM.removePendingFileAttachment(tabID: tabID, attachmentID: attachmentID) },
             commitTaggedFile: { tabID, suggestion, displayName in
                 agentModeVM.commitPendingTaggedFile(
@@ -1775,7 +1777,7 @@ struct AgentComposerView: View, Equatable {
                 message: "Attach one or more files for the next turn.",
                 attachedTo: targetWindow
             )
-            actions.attachFiles(tabID, urls)
+            await actions.attachFiles(tabID, urls)
         }
     }
 
@@ -1811,10 +1813,13 @@ struct AgentComposerView: View, Equatable {
         guard let tabID = currentTabID else {
             return false
         }
-        return attachmentIntake.loadPreparedAttachments(from: providers) { prepared in
-            guard !prepared.isEmpty else { return }
+        return attachmentIntake.loadPreparedAttachments(from: providers) { prepared, failures in
+            guard !prepared.isEmpty || !failures.isEmpty else { return }
             Task { @MainActor in
-                attachPreparedAttachments(prepared, tabID: tabID)
+                actions.reportAttachmentFailures(tabID, failures)
+                if !prepared.isEmpty {
+                    attachPreparedAttachments(prepared, tabID: tabID)
+                }
             }
         }
     }
@@ -1834,10 +1839,14 @@ struct AgentComposerView: View, Equatable {
         return true
     }
 
+    /// Temporary sources are deleted only after the import has finished copying them.
     private func attachPreparedAttachments(_ prepared: [AgentAttachmentIntake.Prepared], tabID: UUID) {
         let urls = prepared.map(\.url)
-        actions.attachFiles(tabID, urls)
-        attachmentIntake.cleanupTemporaryFiles(prepared)
+        let intake = attachmentIntake
+        Task { @MainActor in
+            await actions.attachFiles(tabID, urls)
+            intake.cleanupTemporaryFiles(prepared)
+        }
     }
 
     private func normalizedServerToggleKey(_ value: String) -> String {
@@ -1919,9 +1928,11 @@ struct AgentAttachmentIntake {
         return shouldConsumeNSImageReadablePasteboard(pasteboard)
     }
 
+    /// Resolves dropped providers into files to attach. Everything that cannot be attached comes back
+    /// as a failure with its reason, so a drop never vanishes without a word.
     func loadPreparedAttachments(
         from providers: [NSItemProvider],
-        completion: @escaping ([Prepared]) -> Void
+        completion: @escaping (_ prepared: [Prepared], _ failures: [AgentAttachmentFailure]) -> Void
     ) -> Bool {
         let candidates = providers.filter {
             $0.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier)
@@ -1934,13 +1945,23 @@ struct AgentAttachmentIntake {
         let lockQueue = DispatchQueue(label: "AgentAttachmentIntake.lock")
         let group = DispatchGroup()
         var prepared: [Prepared] = []
+        var failures: [AgentAttachmentFailure] = []
+
+        func fail(_ fileName: String, _ reason: String) {
+            lockQueue.sync {
+                failures.append(AgentAttachmentFailure(fileName: fileName, reason: reason))
+            }
+        }
 
         func appendImageData(from provider: NSItemProvider, typeIdentifier: String) {
             provider.loadDataRepresentation(forTypeIdentifier: typeIdentifier) { data, _ in
                 defer { group.leave() }
                 guard let data, !data.isEmpty,
                       let fileURL = try? writeTemporaryImageData(data, typeIdentifier: typeIdentifier)
-                else { return }
+                else {
+                    fail(provider.suggestedName ?? "image", "The dropped image could not be read.")
+                    return
+                }
                 lockQueue.sync {
                     prepared.append(Prepared(url: fileURL, isTemporary: true))
                 }
@@ -1951,7 +1972,8 @@ struct AgentAttachmentIntake {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier) {
                 group.enter()
                 provider.loadItem(forTypeIdentifier: UTType.fileURL.identifier, options: nil) { item, _ in
-                    if let fileURL = droppedFileURL(from: item), AttachmentPasteboard.isRegularFile(fileURL) {
+                    let fileURL = droppedFileURL(from: item)
+                    if let fileURL, AttachmentPasteboard.isRegularFile(fileURL) {
                         lockQueue.sync {
                             prepared.append(Prepared(url: fileURL.standardizedFileURL, isTemporary: false))
                         }
@@ -1960,6 +1982,16 @@ struct AgentAttachmentIntake {
                     }
 
                     guard let imageTypeIdentifier = bestImageTypeIdentifier(from: provider.registeredTypeIdentifiers) else {
+                        if let fileURL {
+                            fail(
+                                fileURL.lastPathComponent,
+                                AttachmentPasteboard.isDirectory(fileURL)
+                                    ? AgentAttachmentStore.Error.sourceIsNotFile.localizedDescription
+                                    : "The item is not a regular file."
+                            )
+                        } else {
+                            fail(provider.suggestedName ?? "dropped item", "The dropped item could not be read.")
+                        }
                         group.leave()
                         return
                     }
@@ -1978,8 +2010,9 @@ struct AgentAttachmentIntake {
         group.notify(queue: .main) {
             lockQueue.sync {
                 let deduplicatedPrepared = deduplicated(prepared)
+                let reportedFailures = failures
                 DispatchQueue.main.async {
-                    completion(deduplicatedPrepared)
+                    completion(deduplicatedPrepared, reportedFailures)
                 }
             }
         }

@@ -16,6 +16,13 @@ enum AttachmentPasteboard {
         return values.isRegularFile == true
     }
 
+    static func isDirectory(_ url: URL) -> Bool {
+        guard url.isFileURL,
+              let values = try? url.resourceValues(forKeys: [.isDirectoryKey])
+        else { return false }
+        return values.isDirectory == true
+    }
+
     static func regularFileURLs(in pasteboard: NSPasteboard) -> [URL] {
         var urls = pasteboard.readObjects(forClasses: [NSURL.self], options: nil) as? [URL] ?? []
         for item in pasteboard.pasteboardItems ?? [] {

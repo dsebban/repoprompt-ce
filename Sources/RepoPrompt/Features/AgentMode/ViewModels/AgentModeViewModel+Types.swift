@@ -1161,12 +1161,6 @@ extension AgentModeViewModel {
         let operation: AgentComposerDraftRestorationOperation?
     }
 
-    /// Internal for cross-file AgentModeViewModel extension access after the mechanical file split.
-    struct FileAttachmentFingerprint: Hashable {
-        let byteCount: Int64
-        let digestHex: String
-    }
-
     struct SlashSkillToken: Equatable {
         let name: String
         let tokenRange: NSRange

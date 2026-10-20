@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 
 @MainActor
@@ -220,80 +219,110 @@ extension AgentModeViewModel {
         )
     }
 
-    func attachFiles(tabID: UUID, urls: [URL]) {
-        guard !urls.isEmpty else { return }
-        let session = session(for: tabID)
+    /// The newest intake. Each one waits for it, so intakes never overlap.
+    private static var attachmentIntakeTail: Task<Void, Never>?
+
+    /// Imports `urls` as pending attachments. Admission, copy, content probe and identity hash run off
+    /// the main actor, and intakes run one at a time so a second drop dedups against the first. The
+    /// returned task finishes once every file has been attached or refused; callers that delete
+    /// temporary sources must wait for it.
+    @discardableResult
+    func attachFiles(tabID: UUID, urls: [URL]) -> Task<Void, Never> {
+        guard !urls.isEmpty else { return Task {} }
         guard let workspaceDirectory = attachmentWorkspaceDirectoryURL() else {
-            let errorItem = AgentChatItem.error("Attachments require an active workspace.", sequenceIndex: session.nextSequenceIndex)
-            session.appendItem(errorItem)
-            updateBindingsFromSession(session)
-            scheduleSave(for: tabID)
-            return
+            reportAttachmentFailures(
+                tabID: tabID,
+                messages: ["Attachments require an active workspace."]
+            )
+            return Task {}
         }
 
-        var seenSourcePaths: Set<String> = []
-        var seenFingerprints: Set<FileAttachmentFingerprint> = []
-        for attachment in session.pendingFileAttachments {
-            guard case let .localFile(path) = attachment.source else { continue }
-            let fileURL = URL(fileURLWithPath: path).standardizedFileURL
-            if !fileURL.path.isEmpty {
-                seenSourcePaths.insert(fileURL.path)
-            }
-            if let fingerprint = fileAttachmentFingerprint(for: fileURL) {
-                seenFingerprints.insert(fingerprint)
-            }
+        let previousIntake = Self.attachmentIntakeTail
+        let store = attachmentStore
+        let intake = Task { @MainActor [weak self] in
+            await previousIntake?.value
+            guard let self else { return }
+            let pending = session(for: tabID).pendingFileAttachments
+            let outcome = await Task.detached(priority: .userInitiated) {
+                Self.importAttachments(urls: urls, pending: pending, store: store, workspaceDirectory: workspaceDirectory)
+            }.value
+            commitAttachmentIntake(outcome, tabID: tabID)
         }
+        Self.attachmentIntakeTail = intake
+        return intake
+    }
 
-        var importedAttachments: [AgentFileAttachment] = []
+    /// Puts a readable refusal in the transcript for every file that could not be attached.
+    func reportAttachmentFailures(tabID: UUID, _ failures: [AgentAttachmentFailure]) {
+        reportAttachmentFailures(
+            tabID: tabID,
+            messages: failures.map { "Failed to attach \($0.fileName): \($0.reason)" }
+        )
+    }
 
-        for sourceURL in urls {
-            let standardizedSourceURL = sourceURL.standardizedFileURL
-            if !standardizedSourceURL.path.isEmpty,
-               seenSourcePaths.contains(standardizedSourceURL.path)
-            {
-                continue
-            }
-
-            let sourceFingerprint = fileAttachmentFingerprint(for: standardizedSourceURL)
-            if let sourceFingerprint,
-               seenFingerprints.contains(sourceFingerprint)
-            {
-                continue
-            }
-
-            do {
-                let result = try attachmentStore.importFile(sourceURL: standardizedSourceURL, workspaceDirectory: workspaceDirectory)
-                if !standardizedSourceURL.path.isEmpty {
-                    seenSourcePaths.insert(standardizedSourceURL.path)
-                }
-
-                let importedFingerprint = sourceFingerprint ?? fileAttachmentFingerprint(for: result.fileURL)
-                if let importedFingerprint {
-                    if seenFingerprints.contains(importedFingerprint) {
-                        try? FileManager.default.removeItem(at: result.fileURL)
-                        continue
-                    }
-                    seenFingerprints.insert(importedFingerprint)
-                }
-
-                importedAttachments.append(result.attachment)
-            } catch {
-                let fileName = standardizedSourceURL.lastPathComponent.isEmpty ? "file" : standardizedSourceURL.lastPathComponent
-                let errorItem = AgentChatItem.error("Failed to attach \(fileName): \(error.localizedDescription)", sequenceIndex: session.nextSequenceIndex)
-                session.appendItem(errorItem)
-            }
+    private func reportAttachmentFailures(tabID: UUID, messages: [String]) {
+        guard !messages.isEmpty else { return }
+        let session = session(for: tabID)
+        for message in messages {
+            session.appendItem(AgentChatItem.error(message, sequenceIndex: session.nextSequenceIndex))
         }
+        updateBindingsFromSession(session)
+        scheduleSave(for: tabID)
+    }
 
-        guard !importedAttachments.isEmpty else {
-            updateBindingsFromSession(session)
-            scheduleSave(for: tabID)
-            return
-        }
-
-        session.pendingFileAttachments.append(contentsOf: importedAttachments)
+    private func commitAttachmentIntake(_ outcome: AgentAttachmentIntakeOutcome, tabID: UUID) {
+        reportAttachmentFailures(tabID: tabID, outcome.failures)
+        guard !outcome.imported.isEmpty else { return }
+        let session = session(for: tabID)
+        session.pendingFileAttachments.append(contentsOf: outcome.imported)
         session.isDirty = true
         updateBindingsFromSession(session)
         scheduleSave(for: tabID)
+    }
+
+    /// Pure file work with no view-model state, so it can run on any executor.
+    private nonisolated static func importAttachments(
+        urls: [URL],
+        pending: [AgentFileAttachment],
+        store: AgentAttachmentStore,
+        workspaceDirectory: URL
+    ) -> AgentAttachmentIntakeOutcome {
+        var seenSourcePaths: Set<String> = []
+        var seenIdentities: Set<AgentAttachmentStore.Identity> = []
+        for attachment in pending {
+            guard case let .localFile(path) = attachment.source else { continue }
+            let fileURL = URL(fileURLWithPath: path).standardizedFileURL
+            seenSourcePaths.insert(fileURL.path)
+            if let identity = store.identity(of: fileURL, fileName: attachment.facts.fileName) {
+                seenIdentities.insert(identity)
+            }
+        }
+
+        var outcome = AgentAttachmentIntakeOutcome(imported: [], failures: [])
+        for sourceURL in urls {
+            let standardizedSourceURL = sourceURL.standardizedFileURL
+            if seenSourcePaths.contains(standardizedSourceURL.path) {
+                continue
+            }
+            do {
+                // Admission reads the directory entry only, so an oversize file is never copied or hashed.
+                let admitted = try store.admit(sourceURL: standardizedSourceURL)
+                let identity = store.identity(of: admitted.url, fileName: admitted.url.lastPathComponent)
+                if let identity, seenIdentities.contains(identity) {
+                    continue
+                }
+                let result = try store.importFile(sourceURL: admitted.url, workspaceDirectory: workspaceDirectory)
+                seenSourcePaths.insert(standardizedSourceURL.path)
+                if let identity {
+                    seenIdentities.insert(identity)
+                }
+                outcome.imported.append(result.attachment)
+            } catch {
+                let fileName = standardizedSourceURL.lastPathComponent.isEmpty ? "file" : standardizedSourceURL.lastPathComponent
+                outcome.failures.append(AgentAttachmentFailure(fileName: fileName, reason: error.localizedDescription))
+            }
+        }
+        return outcome
     }
 
     func removePendingFileAttachment(tabID: UUID, attachmentID: UUID) {
@@ -374,21 +403,6 @@ extension AgentModeViewModel {
         session.isDirty = true
         updateBindingsFromSession(session)
         scheduleSave(for: tabID)
-    }
-
-    private func fileAttachmentFingerprint(for fileURL: URL) -> FileAttachmentFingerprint? {
-        let standardizedURL = fileURL.standardizedFileURL
-        guard standardizedURL.isFileURL else { return nil }
-        guard let attributes = try? FileManager.default.attributesOfItem(atPath: standardizedURL.path) else {
-            return nil
-        }
-        let byteCount = (attributes[.size] as? NSNumber)?.int64Value ?? 0
-        guard let data = try? Data(contentsOf: standardizedURL, options: [.mappedIfSafe]) else {
-            return nil
-        }
-        let digest = SHA256.hash(data: data)
-        let digestHex = digest.map { String(format: "%02x", $0) }.joined()
-        return FileAttachmentFingerprint(byteCount: byteCount, digestHex: digestHex)
     }
 
     private func attachmentWorkspaceDirectoryURL() -> URL? {
@@ -526,4 +540,15 @@ extension AgentModeViewModel {
         session.isDirty = true
         scheduleSave(for: session.tabID)
     }
+}
+
+/// A file the composer refused to attach, and why, in words the user can act on.
+struct AgentAttachmentFailure: Equatable {
+    let fileName: String
+    let reason: String
+}
+
+struct AgentAttachmentIntakeOutcome {
+    var imported: [AgentFileAttachment]
+    var failures: [AgentAttachmentFailure]
 }
