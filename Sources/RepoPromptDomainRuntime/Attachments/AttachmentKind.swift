@@ -16,6 +16,15 @@ package enum ImageMediaType: String, Equatable {
     case jpeg = "image/jpeg"
     case gif = "image/gif"
     case webp = "image/webp"
+
+    package var preferredFileExtension: String {
+        switch self {
+        case .png: "png"
+        case .jpeg: "jpg"
+        case .gif: "gif"
+        case .webp: "webp"
+        }
+    }
 }
 
 /// Attachment bytes paired with the only kind they can have, so a kind can never disagree with its content.

@@ -155,7 +155,7 @@ import XCTest
             let outsidePath = root.deletingLastPathComponent().appendingPathComponent("outside-image.png").path
             for (images, expectedError): (Value, String) in [
                 (.string("invalid"), "images must be an array"),
-                (.array([.object(["path": .string(outsidePath)])]), "images[0].path is outside the current workspace roots")
+                (.array([.object(["path": .string(outsidePath)])]), "attachments[0].path is outside the current workspace roots")
             ] {
                 let fixture = makeOracleSendFixture(stopAfterRoute: false)
                 defer { fixture.cleanup() }
@@ -569,7 +569,7 @@ import XCTest
                 sendStageProgress: { _, _, _, _ in },
                 withHeartbeat: { _, _, _, _, operation in try await operation() },
                 sendChat: { args, _, context in
-                    sendRecorder.record(args, images: context?.transientImages ?? [])
+                    sendRecorder.record(args, images: context?.attachments ?? [])
                     return settledReply ?? [
                         "chat_id": .string("selected-chat"),
                         "response": .string("response")
@@ -737,9 +737,9 @@ import XCTest
     @MainActor
     private final class OracleSendArgsRecorder {
         private(set) var calls: [[String: Value]] = []
-        private(set) var images: [[AITransientImage]] = []
+        private(set) var images: [[OracleAttachment]] = []
 
-        func record(_ args: [String: Value], images: [AITransientImage]) {
+        func record(_ args: [String: Value], images: [OracleAttachment]) {
             calls.append(args)
             self.images.append(images)
         }
@@ -830,9 +830,9 @@ final class OracleImageContractTests: XCTestCase {
     }
 
     func testOracleSendImageDocumentationIsProviderNeutralAndMatchesLimits() throws {
-        XCTAssertEqual(OracleImageAttachmentLimits.production.maxCount, 10)
-        XCTAssertEqual(OracleImageAttachmentLimits.production.maxBytesPerImage, 20 * 1024 * 1024)
-        XCTAssertEqual(OracleImageAttachmentLimits.production.maxTotalBytes, 50 * 1024 * 1024)
+        XCTAssertEqual(OracleAttachmentLimits.production.maxCount, 10)
+        XCTAssertEqual(OracleAttachmentLimits.production.maxBytesPerFile, 20 * 1024 * 1024)
+        XCTAssertEqual(OracleAttachmentLimits.production.maxTotalBytes, 50 * 1024 * 1024)
         let canonical = try XCTUnwrap(MCPDomainCanonicalToolDefinitions.definition(named: "oracle_send"))
         let schema = try XCTUnwrap(canonical.inputSchema.objectValue)
         let properties = try XCTUnwrap(schema["properties"]?.objectValue)

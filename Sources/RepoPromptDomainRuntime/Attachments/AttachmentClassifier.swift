@@ -62,6 +62,11 @@ package enum AttachmentClassifier {
         case convertible(ConvertibleImageFormat)
     }
 
+    /// Sniffs the image format of a whole file's bytes without classifying or converting it.
+    static func sniffImage(of bytes: Data) -> SniffedImage? {
+        sniffImage(Data(bytes.prefix(headerByteCount)), totalByteCount: bytes.count)
+    }
+
     /// `header` must start at index 0. PNG, JPEG, GIF, and WebP checks are the loader's original
     /// magic-byte checks. They prove a format by its bytes, not that the image decodes.
     static func sniffImage(_ data: Data, totalByteCount: Int) -> SniffedImage? {

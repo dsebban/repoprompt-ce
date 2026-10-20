@@ -10,11 +10,12 @@ package enum OracleImageThumbnail {
     package static let maxSourceDimension = 8192
     package static let maxSourcePixelCount = 16_777_216
 
-    /// Renders a bounded, opaque JPEG preview of `image`, or nil when the source cannot be
-    /// decoded within the dimension limits. Full image bytes are never retained.
-    package static func jpegData(from image: AITransientImage) throws -> Data? {
+    /// Renders a bounded, opaque JPEG preview of an image `attachment`, or nil when it is not an image
+    /// or cannot be decoded within the dimension limits. Full image bytes are never retained.
+    package static func jpegData(from attachment: OracleAttachment) throws -> Data? {
         try Task.checkCancellation()
-        guard let source = CGImageSourceCreateWithData(image.bytes as CFData, [
+        guard case let .image(_, imageBytes) = attachment.payload else { return nil }
+        guard let source = CGImageSourceCreateWithData(imageBytes as CFData, [
             kCGImageSourceShouldCache: false
         ] as CFDictionary),
             let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
@@ -90,30 +91,39 @@ package enum OracleImageThumbnail {
     }
 }
 
-// MARK: - Claude stream-json image transport
+// MARK: - Claude stream-json transport
 
-/// Encodes image-bearing Claude CLI input as one stream-json user line and reads the
-/// terminal result/error event back from stream-json output.
-package enum ClaudeStreamJSONImageTransport {
+/// Encodes Claude CLI input as one stream-json user line and reads the terminal result/error
+/// event back from stream-json output.
+package enum ClaudeStreamJSONTransport {
     package struct EncodingError: Error {}
 
-    package static func input(prompt: String, images: [AITransientImage]) throws -> String {
+    package static func input(prompt: String, attachments: [OracleAttachment]) throws -> String {
+        let planned = try AttachmentEncoding.plan(attachments, route: .claudeCodeStreamJSON)
+        let text = AttachmentEncoding.prependingInlineText(of: planned, to: prompt)
         var content: [[String: Any]] = []
-        if !prompt.isEmpty {
-            content.append(["type": "text", "text": prompt])
+        if !text.isEmpty {
+            content.append(["type": "text", "text": text])
         }
-        for image in images {
-            if let annotation = image.titleAnnotation {
-                content.append(["type": "text", "text": annotation])
+        for item in planned {
+            switch item.delivery {
+            case let .nativeImage(mediaType, data):
+                if let annotation = item.titleAnnotation {
+                    content.append(["type": "text", "text": annotation])
+                }
+                content.append([
+                    "type": "image",
+                    "source": [
+                        "type": "base64",
+                        "media_type": mediaType.rawValue,
+                        "data": data.base64EncodedString()
+                    ]
+                ])
+            case .inlineText:
+                break
+            case .nativeDocument:
+                throw item.undeclaredRung(on: .claudeCodeStreamJSON)
             }
-            content.append([
-                "type": "image",
-                "source": [
-                    "type": "base64",
-                    "media_type": image.mediaType.rawValue,
-                    "data": image.base64Payload
-                ]
-            ])
         }
         let payload: [String: Any] = [
             "type": "user",
@@ -184,8 +194,8 @@ package enum ClaudeStreamJSONImageTransport {
 
 /// Writes request-scoped images into a private (0700) temporary directory for transports that
 /// only accept local file paths. Call `cleanup()` once the request finishes.
-package struct OracleTransientImageStaging: Sendable {
-    package struct File: Sendable {
+package struct OracleTransientImageStaging {
+    package struct File {
         package let path: String
         package let title: String?
     }
@@ -193,9 +203,23 @@ package struct OracleTransientImageStaging: Sendable {
     package let directory: URL
     package let files: [File]
 
-    package static func stage(_ images: [AITransientImage]) async throws -> Self? {
+    /// Stages the native image deliveries of `planned`. Inline text travels in the prompt and needs
+    /// no file. Returns nil when no image needs staging.
+    package static func stage(_ planned: [PlannedAttachment], route: AttachmentRoute) async throws -> Self? {
+        var images: [(mediaType: ImageMediaType, data: Data, title: String?)] = []
+        for item in planned {
+            switch item.delivery {
+            case let .nativeImage(mediaType, data):
+                images.append((mediaType, data, item.attachment.normalizedTitle))
+            case .inlineText:
+                break
+            case .nativeDocument:
+                throw item.undeclaredRung(on: route)
+            }
+        }
         guard !images.isEmpty else { return nil }
         try Task.checkCancellation()
+        let staged = images
         let task = Task.detached(priority: .userInitiated) {
             let directory = FileManager.default.temporaryDirectory
                 .appendingPathComponent("RepoPromptOracleImages-\(UUID().uuidString)", isDirectory: true)
@@ -206,15 +230,15 @@ package struct OracleTransientImageStaging: Sendable {
                     attributes: [.posixPermissions: 0o700]
                 )
                 var files: [File] = []
-                for (index, image) in images.enumerated() {
+                for (index, image) in staged.enumerated() {
                     try Task.checkCancellation()
                     let url = directory.appendingPathComponent(
-                        "image-\(index).\(image.preferredFileExtension)",
+                        "image-\(index).\(image.mediaType.preferredFileExtension)",
                         isDirectory: false
                     )
-                    try image.bytes.write(to: url, options: .withoutOverwriting)
+                    try image.data.write(to: url, options: .withoutOverwriting)
                     try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-                    files.append(File(path: url.path, title: image.normalizedTitle))
+                    files.append(File(path: url.path, title: image.title))
                 }
                 return Self(directory: directory, files: files)
             } catch {

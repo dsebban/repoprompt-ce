@@ -16,13 +16,15 @@ package enum ACPPromptContentBuilder {
     package static func blocks(
         text: String,
         attachments: [AgentImageAttachment],
-        transientImages: [AITransientImage] = []
+        oracleAttachments: [OracleAttachment] = []
     ) throws -> [[String: Any]] {
+        let planned = try AttachmentEncoding.plan(oracleAttachments, route: .acp)
+        let body = AttachmentEncoding.prependingInlineText(of: planned, to: text)
         var blocks: [[String: Any]] = []
-        if !text.isEmpty || (attachments.isEmpty && transientImages.isEmpty) {
+        if !body.isEmpty || (attachments.isEmpty && planned.isEmpty) {
             blocks.append([
                 "type": "text",
-                "text": text
+                "text": body
             ])
         }
 
@@ -31,18 +33,25 @@ package enum ACPPromptContentBuilder {
                 blocks.append(block)
             }
         }
-        for image in transientImages {
-            if let annotation = image.titleAnnotation {
+        for item in planned {
+            switch item.delivery {
+            case let .nativeImage(mediaType, data):
+                if let annotation = item.titleAnnotation {
+                    blocks.append([
+                        "type": "text",
+                        "text": annotation
+                    ])
+                }
                 blocks.append([
-                    "type": "text",
-                    "text": annotation
+                    "type": "image",
+                    "mimeType": mediaType.rawValue,
+                    "data": data.base64EncodedString()
                 ])
+            case .inlineText:
+                break
+            case .nativeDocument:
+                throw item.undeclaredRung(on: .acp)
             }
-            blocks.append([
-                "type": "image",
-                "mimeType": image.mediaType.rawValue,
-                "data": image.base64Payload
-            ])
         }
 
         return blocks

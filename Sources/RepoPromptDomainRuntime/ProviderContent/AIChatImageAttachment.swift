@@ -23,7 +23,7 @@ package extension AIChatImageAttachment {
     /// Builds transcript thumbnails from request-scoped Oracle images off the
     /// caller's actor. Full bytes are never retained; each attachment stores a
     /// downscaled JPEG so session files stay small.
-    static func thumbnails(from images: [AITransientImage]) async throws -> [AIChatImageAttachment] {
+    static func thumbnails(from images: [OracleAttachment]) async throws -> [AIChatImageAttachment] {
         try Task.checkCancellation()
         guard !images.isEmpty else { return [] }
         let worker = Task.detached(priority: .userInitiated) {

@@ -1090,7 +1090,7 @@ class OracleViewModel: ObservableObject {
             stream: AsyncThrowingStream<ChatStreamOutput, Error>
         )
 
-        var oracleImageThumbnailsForTesting: (@MainActor ([AITransientImage]) async throws -> [AIChatImageAttachment])?
+        var oracleImageThumbnailsForTesting: (@MainActor ([OracleAttachment]) async throws -> [AIChatImageAttachment])?
 
         var oracleReviewPackagingTraceObserverForTesting:
             OracleReviewPackagingTraceContext.Observer?
@@ -3245,7 +3245,7 @@ class OracleViewModel: ObservableObject {
         lookupContextOverride: WorkspaceLookupContext? = nil,
         reviewGitContextOverride: FrozenPromptGitReviewContext? = nil,
         overrideAIMessage: AIMessage? = nil,
-        oracleTransientImages: [AITransientImage] = [],
+        oracleAttachments: [OracleAttachment] = [],
         completionPolicy: OracleResponseCompletionPolicy = .interactive,
         contextBuilderScope: ContextBuilderOracleLaneScope? = nil,
         onProgress: ((_ text: String, _ reasoning: String?) -> Void)? = nil
@@ -3278,7 +3278,7 @@ class OracleViewModel: ObservableObject {
         // Create the user message
         // Only suspend when images are attached so the text-only path keeps
         // creating the user message synchronously on the main actor.
-        let preparationID = oracleTransientImages.isEmpty ? nil : UUID()
+        let preparationID = oracleAttachments.isEmpty ? nil : UUID()
         runStateBySession[targetSessionID]?.pendingImagePreparationID = preparationID
         defer {
             if let preparationID,
@@ -3289,17 +3289,17 @@ class OracleViewModel: ObservableObject {
         }
         let imageAttachments: [AIChatImageAttachment]
         do {
-            if oracleTransientImages.isEmpty {
+            if oracleAttachments.isEmpty {
                 imageAttachments = []
             } else {
                 #if DEBUG
                     if let override = oracleImageThumbnailsForTesting {
-                        imageAttachments = try await override(oracleTransientImages)
+                        imageAttachments = try await override(oracleAttachments)
                     } else {
-                        imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleTransientImages)
+                        imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleAttachments)
                     }
                 #else
-                    imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleTransientImages)
+                    imageAttachments = try await AIChatImageAttachment.thumbnails(from: oracleAttachments)
                 #endif
             }
         } catch {
@@ -3451,8 +3451,8 @@ class OracleViewModel: ObservableObject {
                         reviewGitContextOverride: reviewGitContextOverride
                     )
                 }
-                if !oracleTransientImages.isEmpty {
-                    aiMessage.transientImages = oracleTransientImages
+                if !oracleAttachments.isEmpty {
+                    aiMessage.attachments = oracleAttachments
                 }
                 guard await shouldContinueStreaming() else {
                     throw CancellationError()

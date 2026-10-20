@@ -195,7 +195,7 @@ struct MCPOracleToolService {
                 throw MCPError.internalError("Unable to resolve compose tab context for ask_oracle")
             }
             let lookupContext = try await oraclePackagingLookupContext(owner: owner)
-            let transientImages = try await loadOracleImages(
+            let attachments = try await loadOracleImages(
                 imageRequests,
                 lookupContext: lookupContext,
                 sessionAttachmentPaths: sessionAttachmentPaths(
@@ -243,7 +243,7 @@ struct MCPOracleToolService {
                 agentModeSessionID: owner.agentSessionID,
                 agentModeRunID: owner.runID,
                 packaging: packaging,
-                transientImages: transientImages
+                attachments: attachments
             )
         }
 
@@ -491,9 +491,9 @@ struct MCPOracleToolService {
             throw MCPError.invalidParams("images must be an array of objects.")
         }
         guard !items.isEmpty else { return [] }
-        guard items.count <= OracleImageAttachmentLimits.production.maxCount else {
+        guard items.count <= OracleAttachmentLimits.production.maxCount else {
             throw MCPError.invalidParams(
-                "images supports at most \(OracleImageAttachmentLimits.production.maxCount) items."
+                "images supports at most \(OracleAttachmentLimits.production.maxCount) items."
             )
         }
         return try items.enumerated().map { index, item in
@@ -779,7 +779,7 @@ struct MCPOracleToolService {
     ) async throws -> OracleViewModel.OracleSendTabContext {
         let stabilizedContext = await stabilizedVirtualContext(context)
         let lookupContext = try await oraclePackagingLookupContext(for: stabilizedContext)
-        let transientImages = try await loadOracleImages(
+        let attachments = try await loadOracleImages(
             imageRequests,
             lookupContext: lookupContext,
             sessionAttachmentPaths: sessionAttachmentPaths(
@@ -821,7 +821,7 @@ struct MCPOracleToolService {
             agentModeSessionID: owner.agentSessionID,
             agentModeRunID: owner.runID,
             packaging: packaging,
-            transientImages: transientImages
+            attachments: attachments
         )
     }
 
@@ -842,7 +842,7 @@ struct MCPOracleToolService {
         _ requests: [OracleImageRequest],
         lookupContext: WorkspaceLookupContext,
         sessionAttachmentPaths: [String]
-    ) async throws -> [AITransientImage] {
+    ) async throws -> [OracleAttachment] {
         guard !requests.isEmpty else { return [] }
         let storeRoots = await promptVM.workspaceFileContextStore.rootRefs(scope: lookupContext.rootScope)
         let representedPhysicalPaths = Set(storeRoots.map(\.standardizedFullPath))
@@ -875,11 +875,11 @@ struct MCPOracleToolService {
             )
         }
         do {
-            let authority = try await OracleImageAttachmentLoader.deriveAuthorityDetached(
+            let authority = try await OracleAttachmentLoader.deriveAuthorityDetached(
                 rootSpecs: rootSpecs,
                 sessionAttachmentPaths: sessionAttachmentPaths
             )
-            return try await OracleImageAttachmentLoader.loadDetached(
+            return try await OracleAttachmentLoader.loadDetached(
                 requests: requests,
                 authority: authority
             )

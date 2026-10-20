@@ -102,7 +102,7 @@ final class DirectHeadlessCompositionTests: XCTestCase {
             let properties = try XCTUnwrap(schema["properties"]?.objectValue)
             let images = try XCTUnwrap(properties["images"]?.objectValue)
             XCTAssertEqual(images["type"], .string("array"))
-            XCTAssertEqual(images["maxItems"], .int(OracleImageAttachmentLimits.production.maxCount))
+            XCTAssertEqual(images["maxItems"], .int(OracleAttachmentLimits.production.maxCount))
             let items = try XCTUnwrap(images["items"]?.objectValue)
             XCTAssertEqual(items["required"], .array([.string("path")]))
             let itemProperties = try XCTUnwrap(items["properties"]?.objectValue)

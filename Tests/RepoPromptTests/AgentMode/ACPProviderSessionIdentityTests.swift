@@ -144,10 +144,10 @@ final class ACPProviderSessionIdentityTests: XCTestCase {
             let request = makeRunRequest(agentKind: .cursor, workspacePath: workspace.path)
             let controller = try ACPAgentSessionController(provider: provider, runRequest: request, requestTimeouts: .init(bootstrapSeconds: 5, operationalSeconds: 5), allowsProviderProcessLaunchForTesting: true)
             let bootstrap = try await controller.bootstrap()
-            let image = AITransientImage(bytes: Data([1, 2, 3]), mediaType: .png, title: nil)
+            let image = OracleAttachment(payload: .image(.png, Data([1, 2, 3])), fileName: "image.png", title: nil)
             let supported = capability == "{\"image\":true}"
             do {
-                try await controller.prompt(AgentMessage(userMessage: "image", transientImages: [image]))
+                try await controller.prompt(AgentMessage(userMessage: "image", attachments: [image]))
                 XCTAssertTrue(supported)
             } catch {
                 XCTAssertFalse(supported)
@@ -441,7 +441,7 @@ private struct FakeACPProvider: ACPAgentProvider {
         request: ACPRunRequest
     ) throws -> [[String: Any]] {
         builds?.increment()
-        return try ACPPromptContentBuilder.blocks(text: message.userMessage, attachments: request.attachments, transientImages: message.transientImages)
+        return try ACPPromptContentBuilder.blocks(text: message.userMessage, attachments: request.attachments, oracleAttachments: message.attachments)
     }
 
     func normalizeSessionUpdate(

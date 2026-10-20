@@ -111,9 +111,9 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
             return
         }
 
-        let transient = AITransientImage(
-            bytes: png,
-            mediaType: .png,
+        let transient = OracleAttachment(
+            payload: .image(.png, png),
+            fileName: "private-image.png",
             title: "/workspace/private-image.png"
         )
         let attachments = try await AIChatImageAttachment.thumbnails(from: [transient])
@@ -132,11 +132,11 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
         XCTAssertGreaterThan(center?.brightnessComponent ?? 0, 0.95)
 
         // Corrupt bytes retain an indicator without retaining the original payload.
-        let corrupt = AITransientImage(bytes: Data([0x00, 0x01]), mediaType: .png, title: nil)
+        let corrupt = OracleAttachment(payload: .image(.png, Data([0x00, 0x01])), fileName: "image.png", title: nil)
         let corruptAttachments = try await AIChatImageAttachment.thumbnails(from: [corrupt])
         XCTAssertEqual(corruptAttachments.count, 1)
         XCTAssertTrue(corruptAttachments[0].thumbnailData.isEmpty)
-        let second = AITransientImage(bytes: png, mediaType: .png, title: "second")
+        let second = OracleAttachment(payload: .image(.png, png), fileName: "image.png", title: "second")
         let mixed = try await AIChatImageAttachment.thumbnails(from: [transient, corrupt, second])
         XCTAssertEqual(mixed.count, 3)
         XCTAssertEqual(mixed[0].thumbnailData, mixed[2].thumbnailData)
@@ -151,7 +151,7 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
     }
 
     func testThumbnailSourceBoundsAndCancelledParent() async throws {
-        func image(_ width: Int, _ height: Int) throws -> AITransientImage {
+        func image(_ width: Int, _ height: Int) throws -> OracleAttachment {
             try autoreleasepool {
                 let bitmap = try XCTUnwrap(NSBitmapImageRep(
                     bitmapDataPlanes: nil, pixelsWide: width, pixelsHigh: height,
@@ -159,7 +159,7 @@ final class ChatHistoryJSONOnlyTests: XCTestCase {
                     colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
                 ))
                 let bytes = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                return AITransientImage(bytes: bytes, mediaType: .png, title: nil)
+                return OracleAttachment(payload: .image(.png, bytes), fileName: "image.png", title: nil)
             }
         }
         // Valid encoded fixtures distinguish preflight omission from a corrupt-file fallback.

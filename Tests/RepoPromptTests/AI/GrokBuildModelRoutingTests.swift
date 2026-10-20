@@ -599,8 +599,8 @@ final class GrokBuildModelRoutingTests: XCTestCase {
         let message = AgentMessage(
             systemPrompt: "system",
             userMessage: "inspect",
-            transientImages: [
-                .init(bytes: Data([1, 2, 3]), mediaType: .png, title: "Secret Diagram")
+            attachments: [
+                .init(payload: .image(.png, Data([1, 2, 3])), fileName: "image.png", title: "Secret Diagram")
             ]
         )
 
