@@ -1,13 +1,9 @@
 import Foundation
 import UniformTypeIdentifiers
 
-/// The persisted facts a tile is derived from. Both carriers reduce to this, so legacy rows and new
-/// rows meet one presentation function.
 package struct AttachmentFacts: Equatable {
     package let kind: AttachmentKind
-    /// Last path component only. Empty for rows written before file names were recorded.
     package let fileName: String
-    /// Zero when the size was not recorded.
     package let byteCount: Int
 
     package init(kind: AttachmentKind, fileName: String, byteCount: Int) {
@@ -22,7 +18,6 @@ package struct AttachmentFacts: Equatable {
         return component == "/" ? "" : component
     }
 
-    /// Whether a rendered preview can exist for this kind, so a view knows to ask for one.
     package var canHavePreview: Bool {
         switch kind {
         case .image, .pdf: true
@@ -62,7 +57,6 @@ package enum AttachmentStatus: Equatable {
     case refused(reason: String)
 }
 
-/// What one attachment tile shows. Derived from facts on every render and never stored.
 package struct AttachmentPresentation: Equatable {
     package let face: AttachmentFace
     package let title: String
@@ -78,8 +72,6 @@ package struct AttachmentPresentation: Equatable {
     package static let previewUnavailableCaption = "Preview unavailable"
     private static let maxBadgeLength = 6
 
-    /// The single place a tile's content is decided.
-    ///
     /// - Parameters:
     ///   - preview: Whether a rendered preview exists. `.pending` shows the preview face while one loads.
     ///   - route: The route the attachment is about to travel, or nil when nothing is about to send.

@@ -180,7 +180,6 @@ public struct AgentChatItem: Codable, Identifiable, Sendable, Equatable {
     /// Human-readable text shown in bubbles (for user/assistant/system/error kinds)
     public var text: String
 
-    /// User-provided image attachments for this turn
     public var attachments: [AgentFileAttachment]
 
     /// Tagged file attachments (@ mentioned files) for this user turn

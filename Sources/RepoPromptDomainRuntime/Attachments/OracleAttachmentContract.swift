@@ -1,12 +1,6 @@
 import Foundation
 import MCP
 
-/// The single owner of the Oracle `attachments` MCP argument: its name, per-item fields, parser,
-/// advertised schema, usage prose, and the key set stripped from persisted tool-call arguments.
-///
-/// Every schema copy renders from here, and the numbers come from `OracleAttachmentLimits`, so no
-/// advertised limit can drift from the one the loader and planner enforce. The prose is derived from
-/// `AttachmentRouteCapability`, so it cannot claim a delivery the table does not make.
 package enum OracleAttachmentContract {
     package static let argumentName = "attachments"
     package static let pathField = "path"
@@ -24,8 +18,6 @@ package enum OracleAttachmentContract {
     private static let itemFields: Set = [pathField, titleField]
     private static let bytesPerMiB = 1_048_576
 
-    // MARK: - Retired argument
-
     package static func retiredArgumentMessage(toolName: String) -> String {
         "\(toolName) no longer accepts `\(retiredArgumentName)`. Pass `\(argumentName): [{\(pathField), \(titleField)?}]` instead; it takes images, PDFs, and text files."
     }
@@ -33,8 +25,6 @@ package enum OracleAttachmentContract {
     package static func headlessUnsupportedMessage() -> String {
         "Oracle `\(argumentName)` require the app backend; the direct headless backend cannot attach files."
     }
-
-    // MARK: - Parsing
 
     package static func parse(
         _ value: Value?,
@@ -82,10 +72,6 @@ package enum OracleAttachmentContract {
         }
     }
 
-    // MARK: - Schema
-
-    /// Appended to the canonical definition only: the direct headless backend cannot resolve workspace
-    /// files, so it rejects the argument instead of dropping it.
     package static let headlessLimitationNote =
         " Requires the app backend; the direct headless backend rejects `\(argumentName)`."
 
@@ -102,8 +88,6 @@ package enum OracleAttachmentContract {
         "Optional `\(argumentName)` attaches workspace-local files to the Oracle request: \(acceptedKindsClause()). Each item is `{\(pathField),\(titleField)?}` with a canonical absolute path inside the current loaded roots — a screenshot saved under a workspace root is fine — or the exact path of a file the user attached to this agent session (pasted or dropped into the composer; its path is listed in the user's message). Remote URLs, relative paths, sibling attachments, and arbitrary files outside the loaded roots are rejected before a message is sent. \(deliveryClause()) Attachment content is additional to pre-send text estimates and Context Builder text-selection budgets. Originals, not transcript thumbnails, are sent to each Oracle lane; group fan-out multiplies attachment usage/cost, not any one request's attachment cap. Provider-reported input totals may already include attachment usage. Session attachment files are normally deleted when the agent turn ends; forward them during that turn. Originals are this-turn-only: continuations do not automatically reattach prior attachments or send saved thumbnails. \(limitsClause(limits)) The selected provider or model may impose additional restrictions; accepted attachments do not guarantee full-request or model-context fit."
     }
 
-    /// The `attachments` property for an `inputSchema`. `headlessLimitation` appends the headless note
-    /// used by the canonical definition.
     package static func schemaProperty(
         limits: OracleAttachmentLimits = .production,
         headlessLimitation: Bool = false
@@ -130,8 +114,6 @@ package enum OracleAttachmentContract {
         ])
     }
 
-    // MARK: - Redaction
-
     /// Drops every key in `redactedArgumentKeys` from serialized Oracle send arguments. Fails closed:
     /// malformed or truncated arguments may hide an unparseable attachment key, so nil is returned
     /// instead.
@@ -149,8 +131,6 @@ package enum OracleAttachmentContract {
         else { return nil }
         return String(data: sanitized, encoding: .utf8)
     }
-
-    // MARK: - Prose derived from the capability table
 
     private enum Coverage {
         case every, some, none

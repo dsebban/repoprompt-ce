@@ -423,7 +423,6 @@ final class GrokBuildOneShotHeadlessAgentProvider: HeadlessAgentProvider {
         )
     }
 
-    /// Grok Build takes attachments only as prompt text. Images and PDFs refuse by name.
     private static func inliningAttachments(of message: AgentMessage) throws -> AgentMessage {
         var inlined = message
         inlined.userMessage = try AttachmentEncoding.textOnlyBody(

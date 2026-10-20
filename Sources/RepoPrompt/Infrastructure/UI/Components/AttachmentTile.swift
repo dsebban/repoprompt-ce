@@ -3,9 +3,7 @@ import RepoPromptDomainRuntime
 import SwiftUI
 
 enum AttachmentTileGeometry {
-    /// Agent Mode composer strip: a 76x52 face with its title and caption beneath.
     case strip
-    /// Oracle transcript chip: a bare 48x48 face. Title and caption move to the tooltip.
     case chip
 
     var faceSize: CGSize {
@@ -24,16 +22,12 @@ enum AttachmentTileGeometry {
     }
 }
 
-/// Where a tile gets its preview. The tile decides whether one exists; callers only say where to look.
 enum AttachmentTilePreview: Equatable {
     case none
-    /// An already rendered preview image, such as the JPEG persisted with a transcript row.
     case rendered(Data)
-    /// A file to render a preview from, off the main actor.
     case file(URL)
 }
 
-/// The one view that draws an attachment. Everything it shows comes from `AttachmentPresentation`.
 struct AttachmentTile: View {
     let facts: AttachmentFacts
     let preview: AttachmentTilePreview

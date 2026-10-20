@@ -45,8 +45,6 @@ class AnthropicProvider: AIProvider {
             )
         }
 
-        // Edge-case parity with the OpenAI encoders: when no user entry exists, attachments (and
-        // any remaining context) still need a user turn or they would be silently dropped.
         if lastUserIndex == nil, !planned.isEmpty {
             try messages.append(MessageParameter.Message(
                 role: .user,

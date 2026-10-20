@@ -1,7 +1,5 @@
 import Foundation
 
-/// An encoder received a delivery its own capability row does not declare.
-///
 /// The planner is the only producer of `PlannedAttachment`, so this is unreachable while a route's row
 /// and its encoder agree. The matrix test in `Tests/RepoPromptDomainRuntimeTests/Attachments` is what
 /// checks that agreement. The compiler does not: a new `AttachmentKind` case does not force a route to
@@ -28,7 +26,6 @@ package extension PlannedAttachment {
         .rungNotDeclared(fileName: attachment.fileName, kind: attachment.kind, route: route)
     }
 
-    /// The fenced block for an `inlineText` delivery, nil for native deliveries.
     var inlineTextBlock: String? {
         switch delivery {
         case let .inlineText(block): block
@@ -36,7 +33,6 @@ package extension PlannedAttachment {
         }
     }
 
-    /// Caption placed in a text part before a native image or document, nil without a title.
     /// Inline text carries its title inside its own block.
     var titleAnnotation: String? {
         guard let title = attachment.normalizedTitle else { return nil }
@@ -49,8 +45,6 @@ package extension PlannedAttachment {
 }
 
 package enum AttachmentEncoding {
-    /// Plans `attachments` for `route` under the production limits.
-    ///
     /// Admission calls the same pure planner earlier, so this only fails when a caller bypassed
     /// admission. The error names every refused file.
     package static func plan(
@@ -64,7 +58,6 @@ package enum AttachmentEncoding {
         }
     }
 
-    /// `body` with every inline text block placed ahead of it, separated by blank lines.
     package static func prependingInlineText(of planned: [PlannedAttachment], to body: String) -> String {
         let blocks = planned.compactMap(\.inlineTextBlock)
         guard !blocks.isEmpty else { return body }
@@ -75,8 +68,6 @@ package enum AttachmentEncoding {
         "data:\(mimeType);base64,\(data.base64EncodedString())"
     }
 
-    /// For routes that carry attachments only as text in the prompt. Anything the planner turns
-    /// into a native part throws, so nothing is dropped.
     package static func textOnlyBody(
         for attachments: [OracleAttachment],
         route: AttachmentRoute,

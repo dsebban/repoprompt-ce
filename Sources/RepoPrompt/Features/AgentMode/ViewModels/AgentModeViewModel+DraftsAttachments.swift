@@ -219,7 +219,6 @@ extension AgentModeViewModel {
         )
     }
 
-    /// The newest intake. Each one waits for it, so intakes never overlap.
     private static var attachmentIntakeTail: Task<Void, Never>?
 
     /// Imports `urls` as pending attachments. Admission, copy, content probe and identity hash run off
@@ -252,7 +251,6 @@ extension AgentModeViewModel {
         return intake
     }
 
-    /// Puts a readable refusal in the transcript for every file that could not be attached.
     func reportAttachmentFailures(tabID: UUID, _ failures: [AgentAttachmentFailure]) {
         reportAttachmentFailures(
             tabID: tabID,
@@ -280,7 +278,6 @@ extension AgentModeViewModel {
         scheduleSave(for: tabID)
     }
 
-    /// Pure file work with no view-model state, so it can run on any executor.
     private nonisolated static func importAttachments(
         urls: [URL],
         pending: [AgentFileAttachment],
@@ -307,7 +304,6 @@ extension AgentModeViewModel {
                 continue
             }
             do {
-                // Admission reads the directory entry only, so an oversize file is never copied or hashed.
                 let admitted = try store.admit(sourceURL: standardizedSourceURL)
                 let identity = store.identity(of: admitted.url, fileName: admitted.url.lastPathComponent)
                 if let identity, seenIdentities.contains(identity) {
@@ -544,7 +540,6 @@ extension AgentModeViewModel {
     }
 }
 
-/// A file the composer refused to attach, and why, in words the user can act on.
 struct AgentAttachmentFailure: Equatable {
     let fileName: String
     let reason: String

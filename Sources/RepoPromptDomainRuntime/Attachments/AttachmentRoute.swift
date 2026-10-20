@@ -17,8 +17,6 @@ package enum DocumentRung: Equatable { case nativeDocument, unsupported }
 package enum TextRung: Equatable { case inlineText, unsupported }
 package enum BinaryRung: Equatable { case unsupported }
 
-/// What one route can deliver, one field per `AttachmentKind`.
-///
 /// The initializer has no default values on purpose. Adding a field for a new kind breaks the
 /// initializer call of every row until each route answers it.
 package struct AttachmentRouteCapability: Equatable {

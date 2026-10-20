@@ -3,8 +3,6 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Renders the bounded, opaque JPEG preview a tile shows: the image itself, or page 1 of a PDF.
-///
 /// Every entry returns nil rather than failing when a file cannot be rendered within the limits, so
 /// an unreadable attachment still produces a tile. Full file bytes are never retained.
 package enum AttachmentPreviewRenderer {
@@ -78,7 +76,6 @@ package enum AttachmentPreviewRenderer {
         return try encodeJPEG(opaque)
     }
 
-    /// Page 1 only, fitted inside `maxPixelSize` and matted onto white like every other preview.
     private static func jpegData(fromPDF document: CGPDFDocument?) throws -> Data? {
         guard let document, document.numberOfPages >= 1,
               !document.isEncrypted || document.isUnlocked,

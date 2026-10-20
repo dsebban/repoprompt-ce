@@ -332,8 +332,6 @@ final class OracleImageSerializationTests: XCTestCase {
         XCTAssertEqual(AIModel.ollama.attachmentRoute, .openAIChat)
         XCTAssertEqual(AIModel.claude4Sonnet.attachmentRoute, .anthropicMessages)
         XCTAssertEqual(AIModel.grokBuildCustom(name: "grok").attachmentRoute, .grokBuild)
-        // AzureOpenAIProvider routes on the deployment descriptor before the flag, so a model whose
-        // flag disagrees must still be admitted under the chat row it can always encode.
         XCTAssertEqual(AIModel.azureCustom(name: "azure").attachmentRoute, .openAIChat)
         XCTAssertEqual(AIModel.customProviderUser(name: "custom").attachmentRoute, .customOpenAI)
     }
@@ -627,8 +625,6 @@ final class OracleImageSerializationTests: XCTestCase {
     }
 }
 
-/// The app-target half of the route × kind matrix. `AttachmentRouteEncoderMatrixTests` in
-/// `RepoPromptDomainRuntimeTests` covers the routes whose encoders the domain runtime owns.
 final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
     private enum Emitted: Hashable {
         case image
@@ -825,8 +821,6 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
         text.contains("Attached file: data.csv") && text.contains("a,b\n1,2")
     }
 
-    /// Drives `CodexCLIProvider.streamMessage` against a recording session controller. What the
-    /// controller is handed is what Codex would receive: the prompt text and the staged image files.
     private static func codex(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
         let controller = RecordingCodexController()
         let provider = CodexCLIProvider(sessionControllerFactory: { _, _ in controller })
@@ -843,8 +837,6 @@ final class AttachmentRouteEncoderMatrixAppTests: XCTestCase {
         return emitted
     }
 
-    /// Drives `GrokBuildOneShotHeadlessAgentProvider.streamAgentMessage` against a fixture CLI that
-    /// keeps a copy of the prompt file it was launched with.
     private static func grok(_ attachments: [OracleAttachment]) async throws -> Set<Emitted> {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("GrokMatrix-\(UUID().uuidString)", isDirectory: true)

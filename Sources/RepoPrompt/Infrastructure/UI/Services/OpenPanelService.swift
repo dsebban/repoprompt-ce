@@ -41,7 +41,6 @@ final class OpenPanelService {
         }
     }
 
-    /// Picks one or more files of any type.
     func pickFiles(
         title: String = "Choose Files",
         message: String? = nil,

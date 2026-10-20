@@ -471,7 +471,6 @@ struct MCPOracleToolService {
         "message", "mode", "chat_id", "new_chat", "model", OracleAttachmentContract.argumentName, "export_response"
     ]
 
-    /// Rejects the retired `images` argument by name, then any argument outside the accepted set.
     private static func validateOracleArguments(toolName: String, args: [String: Value]) throws {
         guard args[OracleAttachmentContract.retiredArgumentName] == nil else {
             throw MCPError.invalidParams(OracleAttachmentContract.retiredArgumentMessage(toolName: toolName))

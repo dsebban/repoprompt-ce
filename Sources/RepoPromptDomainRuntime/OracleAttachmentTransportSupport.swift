@@ -1,9 +1,5 @@
 import Foundation
 
-// MARK: - Claude stream-json transport
-
-/// Encodes Claude CLI input as one stream-json user line and reads the terminal result/error
-/// event back from stream-json output.
 package enum ClaudeStreamJSONTransport {
     package struct EncodingError: Error {}
 
@@ -44,7 +40,6 @@ package enum ClaudeStreamJSONTransport {
         return line + "\n"
     }
 
-    /// The last `result` or `error` event, with its lowercased type.
     package static func terminalEvent(in data: Data) -> (type: String, payload: [String: Any])? {
         for line in lines(of: data).reversed() {
             guard let json = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
@@ -99,8 +94,6 @@ package enum ClaudeStreamJSONTransport {
     }
 }
 
-// MARK: - Temporary file staging
-
 /// Writes request-scoped images into a private (0700) temporary directory for transports that
 /// only accept local file paths. Call `cleanup()` once the request finishes.
 package struct OracleTransientImageStaging {
@@ -112,8 +105,6 @@ package struct OracleTransientImageStaging {
     package let directory: URL
     package let files: [File]
 
-    /// Stages the native image deliveries of `planned`. Inline text travels in the prompt and needs
-    /// no file. Returns nil when no image needs staging.
     package static func stage(_ planned: [PlannedAttachment], route: AttachmentRoute) async throws -> Self? {
         var images: [(mediaType: ImageMediaType, data: Data, title: String?)] = []
         for item in planned {

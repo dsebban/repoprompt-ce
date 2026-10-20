@@ -51,9 +51,6 @@ package struct AIChatFileAttachment: Codable, Equatable, Identifiable {
 package extension AIChatFileAttachment {
     static let thumbnailMaxPixelSize = AttachmentPreviewRenderer.maxPixelSize
 
-    /// Builds transcript records from request-scoped Oracle attachments off the caller's actor. Full
-    /// bytes are never retained; each attachment stores its facts and a downscaled JPEG preview when
-    /// one can be rendered, so session files stay small.
     static func thumbnails(from oracleAttachments: [OracleAttachment]) async throws -> [AIChatFileAttachment] {
         try Task.checkCancellation()
         guard !oracleAttachments.isEmpty else { return [] }

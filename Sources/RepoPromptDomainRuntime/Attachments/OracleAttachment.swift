@@ -9,8 +9,6 @@ package struct OracleAttachment: Equatable {
     package let fileName: String
     package let title: String?
 
-    /// Reduces `fileName` to its last path component. An empty name or a bare root falls back to
-    /// `fallbackFileName`.
     package init(payload: AttachmentPayload, fileName: String, title: String?) {
         let component = (fileName as NSString).lastPathComponent
         self.payload = payload
@@ -29,7 +27,6 @@ package struct OracleAttachment: Equatable {
     }
 }
 
-/// The ordered attachments of one Oracle request.
 package struct OracleAttachmentSet: Equatable {
     package let attachments: [OracleAttachment]
 

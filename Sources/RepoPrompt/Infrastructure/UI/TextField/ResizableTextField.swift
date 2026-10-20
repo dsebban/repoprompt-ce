@@ -3,8 +3,6 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Reads attachable files off a pasteboard. Any regular file is attachable; what it is gets decided
-/// when it is imported, not by its extension here.
 enum AttachmentPasteboard {
     static let readableTypes: [NSPasteboard.PasteboardType] =
         [.fileURL] + NSImage.imageTypes.map { NSPasteboard.PasteboardType($0) }

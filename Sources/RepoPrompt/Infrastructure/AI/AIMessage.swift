@@ -52,9 +52,6 @@ extension AIMessage {
     /// All assistant turns are encoded as normal `message` objects
     /// (role = "assistant").  This avoids the need for the `msg_…` ids that
     /// `output_message` objects require.
-    ///
-    /// Plans against `.openAIResponses`, which carries everything `.openAIChat` carries. An Azure
-    /// model admitted under the chat row therefore encodes here without a second refusal.
     func openAIResponsesInput() throws -> SwiftOpenAI.InputType {
         let planned = try AttachmentEncoding.plan(attachments, route: .openAIResponses)
         // 1. Build the XML / meta tail that must be prepended to the *first*

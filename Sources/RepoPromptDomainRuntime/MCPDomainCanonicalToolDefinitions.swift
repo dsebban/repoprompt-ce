@@ -1229,9 +1229,6 @@ package enum MCPDomainCanonicalToolDefinitions {
 
     /// The vendored Oracle send definitions predate file attachments, so canonicalization
     /// advertises the app-backend `attachments` contract here instead of re-vendoring the blob.
-    /// The direct headless backend cannot resolve workspace files and rejects the argument at
-    /// execution time rather than dropping it. Every string and number comes from
-    /// ``OracleAttachmentContract``.
     private static func advertiseOracleAttachments(
         _ definition: MCPDomainToolDefinition
     ) -> MCPDomainToolDefinition {

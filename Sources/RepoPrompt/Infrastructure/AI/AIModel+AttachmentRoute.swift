@@ -1,9 +1,6 @@
 import RepoPromptDomainRuntime
 
 extension AIModel {
-    /// The encoder that builds this model's request, keyed by the code that emits the wire payload.
-    ///
-    /// The switch has no `default`, so a new `AIProviderType` must choose a route here.
     /// Azure maps to chat whatever `usesResponsesAPI` says: `AzureOpenAIProvider` routes on the
     /// deployment descriptor first, so a flag disagreement would otherwise refuse after the turn exists.
     /// The Responses encoder carries everything chat carries, so a chat-admitted set encodes under it.

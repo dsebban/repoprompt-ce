@@ -1,6 +1,5 @@
 import Foundation
 
-/// Renders a text attachment as a fenced block for the `inlineText` rung.
 package enum AttachmentInlineText {
     private static let minimumFenceLength = 3
     private static let backtick = UInt8(ascii: "`")

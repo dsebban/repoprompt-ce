@@ -1,7 +1,5 @@
 import Foundation
 
-/// Oracle attachment limits shared by the loader, the planner, and the advertised MCP schemas.
-///
 /// Byte caps are measured on raw file content, before any base64 expansion.
 package struct OracleAttachmentLimits: Equatable {
     package let maxCount: Int

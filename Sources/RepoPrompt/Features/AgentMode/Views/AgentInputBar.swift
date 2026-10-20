@@ -1839,7 +1839,6 @@ struct AgentComposerView: View, Equatable {
         return true
     }
 
-    /// Temporary sources are deleted only after the import has finished copying them.
     private func attachPreparedAttachments(_ prepared: [AgentAttachmentIntake.Prepared], tabID: UUID) {
         let urls = prepared.map(\.url)
         let intake = attachmentIntake
@@ -1928,8 +1927,6 @@ struct AgentAttachmentIntake {
         return shouldConsumeNSImageReadablePasteboard(pasteboard)
     }
 
-    /// Resolves dropped providers into files to attach. Everything that cannot be attached comes back
-    /// as a failure with its reason, so a drop never vanishes without a word.
     func loadPreparedAttachments(
         from providers: [NSItemProvider],
         completion: @escaping (_ prepared: [Prepared], _ failures: [AgentAttachmentFailure]) -> Void

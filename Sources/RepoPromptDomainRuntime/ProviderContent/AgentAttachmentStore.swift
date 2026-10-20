@@ -76,7 +76,6 @@ package struct AgentAttachmentStore: Sendable {
         return (sourceURL, byteCount)
     }
 
-    /// Streams the file through SHA-256, so identity never needs the whole file in memory.
     package func identity(of fileURL: URL, fileName: String) -> Identity? {
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
         defer { try? handle.close() }
@@ -98,15 +97,13 @@ package struct AgentAttachmentStore: Sendable {
         return Identity(fileName: fileName, byteCount: byteCount, digestHex: digestHex)
     }
 
-    /// Copies any admitted regular file into managed storage and records what it is. The kind comes
-    /// from the file's bytes through `AttachmentClassifier`, never from its extension.
     package func importFile(sourceURL: URL, workspaceDirectory: URL) throws -> ImportResult {
         let (sourceURL, byteCount) = try admit(sourceURL: sourceURL)
 
         let storageRoot = Self.managedStorageRootURL(for: workspaceDirectory)
         try fileManager.createDirectory(at: storageRoot, withIntermediateDirectories: true)
 
-        let kind = classifiedKind(of: sourceURL, byteCount: byteCount)
+        let kind = classifiedKind(of: sourceURL)
         let destinationURL = storageRoot
             .appendingPathComponent(UUID().uuidString)
             .appendingPathExtension(fileExtension(for: sourceURL, kind: kind))
@@ -152,14 +149,11 @@ package struct AgentAttachmentStore: Sendable {
         return values.fileSize ?? 0
     }
 
-    /// Reads at most one request's worth of the file, so a very large file is named from its prefix
-    /// instead of being loaded whole.
-    private func classifiedKind(of url: URL, byteCount: Int) -> AttachmentKind {
-        let probeLimit = limits.maxBytesPerFile
+    private func classifiedKind(of url: URL) -> AttachmentKind {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return .binary }
         defer { try? handle.close() }
-        let probe = (try? handle.read(upToCount: probeLimit)) ?? Data()
-        return AttachmentClassifier.kind(ofProbe: probe, totalByteCount: max(byteCount, probe.count))
+        let data = (try? handle.read(upToCount: limits.maxBytesPerFile)) ?? Data()
+        return AttachmentClassifier.kind(of: data)
     }
 
     private func fileExtension(for sourceURL: URL, kind: AttachmentKind) -> String {

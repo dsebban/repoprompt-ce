@@ -23,8 +23,6 @@ struct StoredMessage: Codable {
     /// (may be nil for older data).
     let allowedFilePaths: [String]?
 
-    /// Attachment previews attached to this message (nil for older data or
-    /// messages without file attachments).
     let fileAttachments: [AIChatFileAttachment]?
 
     enum CodingKeys: String, CodingKey {

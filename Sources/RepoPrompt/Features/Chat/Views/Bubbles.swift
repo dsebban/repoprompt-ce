@@ -558,7 +558,6 @@ private struct ForkButtonOverlay: View {
     }
 }
 
-/// Ordered, bounded previews of this user message's attachments.
 private struct FileAttachmentStrip: View {
     let attachments: [AIChatFileAttachment]
 

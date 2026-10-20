@@ -1,6 +1,5 @@
 import Foundation
 
-/// Failure to turn an image the transports cannot carry into one they can.
 package enum AttachmentClassificationError: Error, Equatable, LocalizedError {
     case imageConversionFailed(fileName: String, format: String)
     case imageTooLarge(fileName: String, format: String)
@@ -15,8 +14,6 @@ package enum AttachmentClassificationError: Error, Equatable, LocalizedError {
     }
 }
 
-/// The single place bytes become an `AttachmentPayload`.
-///
 /// Classification reads content only. The extension is never consulted, so a `.png` holding PDF bytes
 /// is a PDF.
 package enum AttachmentClassifier {
@@ -32,8 +29,8 @@ package enum AttachmentClassifier {
         bytes: Data,
         fileName: String
     ) throws(AttachmentClassificationError) -> AttachmentPayload {
-        let header = Data(bytes.prefix(headerByteCount))
-        if let image = sniffImage(header, totalByteCount: bytes.count) {
+        let header = bytes.prefix(headerByteCount)
+        if let image = sniffImage(of: bytes) {
             switch image {
             case let .native(mediaType):
                 return .image(mediaType, bytes)
@@ -51,21 +48,11 @@ package enum AttachmentClassifier {
     }
 
     /// The kind `classify` produces, without converting anything, so intake can name a file's kind
-    /// cheaply. Exact when `probe` is the whole file; when it is only a prefix, `totalByteCount` is the
-    /// full size and the answer is a best guess from the prefix.
-    package static func kind(ofProbe probe: Data, totalByteCount: Int) -> AttachmentKind {
-        let header = Data(probe.prefix(headerByteCount))
-        if sniffImage(header, totalByteCount: totalByteCount) != nil { return .image }
-        if header.starts(with: pdfSignature) { return .pdf }
-        let isPrefix = totalByteCount > probe.count
-        return decodesAsText(probe, allowingCutTail: isPrefix) ? .text : .binary
-    }
-
-    private static func decodesAsText(_ bytes: Data, allowingCutTail: Bool) -> Bool {
-        guard !bytes.prefix(textProbeByteCount).contains(0) else { return false }
-        // A prefix of a UTF-8 file can end inside a code point.
-        let maxCut = allowingCutTail ? min(3, bytes.count) : 0
-        return (0...maxCut).contains { String(data: bytes.dropLast($0), encoding: .utf8) != nil }
+    /// cheaply.
+    package static func kind(of bytes: Data) -> AttachmentKind {
+        if sniffImage(of: bytes) != nil { return .image }
+        if bytes.prefix(headerByteCount).starts(with: pdfSignature) { return .pdf }
+        return decodeText(bytes) != nil ? .text : .binary
     }
 
     private static func decodeText(_ bytes: Data) -> String? {
@@ -73,21 +60,14 @@ package enum AttachmentClassifier {
         return String(data: bytes, encoding: .utf8)
     }
 
-    // MARK: - Image sniffing
-
     enum SniffedImage: Equatable {
         case native(ImageMediaType)
         case convertible(ConvertibleImageFormat)
     }
 
-    /// Sniffs the image format of a whole file's bytes without classifying or converting it.
     static func sniffImage(of bytes: Data) -> SniffedImage? {
-        sniffImage(Data(bytes.prefix(headerByteCount)), totalByteCount: bytes.count)
-    }
-
-    /// `header` must start at index 0. PNG, JPEG, GIF, and WebP checks are the loader's original
-    /// magic-byte checks. They prove a format by its bytes, not that the image decodes.
-    static func sniffImage(_ data: Data, totalByteCount: Int) -> SniffedImage? {
+        let data = Data(bytes.prefix(headerByteCount))
+        let totalByteCount = bytes.count
         if totalByteCount >= 33,
            data.count >= 16,
            data.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]),

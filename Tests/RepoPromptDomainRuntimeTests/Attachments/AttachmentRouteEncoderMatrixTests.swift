@@ -2,8 +2,6 @@ import Foundation
 import RepoPromptDomainRuntime
 import XCTest
 
-/// Each route's encoder against its capability row, for every attachment kind.
-///
 /// The compiler cannot check this agreement: a new `AttachmentKind` does not force a route to answer
 /// it, and a row may still declare `.unsupported`. A row that promises a part its encoder never
 /// emits, or an encoder that emits what its row refuses, fails here. Routes whose encoders live in

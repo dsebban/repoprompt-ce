@@ -158,8 +158,6 @@ final class AttachmentPlannerTests: XCTestCase {
         XCTAssertEqual(plan(attachments, route: .acp), plan(attachments, route: .acp))
     }
 
-    // MARK: - Inline text rendering
-
     func testFenceClosesAfterContentThatContainsLongBacktickRuns() throws {
         let text = "intro\n```swift\nlet x = 1\n```\n`````\nouter run\n"
         let attachment = AttachmentTestFixtures.textAttachment(text, fileName: "doc.md")

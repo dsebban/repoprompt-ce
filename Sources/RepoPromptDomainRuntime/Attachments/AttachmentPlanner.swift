@@ -1,14 +1,11 @@
 import Foundation
 
-/// An attachment together with the one way its route will deliver it.
-///
 /// The initializer is `fileprivate`: `AttachmentPlanner` is the only producer, so an encoder cannot
 /// invent a delivery the route's capability row does not declare.
 package struct PlannedAttachment: Equatable {
     package enum Delivery: Equatable {
         case nativeImage(ImageMediaType, Data)
         case nativeDocument(Data)
-        /// The fenced block from `AttachmentInlineText`, ready to place in a text part.
         case inlineText(String)
     }
 
@@ -26,9 +23,7 @@ package enum AttachmentRefusalReason: Error, Equatable {
     case textExceedsInlineLimit(byteCount: Int, limit: Int)
 }
 
-/// One refused file.
 package struct AttachmentRefusal: Equatable {
-    /// Zero-based position in the request.
     package let index: Int
     package let fileName: String
     package let kind: AttachmentKind
@@ -39,7 +34,6 @@ package struct AttachmentRefusal: Equatable {
         "attachments[\(index)] \(fileName): \(reasonText)"
     }
 
-    /// The refusal without its `attachments[i] name:` prefix, for surfaces that already show the file name.
     package var reasonText: String {
         switch reason {
         case .routeCannotCarry:
@@ -65,7 +59,6 @@ package struct AttachmentRefusal: Equatable {
     }
 }
 
-/// The attachments together exceed what the route accepts in one request.
 package struct AttachmentRequestOverflow: Equatable {
     package let routeDisplayName: String
     package let encodedByteCount: Int
@@ -76,7 +69,6 @@ package struct AttachmentRequestOverflow: Equatable {
     }
 }
 
-/// Every reason a request's attachments cannot be delivered on a route, reported together.
 package struct AttachmentAdmissionError: Error, Equatable, LocalizedError {
     package let refusals: [AttachmentRefusal]
     package let requestOverflow: AttachmentRequestOverflow?
@@ -136,41 +128,32 @@ package enum AttachmentPlanner {
         capability: AttachmentRouteCapability,
         limits: OracleAttachmentLimits
     ) -> Result<PlannedAttachment.Delivery, AttachmentRefusalReason> {
+        if let reason = refusalReason(
+            kind: attachment.kind,
+            byteCount: attachment.payload.byteCount,
+            capability: capability,
+            limits: limits
+        ) {
+            return .failure(reason)
+        }
         switch attachment.payload {
         case let .image(mediaType, data):
-            switch capability.image {
-            case .nativeImage: .success(.nativeImage(mediaType, data))
-            case .unsupported: .failure(.routeCannotCarry)
-            }
+            return .success(.nativeImage(mediaType, data))
         case let .pdf(data):
-            switch capability.pdf {
-            case .nativeDocument: .success(.nativeDocument(data))
-            case .unsupported: .failure(.routeCannotCarry)
-            }
-        case let .text(text, data):
-            switch capability.text {
-            case .inlineText:
-                if data.count > limits.maxInlineTextBytes {
-                    .failure(.textExceedsInlineLimit(byteCount: data.count, limit: limits.maxInlineTextBytes))
-                } else {
-                    .success(.inlineText(AttachmentInlineText.render(
-                        text: text,
-                        fileName: attachment.fileName,
-                        title: attachment.normalizedTitle
-                    )))
-                }
-            case .unsupported: .failure(.routeCannotCarry)
-            }
+            return .success(.nativeDocument(data))
+        case let .text(text, _):
+            return .success(.inlineText(AttachmentInlineText.render(
+                text: text,
+                fileName: attachment.fileName,
+                title: attachment.normalizedTitle
+            )))
         case .binary:
-            switch capability.binary {
-            case .unsupported: .failure(.routeCannotCarry)
-            }
+            return .failure(.routeCannotCarry)
         }
     }
 
     /// Whether a file of `kind` and `byteCount` is refused on a route before any bytes are read, so a
-    /// surface that only knows the persisted facts can warn ahead of the request. A test holds this
-    /// equal to the refusals `plan` produces for every route and kind.
+    /// surface that only knows the persisted facts can warn ahead of the request.
     package static func refusalReason(
         kind: AttachmentKind,
         byteCount: Int,

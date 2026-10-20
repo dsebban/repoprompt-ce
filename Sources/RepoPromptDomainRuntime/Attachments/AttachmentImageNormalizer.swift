@@ -3,7 +3,6 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
-/// Image formats no transport accepts, converted to JPEG or PNG while loading.
 enum ConvertibleImageFormat: String, Equatable {
     case heic = "HEIC"
     case tiff = "TIFF"
