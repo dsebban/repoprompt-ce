@@ -306,6 +306,17 @@ final class AgentTabSession: ObservableObject {
 
     var worktreeBindingTransitionInProgress: Bool = false
 
+    /// Runtime-only: an execution-worktree change this session requested for itself from its own
+    /// live turn, applied at that turn's completed terminal boundary and then continued
+    /// automatically. Owned by `AgentModeViewModel+SelfWorktreeRelocation`.
+    var pendingSelfWorktreeRelocation: AgentSelfWorktreeRelocation? {
+        didSet {
+            if oldValue != pendingSelfWorktreeRelocation {
+                noteMonitorObservationInputsChanged()
+            }
+        }
+    }
+
     /// Wait/question state
     @Published var waitingPrompt: String? = nil {
         didSet { noteMonitorObservationInputsChanged() }
@@ -546,6 +557,7 @@ final class AgentTabSession: ObservableObject {
         let createdAt: Date
         /// Claude turn completions protected by this accepted steering instruction.
         var supersedingProtectedTurnIDs: Set<UUID> = []
+        var skipsSlashExpansion = false
     }
 
     var pendingClaudeSteeringInstructions: [ClaudeSteeringInstruction] = [] {
@@ -613,6 +625,7 @@ final class AgentTabSession: ObservableObject {
         let optimisticUserItemID: UUID?
         let createdAt: Date
         var managed: ACPSteeringManagedContext?
+        var skipsSlashExpansion = false
     }
 
     /// Lifecycle disposal withdraws only rows from the exact binding that accepted the steer.
