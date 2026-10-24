@@ -43,7 +43,7 @@ final class AgentSessionLinkACPSteerTests: XCTestCase {
             agentKind: .openCode, modelString: nil, workspacePath: directory.path,
             resumeSessionID: nil, attachments: [], taskLabelKind: nil
         )
-        let controller = try ACPAgentSessionController(provider: provider, runRequest: request)
+        let controller = try ACPAgentSessionController(provider: provider, runRequest: request, allowsProviderProcessLaunchForTesting: true)
         _ = try await controller.bootstrap()
 
         let tabID = UUID()
@@ -84,7 +84,17 @@ final class AgentSessionLinkACPSteerTests: XCTestCase {
         let session = viewModel.session(for: tabID)
         session.selectedAgent = .openCode
         session.hasLoadedPersistedState = true
-        let sessionID = try XCTUnwrap(viewModel.test_ensureSessionBoundToTab(session))
+        // Steering starts from an existing restored session with a live run, not an unfinished allocation.
+        let sessionID = UUID()
+        _ = try XCTUnwrap(viewModel.test_installPersistentSessionBinding(
+            sessionID: sessionID, on: session, updateWorkspaceMetadata: true
+        ))
+        XCTAssertNotNil(session.operationAdmissionFailureMessage)
+        session.recordRestorationAuthoritative(.persistedPayloadApplied)
+        _ = try XCTUnwrap(
+            session.operationAdmissionFailureMessage == nil ? session : nil,
+            "The restored fixture must admit operations before waiting on provider gates"
+        )
         let candidate = try XCTUnwrap(viewModel.agentSessionLinkCandidate(
             tabID: tabID, sessionID: sessionID, tabName: "ACP steer target", isWindowClosing: false
         ))
@@ -753,6 +763,114 @@ final class AgentSessionLinkACPSteerTests: XCTestCase {
         XCTAssertTrue(fixture.session.pendingACPSteeringInstructions.isEmpty)
     }
 
+    func testComposerAcceptanceAdvancesGenerationButManagedInputDoesNot() async throws {
+        let fixture = try await makeFixture()
+        let endpoint = try XCTUnwrap(fixture.viewModel.agentSessionLinkObserverEndpoint(tabID: fixture.session.tabID))
+        let bridge = AgentSessionLinkRuntimeBridge.shared
+        // This suite builds a synthetic window. Publish its live endpoint to the shared bridge
+        // so ordinary stale-endpoint sweeps cannot retire the generation during provider awaits.
+        let host = LiveWindowEndpointHost()
+        host.register(fixture.viewModel, windowID: 1)
+        bridge.attach(host: host)
+        defer { WindowStatesManager.shared.attachAgentSessionLinkBridge() }
+        let before = bridge.captureWaitInput(for: endpoint)
+        fixture.viewModel.test_beforeACPToolIdleWait = {
+            XCTAssertGreaterThan(bridge.captureWaitInput(for: endpoint).generation, before.generation)
+        }
+        defer { fixture.viewModel.test_beforeACPToolIdleWait = nil }
+        // Another MCP dispatch can be awaiting its acknowledgement; this is still local input.
+        fixture.session.isMCPInstructionDispatchInProgress = true
+        let submitted = fixture.viewModel.submitUserTurn(text: "accepted local input", tabID: fixture.session.tabID)
+        fixture.session.isMCPInstructionDispatchInProgress = false
+        guard case .submitted = submitted else { return XCTFail("Expected accepted composer input") }
+        let after = bridge.captureWaitInput(for: endpoint)
+        XCTAssertEqual(after.generation, before.generation + 1)
+        let outcome = await steer(fixture, request: request("managed input"))
+        guard case .delivered = outcome else { return XCTFail("Expected delivered managed input") }
+        XCTAssertEqual(bridge.captureWaitInput(for: endpoint), after)
+    }
+
+    func testDeferredMCPInputDoesNotBecomeLocalAfterItsDispatchScopeEnds() async throws {
+        let fixture = try await makeFixture()
+        let endpoint = try XCTUnwrap(fixture.viewModel.agentSessionLinkObserverEndpoint(tabID: fixture.session.tabID))
+        let bridge = AgentSessionLinkRuntimeBridge.shared
+        // This suite builds a synthetic window. Publish its live endpoint to the shared bridge
+        // so ordinary stale-endpoint sweeps cannot retire the generation during provider awaits.
+        let host = LiveWindowEndpointHost()
+        host.register(fixture.viewModel, windowID: 1)
+        bridge.attach(host: host)
+        defer { WindowStatesManager.shared.attachAgentSessionLinkBridge() }
+        let before = bridge.captureWaitInput(for: endpoint)
+        await fixture.viewModel.submitUserTurnAfterHydration(
+            tabID: fixture.session.tabID, originalSession: fixture.session,
+            originalBinding: fixture.session.persistentSessionBindingIdentity,
+            trimmedText: "deferred MCP input", attachmentsToSend: [], taggedFilesToSend: [],
+            activeWorkflow: nil, stopFence: AgentRunStartStopFence(session: fixture.session),
+            isLocalComposerInput: false
+        )
+        XCTAssertTrue(fixture.session.items.contains { $0.text == "deferred MCP input" })
+        XCTAssertEqual(bridge.captureWaitInput(for: endpoint), before)
+    }
+
+    func testInputAcceptedDuringReleaseBarrierMustAlsoFinishBeforeDrain() async throws {
+        let fixture = try await makeFixture()
+        let first = AgentSessionLinkStopSignal<Void>()
+        let second = AgentSessionLinkStopSignal<Void>()
+        addTeardownBlock { first.finish(())
+            second.finish(())
+        }
+        let firstTask = Task { await first.value() }
+        fixture.session.observerWaitRelease = (fixture.session.runID, fixture.session.activeRunAttemptID, firstTask)
+        var drained = false
+        let drain = Task { @MainActor in
+            try await fixture.session.awaitObserverWaitRelease(
+                runID: fixture.session.runID!,
+                runAttemptID: fixture.session.activeRunAttemptID
+            )
+            drained = true
+        }
+        for _ in 0 ..< 50 {
+            await Task.yield()
+        }
+        let secondTask = Task { await second.value() }
+        fixture.session.observerWaitRelease = (fixture.session.runID, fixture.session.activeRunAttemptID, secondTask)
+        first.finish(())
+        await firstTask.value
+        for _ in 0 ..< 50 {
+            await Task.yield()
+        }
+        XCTAssertFalse(drained, "A newer accepted input still owns a pending barrier")
+        second.finish(())
+        try await drain.value
+        XCTAssertTrue(drained)
+    }
+
+    func testAcceptedInputReleaseFinishesBeforeACPToolIdleDrain() async throws {
+        let fixture = try await makeFixture()
+        let release = AgentSessionLinkStopSignal<Void>()
+        addTeardownBlock { release.finish(()) }
+        var releaseFinished = false
+        let forwarding = Task { @MainActor in
+            await release.value()
+            releaseFinished = true
+        }
+        fixture.session.observerWaitRelease = (
+            fixture.session.runID, fixture.session.activeRunAttemptID, forwarding
+        )
+        fixture.viewModel.test_beforeACPToolIdleWait = {
+            XCTAssertTrue(releaseFinished, "Host idle drain must follow the accepted-input release barrier")
+        }
+        defer { fixture.viewModel.test_beforeACPToolIdleWait = nil }
+        let steering = Task { await self.steer(fixture, request: self.request("ordered steer")) }
+        for _ in 0 ..< 50 {
+            await Task.yield()
+        }
+        XCTAssertFalse(releaseFinished)
+        release.finish(())
+        let outcome = await steering.value
+        guard case .delivered = outcome else { return XCTFail("Expected accepted steering, got \(outcome)") }
+    }
+
     func testACPControllerTeardownWithdrawsManagedSteerBeforeDequeue() async throws {
         let fixture = try await makeFixture()
         let entered = AgentSessionLinkStopSignal<Void>()
@@ -822,6 +940,53 @@ final class AgentSessionLinkACPSteerTests: XCTestCase {
         )
         let restored = AgentChatItemPersist(from: prior).toItem()
         XCTAssertEqual(restored.dispatchedProviderText, exact)
+    }
+
+    func testInterruptedManagedSteerRedispatchReplaysFullProviderEnvelope() async throws {
+        let fixture = try await makeFixture()
+        let first = request("First overseer direction & keep <>\"' literal")
+        let firstOutcome = await steer(fixture, request: first)
+        guard case let .delivered(firstDelivery) = firstOutcome else {
+            return XCTFail("Expected first managed steer delivery: \(firstOutcome)")
+        }
+        XCTAssertEqual(firstDelivery.deliveryState, .steered)
+        let firstEnvelope = AgentSessionLinkMessageEnvelope.render(
+            sourceSessionID: first.observerSessionID, sourceName: first.observerDisplayName,
+            linkID: first.linkID, linkGeneration: first.linkGeneration,
+            message: first.message, framing: .management
+        )
+        let firstRow = try XCTUnwrap(
+            fixture.session.items.first(where: { $0.id == firstDelivery.targetItemID })
+        )
+        XCTAssertEqual(firstRow.text, first.message)
+        XCTAssertEqual(firstRow.dispatchedProviderText, firstEnvelope)
+
+        // The second managed steer interrupts the still-running turn. The serialized ACP
+        // flush re-dispatches the interrupted prompt inside <interrupted_user_messages>;
+        // the replayed bytes must be the exact provider envelope, framing included.
+        let second = request("Second overseer direction")
+        let secondOutcome = await steer(fixture, request: second)
+        guard case let .delivered(secondDelivery) = secondOutcome else {
+            return XCTFail("Expected second managed steer delivery: \(secondOutcome)")
+        }
+        XCTAssertEqual(secondDelivery.deliveryState, .steered)
+        let secondEnvelope = AgentSessionLinkMessageEnvelope.render(
+            sourceSessionID: second.observerSessionID, sourceName: second.observerDisplayName,
+            linkID: second.linkID, linkGeneration: second.linkGeneration,
+            message: second.message, framing: .management
+        )
+        let sent = try XCTUnwrap(fixture.provider.promptedMessages.last?.userMessage)
+        XCTAssertTrue(sent.contains("<interrupted_user_messages>"))
+        XCTAssertTrue(sent.contains(firstEnvelope))
+        XCTAssertTrue(sent.contains("delegation=\"user_delegated_management\""))
+        XCTAssertTrue(sent.contains("source_session_id=\"\(first.observerSessionID.uuidString)\""))
+        XCTAssertTrue(sent.contains("<steering_messages>"))
+        XCTAssertTrue(sent.contains(secondEnvelope))
+        let secondRow = try XCTUnwrap(
+            fixture.session.items.first(where: { $0.id == secondDelivery.targetItemID })
+        )
+        XCTAssertEqual(secondRow.dispatchedProviderText, secondEnvelope)
+        XCTAssertEqual(secondRow.crossSessionAttribution, second.attribution)
     }
 
     func testLegacyAttributedReplayDropsAndLocalReplayRemains() async throws {

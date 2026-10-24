@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import RepoPromptSettingsCore
 @_spi(TestSupport) @testable import RepoPromptApp
 import RepoPromptDomainRuntime
 import RepoPromptSecureStorage
@@ -81,7 +82,7 @@ final class ACPAdvertisedCommandControllerTests: XCTestCase {
             attachments: [],
             taskLabelKind: nil
         )
-        let controller = try ACPAgentSessionController(provider: provider, runRequest: request)
+        let controller = try ACPAgentSessionController(provider: provider, runRequest: request, allowsProviderProcessLaunchForTesting: true)
         controllers.append(controller)
         _ = try await controller.bootstrap()
         return Fixture(controller: controller, provider: provider, promptLog: promptLog, request: request)
@@ -272,7 +273,7 @@ final class ACPAdvertisedCommandControllerTests: XCTestCase {
             )
         }
         // Opened while an applicable permission level was selected.
-        let controller = try ACPAgentSessionController(provider: provider, runRequest: request(launchPermissionMode: "auto"))
+        let controller = try ACPAgentSessionController(provider: provider, runRequest: request(launchPermissionMode: "auto"), allowsProviderProcessLaunchForTesting: true)
         controllers.append(controller)
         _ = try await controller.bootstrap()
         try await AsyncTestWait.waitUntil("the load advertisement to be captured") {
@@ -318,6 +319,11 @@ final class ACPAdvertisedCommandControllerTests: XCTestCase {
 
 @MainActor
 final class AgentSessionLinkACPCompactRunnerTests: XCTestCase {
+    override func setUp() {
+        super.setUp()
+        GlobalSettingsStore.installApplicationModelIdentityPolicy()
+    }
+
     private var harnesses: [AgentSessionLinkRunnerHarness] = []
     private var temporaryURLs: [URL] = []
 
@@ -368,6 +374,10 @@ final class AgentSessionLinkACPCompactRunnerTests: XCTestCase {
         let session = harness.makeSession(agent: agent)
         let binding = AgentPersistentSessionBindingIdentity(tabID: session.tabID, sessionID: UUID())
         session.installPersistentSessionBinding(binding)
+        XCTAssertNotNil(session.operationAdmissionFailureMessage, "Installing a binding alone does not restore it")
+        // This runner fixture begins after payload restoration; creation and loading are separate contracts.
+        session.recordRestorationAuthoritative(.persistedPayloadApplied)
+        XCTAssertNil(session.operationAdmissionFailureMessage)
         return Fixture(harness: harness, provider: provider, session: session, promptLog: promptLog, binding: binding)
     }
 
@@ -753,7 +763,14 @@ final class AgentSessionLinkACPCompactTransactionTests: XCTestCase {
         let session = viewModel.session(for: tabID)
         session.selectedAgent = agent
         session.hasLoadedPersistedState = true
-        let sessionID = try XCTUnwrap(viewModel.test_ensureSessionBoundToTab(session))
+        // Compaction owns an existing session, not the configuration and first save of a new one.
+        let sessionID = UUID()
+        _ = try XCTUnwrap(viewModel.test_installPersistentSessionBinding(
+            sessionID: sessionID, on: session, updateWorkspaceMetadata: true
+        ))
+        XCTAssertNotNil(session.operationAdmissionFailureMessage)
+        session.recordRestorationAuthoritative(.persistedPayloadApplied)
+        XCTAssertNil(session.operationAdmissionFailureMessage)
         return Fixture(
             viewModel: viewModel,
             manager: manager,
@@ -785,7 +802,7 @@ final class AgentSessionLinkACPCompactTransactionTests: XCTestCase {
                 profile: fixture.session.permissionProfile
             )
         ))
-        let controller = try ACPAgentSessionController(provider: fixture.provider, runRequest: request)
+        let controller = try ACPAgentSessionController(provider: fixture.provider, runRequest: request, allowsProviderProcessLaunchForTesting: true)
         liveControllers.append(controller)
         let bootstrap = try await controller.bootstrap()
         if waitForAdvertisement {
@@ -1069,6 +1086,12 @@ final class AgentSessionLinkACPBackgroundCompactionSettleTests: XCTestCase {
     private func idleSession() -> AgentModeViewModel.TabSession {
         let session = AgentModeViewModel.TabSession(tabID: UUID())
         session.hasLoadedPersistedState = true
+        XCTAssertEqual(admission(session), .blocked(.targetLoading), "The load latch alone proves no binding")
+        session.installPersistentSessionBinding(
+            AgentPersistentSessionBindingIdentity(tabID: session.tabID, sessionID: UUID())
+        )
+        session.recordRestorationAuthoritative(.persistedPayloadApplied)
+        XCTAssertEqual(admission(session), .ready, "The settle tests require an otherwise sendable restored session")
         return session
     }
 

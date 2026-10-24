@@ -30,6 +30,7 @@ struct WindowContentView: View {
             .safeAreaInset(edge: .top) { GlobalSettingsPersistenceBlockBanner(allowsSessionDismissal: true) }
             .debugBuildWindowEdge()
             .environmentObject(windowState) // If your subviews need it
+            .environment(\.windowIsPresentationVisible, windowState.isPresentationVisible)
             .environment(\.agentModePerfRecorder, windowState.agentModeViewModel.perfRecorder)
             .environmentObject(sparkleManager)
             .environmentObject(versionManager) // Pass versionManager to ContentView
@@ -47,7 +48,9 @@ struct WindowContentView: View {
             )
             // Once the view appears, register it with WindowStatesManager
             .onAppear {
+                StartupPhaseLog.mark(.windowAppeared, window: windowState.windowID)
                 windowStatesManager.registerWindowState(windowState)
+                MCPExternalEventsMonitor.shared.scheduleCleanupOnce()
 
                 // Install the openWindow action into AppWindowOpener for programmatic window creation
                 AppWindowOpener.shared.install {
@@ -69,6 +72,7 @@ struct WindowContentView: View {
 
                 guard !windowStatesManager.isTerminating else {
                     windowState.aiQueriesService.cancelQuery()
+                    windowState.mcpServer.stopServiceObservation()
                     return
                 }
 

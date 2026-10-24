@@ -49,6 +49,11 @@ var repoPromptAppDependencies: [Target.Dependency] = [
     "RepoPromptProcess",
     "RepoPromptInstrumentation",
     "RepoPromptSecureStorage",
+    "RepoPromptFileSystem",
+    "RepoPromptVCS",
+    "RepoPromptPersistence",
+    "RepoPromptSettingsCore",
+    "RepoPromptProviderQuota",
     "RepoPromptCodeMapCore",
     "RepoPromptRegexCore",
     "RepoPromptWorkspaceCore",
@@ -74,12 +79,21 @@ var repoPromptAppSwiftSettings: [SwiftSetting] = [
     .enableUpcomingFeature("BareSlashRegexLiterals")
 ]
 
+var repoPromptSettingsCoreSwiftSettings: [SwiftSetting] = [
+    .define("DEBUG", .when(configuration: .debug))
+]
+
 var repoPromptTestDependencies: [Target.Dependency] = [
     "RepoPromptApp",
     "RepoPromptFoundation",
     "RepoPromptProcess",
     "RepoPromptInstrumentation",
     "RepoPromptSecureStorage",
+    "RepoPromptFileSystem",
+    "RepoPromptVCS",
+    "RepoPromptPersistence",
+    "RepoPromptSettingsCore",
+    "RepoPromptProviderQuota",
     "RepoPromptDomainRuntime",
     "RepoPromptCodeMapCore",
     "RepoPromptMCPCore",
@@ -101,6 +115,7 @@ if sentryEnabled {
     let sentryDependency = Target.Dependency.product(name: "Sentry", package: "sentry-cocoa")
     repoPromptAppDependencies.append(sentryDependency)
     repoPromptAppSwiftSettings.append(.define("REPOPROMPT_SENTRY_ENABLED"))
+    repoPromptSettingsCoreSwiftSettings.append(.define("REPOPROMPT_SENTRY_ENABLED"))
     repoPromptTestDependencies.append(sentryDependency)
     repoPromptTestSwiftSettings.append(.define("REPOPROMPT_SENTRY_ENABLED"))
 }
@@ -122,6 +137,18 @@ let package = Package(
             name: "RepoPrompt",
             dependencies: ["RepoPromptApp"],
             path: "Sources/RepoPromptExecutable"
+        ),
+        .target(
+            name: "RepoPromptProviderQuota",
+            dependencies: [],
+            path: "Sources/RepoPromptProviderQuota",
+            swiftSettings: swift6LanguageMode
+        ),
+        .testTarget(
+            name: "RepoPromptProviderQuotaTests",
+            dependencies: ["RepoPromptProviderQuota"],
+            path: "Tests/RepoPromptProviderQuotaTests",
+            swiftSettings: swift6LanguageMode
         ),
         .target(
             name: "RepoPromptDomainRuntime",
@@ -156,6 +183,54 @@ let package = Package(
             swiftSettings: [
                 .define("DEBUG", .when(configuration: .debug))
             ]
+        ),
+        .testTarget(
+            name: "RepoPromptFileSystemTests",
+            dependencies: ["RepoPromptFileSystem"],
+            path: "Tests/RepoPromptFileSystemTests",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .target(
+            name: "RepoPromptFileSystem",
+            dependencies: ["RepoPromptFoundation", "RepoPromptDomainRuntime", "RepoPromptWorkspaceCore", "RepoPromptC", .product(name: "UniversalCharsetDetection", package: "UniversalCharsetDetection"), .product(name: "Cuchardet", package: "UniversalCharsetDetection")],
+            path: "Sources/RepoPromptFileSystem",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptVCSTests",
+            dependencies: ["RepoPromptVCS"],
+            path: "Tests/RepoPromptVCSTests",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .target(
+            name: "RepoPromptVCS",
+            dependencies: ["RepoPromptFoundation", "RepoPromptProcess", "RepoPromptInstrumentation", "RepoPromptDomainRuntime", "RepoPromptFileSystem", "RepoPromptWorkspaceCore"],
+            path: "Sources/RepoPromptVCS",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptPersistenceTests",
+            dependencies: ["RepoPromptPersistence", "RepoPromptCodeMapCore", "RepoPromptFoundation", "RepoPromptFileSystem", "RepoPromptVCS"],
+            path: "Tests/RepoPromptPersistenceTests",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .target(
+            name: "RepoPromptPersistence",
+            dependencies: ["RepoPromptCodeMapCore", "RepoPromptFileSystem", "RepoPromptVCS", "RepoPromptShared", "RepoPromptC"],
+            path: "Sources/RepoPromptPersistence",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .testTarget(
+            name: "RepoPromptSettingsCoreTests",
+            dependencies: ["RepoPromptSettingsCore", "RepoPromptProviderQuota"],
+            path: "Tests/RepoPromptSettingsCoreTests",
+            swiftSettings: [.define("DEBUG", .when(configuration: .debug))]
+        ),
+        .target(
+            name: "RepoPromptSettingsCore",
+            dependencies: ["RepoPromptFoundation", "RepoPromptDomainRuntime", "RepoPromptProviderQuota", "RepoPromptShared"],
+            path: "Sources/RepoPromptSettingsCore",
+            swiftSettings: repoPromptSettingsCoreSwiftSettings
         ),
         .target(
             name: "RepoPromptSecureStorage",
@@ -232,7 +307,7 @@ let package = Package(
             ]
         ),
         .target(name: "CSwiftPCRE2", path: "Sources/CSwiftPCRE2", exclude: ["deps/sljit/sljit_src/sljitNativeARM_64.c", "deps/sljit/sljit_src/sljitSerialize.c", "deps/sljit/sljit_src/sljitUtils.c", "deps/sljit/sljit_src/sljitNativeX86_common.c", "deps/sljit/sljit_src/sljitNativeX86_64.c", "deps/sljit/sljit_src/sljitNativeX86_32.c", "deps/sljit/sljit_src/allocator_src/sljitWXExecAllocatorPosix.c", "deps/sljit/sljit_src/allocator_src/sljitProtExecAllocatorPosix.c", "deps/sljit/sljit_src/allocator_src/sljitExecAllocatorPosix.c", "deps/sljit/sljit_src/allocator_src/sljitExecAllocatorCore.c", "deps/sljit/sljit_src/allocator_src/sljitExecAllocatorApple.c"], publicHeadersPath: "include", cSettings: [.headerSearchPath("include"), .headerSearchPath("src"), .define("PCRE2_CODE_UNIT_WIDTH", to: "8"), .define("HAVE_CONFIG_H")]),
-        .target(name: "RepoPromptC", path: "Sources/RepoPromptC", publicHeadersPath: "include", cSettings: [.headerSearchPath("include")]),
+        .target(name: "RepoPromptC", path: "Sources/RepoPromptC", publicHeadersPath: "include", cSettings: [.headerSearchPath("include")], linkerSettings: [.linkedLibrary("sqlite3")]),
         // Exact-snapshot scanner ABI fallback for the JavaScript/Python manifests, whose
         // FileManager source probe evaluates false in this root package graph.
         .target(name: "TreeSitterScannerSupport", path: "Sources/TreeSitterScannerSupport", sources: ["src/javascript/scanner.c", "src/python/scanner.c"], publicHeadersPath: "include"),

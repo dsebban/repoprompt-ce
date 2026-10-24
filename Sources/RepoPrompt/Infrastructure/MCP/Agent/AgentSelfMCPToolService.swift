@@ -6,7 +6,7 @@ import RepoPromptDomainRuntime
 /// the immutable registration-time run attempt; tool arguments cannot name a target.
 @MainActor
 struct AgentSelfMCPToolService {
-    typealias RequestMetadata = MCPServerViewModel.RequestMetadata
+    typealias RequestMetadata = MCPRequestMetadata
     typealias Endpoint = DomainAgentSessionLinkEndpointIdentity
     typealias ObserverEndpointResolver = AgentSessionTargetOperationGuard.ObserverEndpointResolver
 
@@ -14,31 +14,34 @@ struct AgentSelfMCPToolService {
         case scheduled(AgentSelfCompactAttempt)
         case duplicate(requestID: UUID, status: AgentSelfCompactStatus?)
         case blocked(reason: String)
+        case noteTooLong(byteCount: Int, maximum: Int, basis: String)
         case unavailable
     }
 
-    let captureRequestMetadata: () async -> RequestMetadata
+    let captureRequestMetadata: () async -> MCPRequestMetadata
     let requireTargetWindow: () throws -> WindowState
     let resolveObserverEndpoint: ObserverEndpointResolver
     let captureCallOrigin: () -> AgentSelfMCPCallOrigin?
     let readSelf: (WindowState, Endpoint, AgentSelfMCPCallOrigin) -> AgentSelfContextSnapshot?
     let scheduleCompact: (WindowState, Endpoint, AgentSelfMCPCallOrigin, String, String) async -> Admission
+    var isToolEnabled: () -> Bool = { ToolAvailabilityStore.shared.isEnabled(MCPWindowToolName.agentSelf) }
 
     static let unavailableError = MCPError.invalidParams(
-        "agent_self is available only to the calling Agent Mode session with a resolved live binding; no target selector grants access."
+        "self_compact is available only to the calling Agent Mode session with a resolved live binding; no target selector grants access."
     )
 
     func execute(args: [String: Value]) async throws -> Value {
+        guard isToolEnabled() else { throw MCPError.invalidParams("self_compact is disabled.") }
         guard let op = AgentMCPToolHelpers.normalizedString(args["op"])?.lowercased() else {
-            throw MCPError.invalidParams("agent_self op is required: context or compact.")
+            throw MCPError.invalidParams("self_compact op is required: context or compact.")
         }
         let allowed: Set<String> = switch op {
         case "context": ["op"]
         case "compact": ["op", "note", "idempotency_key"]
-        default: throw MCPError.invalidParams("Unknown agent_self op '\(op)'.")
+        default: throw MCPError.invalidParams("Unknown self_compact op '\(op)'.")
         }
         for key in args.keys.sorted() where !allowed.contains(key) {
-            throw MCPError.invalidParams("agent_self \(op) does not support '\(key)'.")
+            throw MCPError.invalidParams("self_compact \(op) does not support '\(key)'.")
         }
         // Registration-time origin must exist before any await. The exact endpoint is resolved
         // independently from live server routing, and must still equal that captured incarnation.
@@ -61,22 +64,24 @@ struct AgentSelfMCPToolService {
             ])
         case "compact":
             guard case let .string(note)? = args["note"] else {
-                throw MCPError.invalidParams("agent_self compact note is required as a string.")
+                throw MCPError.invalidParams("self_compact compact note is required as a string.")
             }
+            guard let snapshot = readSelf(window, endpoint, origin) else { throw Self.unavailableError }
             let bytes: Int
-            switch AgentSessionSelfCompactNotePolicy.validation(of: note) {
+            switch AgentSessionSelfCompactNotePolicy.validation(of: note, maximum: nil) {
             case let .valid(byteCount): bytes = byteCount
-            case .empty: throw MCPError.invalidParams("agent_self compact note must not be empty or whitespace-only.")
+            case .empty: throw MCPError.invalidParams("self_compact compact note must not be empty or whitespace-only.")
             case let .tooLong(byteCount, maximum):
-                throw MCPError.invalidParams("agent_self compact note is \(byteCount) UTF-8 bytes; maximum \(maximum).")
+                let limit = AgentSessionSelfCompactNotePolicy.noteLimit(windowTokens: snapshot.context?.windowTokens)
+                throw Self.noteTooLongError(byteCount: byteCount, maximum: maximum, basis: limit.basis)
             case .invalidScalar:
-                throw MCPError.invalidParams("agent_self compact note contains a disallowed control character.")
+                throw MCPError.invalidParams("self_compact compact note contains a disallowed control character.")
             }
             guard case let .string(key)? = args["idempotency_key"],
                   AgentSessionSelfCompactNotePolicy.idempotencyKeyIsValid(key),
                   !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             else {
-                throw MCPError.invalidParams("agent_self compact idempotency_key is required (1...200 UTF-8 bytes).")
+                throw MCPError.invalidParams("self_compact compact idempotency_key is required (1...200 UTF-8 bytes).")
             }
             let admission = await scheduleCompact(window, endpoint, origin, note, key)
             switch admission {
@@ -104,12 +109,18 @@ struct AgentSelfMCPToolService {
                     "reason": .string(reason),
                     "detail": .string(Self.blockedDetail(for: reason))
                 ])
+            case let .noteTooLong(byteCount, maximum, basis):
+                throw Self.noteTooLongError(byteCount: byteCount, maximum: maximum, basis: basis)
             case .unavailable:
                 throw Self.unavailableError
             }
         default:
-            preconditionFailure("Validated agent_self operation")
+            preconditionFailure("Validated self_compact operation")
         }
+    }
+
+    private static func noteTooLongError(byteCount: Int, maximum: Int, basis: String) -> MCPError {
+        .invalidParams("self_compact compact note is \(byteCount) UTF-8 bytes; maximum \(maximum) for this session (\(basis)).")
     }
 
     private static func blockedDetail(for reason: String) -> String {
@@ -163,7 +174,9 @@ struct AgentSelfMCPToolService {
         if status.outcome == .recoveryRequired {
             details.append("The interrupted note is retained for explicit recovery, not automatically sent.")
         }
-        if !details.isEmpty { value["detail"] = .string(details.joined(separator: " ")) }
+        if !details.isEmpty {
+            value["detail"] = .string(details.joined(separator: " "))
+        }
         return .object(value)
     }
 }

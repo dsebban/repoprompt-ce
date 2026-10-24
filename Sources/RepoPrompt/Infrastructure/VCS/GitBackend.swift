@@ -1,4 +1,5 @@
 import Foundation
+import RepoPromptVCS
 
 // MARK: - Git Backend
 
@@ -16,6 +17,10 @@ actor GitBackend: VCSBackend {
 
     init(gitService: GitService = GitService()) {
         self.gitService = gitService
+    }
+
+    func invalidateUntrackedStats(at root: URL) async {
+        await gitService.invalidateUntrackedStats(at: root)
     }
 
     /// The environment this backend's Git subprocesses inherit.
@@ -144,12 +149,14 @@ actor GitBackend: VCSBackend {
     func createWorktreeWithResult(
         request: GitWorktreeCreateRequest,
         at repoURL: URL,
-        initializationContext: GitWorktreeInitializationContext? = nil
+        initializationContext: GitWorktreeInitializationContext? = nil,
+        beforeCommit: (@Sendable () async throws -> Void)? = nil
     ) async throws -> GitWorktreeCreateResult {
         try await gitService.createWorktreeWithResult(
             request: request,
             at: repoURL,
-            initializationContext: initializationContext
+            initializationContext: initializationContext,
+            beforeCommit: beforeCommit
         )
     }
 

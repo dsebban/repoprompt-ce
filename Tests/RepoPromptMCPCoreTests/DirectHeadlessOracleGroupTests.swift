@@ -3,9 +3,32 @@ import Foundation
 import MCP
 import RepoPromptDomainRuntime
 @testable import RepoPromptMCPCore
+import RepoPromptShared
 import XCTest
 
 final class DirectHeadlessOracleGroupTests: XCTestCase {
+    func testDirectOracleWithoutFixturePermitRefusesProviderAndLeavesTripwireUntouched() async throws {
+        let fixture = try Fixture(name: "provider-refusal")
+        defer { fixture.cleanup() }
+        let service = fixture.service(allowsProviderProcessLaunchForTesting: false)
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+        do {
+            _ = try await invoke(
+                prepared: prepared, backend: backend, toolName: "ask_oracle",
+                arguments: ["message": .string("must not launch")]
+            )
+            XCTFail("An ordinary headless service must refuse provider startup under XCTest")
+        } catch {
+            XCTAssertTrue(error is ProviderProcessLaunchPolicy.Refusal, "Unexpected refusal: \(error)")
+        }
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
     func testTwoAndFiveOracleStartsUsePhysicalLaneCarriersAndReturnLaneOrder() async throws {
         let fixture = try Fixture(name: "ordering")
         defer { fixture.cleanup() }
@@ -158,6 +181,36 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         XCTAssertTrue(try fixture.calls().isEmpty)
     }
 
+    func testOracleSendToolsRejectImagesBeforeProviderWork() async throws {
+        let fixture = try Fixture(name: "ask-oracle-images-rejected")
+        defer { fixture.cleanup() }
+        let service = fixture.service()
+        let prepared = try await service.prepareRuntime()
+        addTeardownBlock { await service.teardown(prepared) }
+        let backend = DirectHeadlessConversationBackend(
+            providerCoordinator: prepared.providerCoordinator,
+            oracleAdapter: prepared.oracleAdapter
+        )
+
+        for toolName in ["ask_oracle", "oracle_send"] {
+            do {
+                _ = try await invoke(
+                    prepared: prepared,
+                    backend: backend,
+                    toolName: toolName,
+                    arguments: [
+                        "message": .string("inspect this screenshot"),
+                        "images": .array([.object(["path": .string("/tmp/shot.png")])])
+                    ]
+                )
+                XCTFail("Expected images rejection on the direct headless backend")
+            } catch {
+                XCTAssertEqual(error as? DirectHeadlessOracleAdapter.AdapterError, .unsupportedImageAttachments)
+            }
+        }
+        XCTAssertTrue(try fixture.calls().isEmpty)
+    }
+
     func testNamedDirectContinuationStaysSingleLaneAfterEnablingGroupedSettings() async throws {
         let fixture = try Fixture(name: "named-direct-grouped-settings")
         defer { fixture.cleanup() }
@@ -232,7 +285,7 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
         }
     }
 
-    func testDeletedContinuationAfterPlanningRetainsRosterConflictError() async throws {
+    func testDeletedContinuationAfterPlanningReportsMissingContinuation() async throws {
         let fixture = try Fixture(name: "deleted-after-planning")
         defer { fixture.cleanup() }
         let service = fixture.service()
@@ -282,7 +335,9 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
             )
             XCTFail("Expected deleted continuation to fail")
         } catch {
-            XCTAssertEqual(error as? DirectHeadlessOracleAdapter.AdapterError, .rosterConflict)
+            XCTAssertEqual(error as? DirectHeadlessOracleAdapter.AdapterError, .continuationMissing)
+            XCTAssertTrue(DirectHeadlessMCPService.wireMessage(for: error).hasPrefix("oracle_continuation_missing:"))
+            XCTAssertEqual(try fixture.calls().count, 2, "Deleted continuation must not launch another provider")
         }
     }
 
@@ -1300,8 +1355,8 @@ final class DirectHeadlessOracleGroupTests: XCTestCase {
             argumentsJSON: JSONEncoder().encode(arguments),
             securityContext: security
         )
-        let result = try await DomainChildLaunchContext.$bundle.withValue(bundle) {
-            try await DomainChildLaunchContext.$current.withValue(bundle.singleCarrier) {
+        let result = try await DomainChildLaunchContext.bundleTaskLocal.withValue(bundle) {
+            try await DomainChildLaunchContext.currentTaskLocal.withValue(bundle.singleCarrier) {
                 switch toolName {
                 case "ask_oracle":
                     try await backend.startOracleConversation(request)
@@ -1700,7 +1755,7 @@ private struct Fixture {
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
     }
 
-    func service() -> DirectHeadlessMCPService {
+    func service(allowsProviderProcessLaunchForTesting: Bool = true) -> DirectHeadlessMCPService {
         DirectHeadlessMCPService(
             environment: [
                 "REPOPROMPT_CODEX_COMMAND": executable.path,
@@ -1709,7 +1764,8 @@ private struct Fixture {
                 "REPOPROMPT_MCP_WORKING_DIRS": root.path,
                 "PATH": ProcessInfo.processInfo.environment["PATH"] ?? ""
             ],
-            currentDirectory: root
+            currentDirectory: root,
+            allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting
         )
     }
 

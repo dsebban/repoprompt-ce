@@ -3,6 +3,7 @@ import JSONSchema
 import MCP
 import Ontology
 import OrderedCollections
+import RepoPromptDomainRuntime
 import RepoPromptShared
 
 @MainActor
@@ -22,8 +23,23 @@ final class MCPAgentControlToolProvider: MCPAppToolProviding {
             agentExploreTool(),
             agentRunTool(),
             agentManageTool(),
-            agentSessionLinkTool()
+            agentSessionLinkTool(),
+            becomeOverseerTool()
         ]
+    }
+
+    private func becomeOverseerTool() -> Tool {
+        let definition = MCPDomainCanonicalToolDefinitions.definition(named: MCPWindowToolName.becomeOverseer)!
+        let schema = try! JSONDecoder().decode(JSONSchema.self, from: JSONEncoder().encode(definition.inputSchema))
+        return runtime.tool(
+            name: definition.name,
+            freshnessPolicy: .none,
+            description: definition.description,
+            annotations: definition.annotations.mcpAnnotations,
+            inputSchema: schema
+        ) { [dependencies] _, args in
+            try await dependencies.executeBecomeOverseer(args)
+        }
     }
 
     /// Cross-window oversight of sessions the user explicitly granted this session access to.
@@ -41,11 +57,11 @@ final class MCPAgentControlToolProvider: MCPAppToolProviding {
 
             Links are exact, directional, revocable, non-transitive, and non-reciprocal. A session ID, tool visibility, target text, or incoming message grants nothing. Use the newest `<repoprompt_session_oversight>` inventory for outbound targets and capabilities; `list` itself requires an active outbound grant. `set_waiting_on` is self-scoped under any exact link; `request_attention` uses only an exact inbound link. New outbound links include `manage`. Only a current exact grant with `manage` permits pending-prompt disclosure, `respond`, `steer`, or `stop`; explicitly restricted existing links remain restricted. The `managed` result field and inventory report that grant.
 
-            **Operations**: list | poll | wait | read | send | cancel_pending_send | compact | set_waiting_on | snooze_auto_wake | request_attention | respond | steer | stop | create_lane | retire_lane
+            **Operations**: list | poll | wait | read | send | cancel_pending_send | compact | set_waiting_on | snooze_auto_wake | request_attention | respond | steer | stop | set_model | create_lane | retire_lane
 
             - `list`: refresh exact outbound targets and capabilities.
             - `poll`: snapshot sanitized target status, `idle_for_send`, context load, cursor, queued-send state, and a managed-only redacted `pending_interaction` when present.
-            - `wait`: wait on returned cursor(s) for change, idle, or sendable; managed-only pending interactions may be returned. A multi-target result omits targets that became unavailable while waiting and lists them in `unavailable_session_ids`; refresh `list` before using them.
+            - `wait`: pass returned `wait_cursor` strings in `cursors`, without session IDs. Wait for change, idle, or sendable; managed prompts may appear. Unavailable targets are omitted and named in `unavailable_session_ids`; refresh `list` before using them.
             - `read`: page the redacted user-visible transcript; reuse `next_cursor` and re-anchor on `cursor_reset`.
             - `send`: deliver an attributed message when `idle_for_send: true`, or queue one with `delivery: "when_sendable"`.
             - `cancel_pending_send`: withdraw your queued message by its `idempotency_key` before delivery.
@@ -56,8 +72,9 @@ final class MCPAgentControlToolProvider: MCPAppToolProviding {
             - `respond`: [manage] answer the exact current `interaction_id` only when its pending result is respondable. Manual-only prompts belong to the target's user; a mismatch applies nothing.
             - `steer`: [manage] direct that target now with a new `idempotency_key`; pending prompts block steering. ACP live steering is supported.
             - `stop`: [manage] cancel the target's current run — equivalent to its user pressing Stop. Requires a new `idempotency_key`. Dismisses pending prompts and withdraws queued inbound sends; never deletes the session or ends oversight.
-            - `create_lane`: under a direct link, create your top-level lane; unique `idempotency_key`.
+            - `create_lane`: direct link or overseer opt-in; make your lane; unique `idempotency_key`.
             - `retire_lane`: [manage + created by you] unlink/stash idle lane, never delete; no idempotency key.
+            - `set_model`: [manage] same agent, idle; next turn.
 
             Managed pending prompts are redacted; respondable prompt options remain verbatim. The result reports manual-only and omitted prompts without truncating them.
 
@@ -75,7 +92,7 @@ final class MCPAgentControlToolProvider: MCPAppToolProviding {
                 Pass `op` plus fields for that operation.
                 list: cursor?, max_items?
                 poll: exactly one of session_id/session_ids
-                wait: exactly one of session_id/session_ids; cursor? or cursors?; until?; timeout_seconds?
+                wait: cursors alone, or session_id/session_ids with cursor(s)?; until?; timeout_seconds? Local input cancels older waits.
                 read: session_id, cursor?, from?, max_items?, max_output_bytes?
                 send: session_id, message, idempotency_key; workflow_id|workflow_name?; delivery?; replace_pending?
                 cancel_pending_send: session_id, idempotency_key
@@ -86,36 +103,41 @@ final class MCPAgentControlToolProvider: MCPAppToolProviding {
                 respond: session_id, interaction_id; response?, answers?, skip?, content?, meta?
                 steer: session_id, message, idempotency_key
                 stop: session_id, idempotency_key
-                create_lane: idempotency_key; role?, session_name?, workspace?, message?, workflow_id|workflow_name? (with message)
+                create_lane: idempotency_key; role|model_id?, session_name?, workspace?, message?, workflow_id|workflow_name? (with message)
                 retire_lane: session_id
+                set_model: session_id, model_id
                 """,
                 properties: [
-                    "op": .string(description: "Operation.", enum: ["list", "poll", "wait", "read", "send", "cancel_pending_send", "compact", "set_waiting_on", "snooze_auto_wake", "request_attention", "respond", "steer", "stop", "create_lane", "retire_lane"]),
-                    "session_id": .string(description: "[retire_lane, poll, wait, read, send, cancel_pending_send, compact, snooze_auto_wake, respond, steer, stop] Target UUID; exclusive with session_ids."),
+                    "op": .string(description: "Operation.", enum: ["list", "poll", "wait", "read", "send", "cancel_pending_send", "compact", "set_waiting_on", "snooze_auto_wake", "request_attention", "respond", "steer", "stop", "create_lane", "retire_lane", "set_model"]),
+                    "session_id": .string(description: "[retire_lane, poll, wait, read, send, cancel_pending_send, compact, snooze_auto_wake, respond, steer, stop, set_model] Target UUID; exclusive with session_ids."),
                     "session_ids": .array(
                         description: "[poll, wait] Ordered target UUIDs; no duplicates, max 32; exclusive with session_id.",
                         items: .string()
                     ),
                     "cursor": .string(description: "[list, wait, read] Opaque returned cursor; never edit or construct."),
                     "cursors": .array(
-                        description: "[wait] Returned per-target cursors for multi-target wait.",
-                        items: .object(
-                            properties: [
-                                "session_id": .string(description: "Target UUID for this cursor."),
-                                "cursor": .string(description: "Returned wait cursor.")
-                            ],
-                            required: ["session_id", "cursor"]
-                        )
+                        description: "[wait] Returned wait_cursor strings and/or {session_id, cursor} records; max 32, no duplicate targets. No separate IDs required.",
+                        items: .anyOf([
+                            .string(),
+                            .object(
+                                properties: [
+                                    "session_id": .string(description: "Target UUID for this cursor."),
+                                    "cursor": .string(description: "Returned wait cursor.")
+                                ],
+                                required: ["session_id", "cursor"]
+                            )
+                        ])
                     ),
                     "until": .string(description: "[wait] change (default), idle, or sendable. Use sendable before send; idle is insufficient.", enum: ["change", "idle", "sendable"]),
                     "timeout_seconds": .number(description: "[wait] Max seconds; default 60; 0 polls immediately."),
                     "from": .string(description: "[read] Fresh page origin: tail (default/newest) or start (oldest).", enum: ["tail", "start"]),
                     "max_items": .integer(description: "[list, read] Item limit: list 32 default, read 30; max 100."),
-                    "max_output_bytes": .integer(description: "[read] Approximate pre-JSON UTF-8 limit; default 8000, max 20000."),
+                    "max_output_bytes": .integer(description: "[read] Approximate pre-JSON UTF-8 page limit; default 8000, max 20000. Rows use the page budget; budget-clipped rows carry a clip marker."),
                     "message": .string(description: "[create_lane, send, steer] Attributed message, max 16000 UTF-8 bytes."),
                     "idempotency_key": .string(description: "[create_lane, send, cancel_pending_send, steer, compact, stop] New per operation; reuse only for the same request. Max 200 UTF-8 bytes."),
+                    "model_id": .string(),
                     "role": .string(description: "[create_lane] explore|engineer|pair|design; default pair."),
-                    "session_name": .string(description: "[create_lane] Name, max 120 UTF-8 bytes."),
+                    "session_name": .string(description: "[create_lane] Max 120 UTF-8 bytes."),
                     "workspace": .string(description: "[create_lane] Active workspace name or UUID; default caller."),
                     "delivery": .string(description: "[send] immediate (default) or when_sendable (one queued message; lost on unlink/restart).", enum: ["immediate", "when_sendable"]),
                     "replace_pending": .boolean(description: "[send] Replace the when_sendable slot under a new key; invalid for immediate."),

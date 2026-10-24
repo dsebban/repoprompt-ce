@@ -1,5 +1,47 @@
+import Combine
 import Foundation
 import RepoPromptDomainRuntime
+import RepoPromptPersistence
+import RepoPromptSettingsCore
+
+extension CodeMapArtifactRuntime {
+    static let processWideProvider: CodeMapArtifactRuntimeProvider = {
+        let identity = WorkspaceContextFilesystemIdentity.identity
+        return makeProcessWideProvider(
+            identity: identity,
+            applicationSupportRootURL: identity.applicationSupportRootURL(),
+            postSuccessfulInitialization: {
+                #if !DEBUG
+                    CodeMapV6CacheDeletionScheduler.schedule()
+                #endif
+            },
+            globalCodeMapsDisabled: {
+                await MainActor.run { GlobalSettingsStore.shared.globalCodeMapsDisabled() }
+            },
+            bindingEngineDidInitialize: { engine in
+                Task { @MainActor in
+                    CodeMapGlobalDisableObservation.processWide = CodeMapGlobalDisableObservation(engine: engine)
+                    await engine.refreshGlobalCodeMapsDisabled()
+                }
+            }
+        )
+    }()
+}
+
+/// Production composition retains settings observation; isolated runtimes have no user-settings dependency.
+@MainActor
+final class CodeMapGlobalDisableObservation {
+    static var processWide: CodeMapGlobalDisableObservation?
+    private var subscription: AnyCancellable?
+
+    init(engine: WorkspaceCodemapBindingEngine) {
+        subscription = GlobalSettingsStore.shared.$codeMapsGloballyDisabled
+            .removeDuplicates()
+            .sink { [weak engine] _ in
+                Task { await engine?.refreshGlobalCodeMapsDisabled() }
+            }
+    }
+}
 
 @MainActor
 struct WindowStateComposition {
@@ -28,6 +70,8 @@ struct WindowStateComposition {
 
 @MainActor
 enum WindowStateCompositionFactory {
+    typealias AgentModeViewModelFactory = (Int, PromptViewModel, WorkspaceManagerViewModel, MCPServerViewModel) -> AgentModeViewModel
+
     static func make(
         windowID: Int,
         deferredInitialAgentSystemWorkspaceRefresh: Bool,
@@ -42,20 +86,34 @@ enum WindowStateCompositionFactory {
         workspaceSwitchTimingPolicy: WorkspaceSwitchTimingPolicy = .production,
         loadStoredAPISettingsDataOnInit: Bool = true,
         codexModelPollingService: CodexModelPollingService = .shared,
-        modelRouterRuntime injectedModelRouterRuntime: AgentTaskRouterRuntime? = nil
+        modelRouterRuntime injectedModelRouterRuntime: AgentTaskRouterRuntime? = nil,
+        agentModeViewModelFactory: AgentModeViewModelFactory? = nil,
+        sessionRuntimeWorkspace: WorkspaceModel? = nil,
+        borrowedAPISettingsViewModel: APISettingsViewModel? = nil
     ) -> WindowStateComposition {
+        WorkspaceContextStartupInstrumentation.install(AppWorkspaceStartupEventRecorder())
+        WorkspaceExternalReadWorkHooks.install(AppWorkspaceExternalReadWorkRecorder())
+        #if DEBUG
+            WorkspacePreparationInstrumentation.install(AppWorkspacePreparationRecorderProvider())
+            WorkspaceRootLoadFieldHooks.install(AppWorkspaceRootLoadFieldProvider())
+            WorkspaceApplyEditsRebaseProbeHooks.install(AppWorkspaceApplyEditsRebaseProbeRecorder())
+        #endif
         let modelRouterRuntime = injectedModelRouterRuntime ?? WindowStatesManager.shared.modelRouterRuntime
         // 1) Workspace file context store + visible file-tree UI adapter
         #if DEBUG
             let defaultWorkspaceFileContextStore = WorkspaceFileContextStore(
+                startupFeatureFlags: .current(),
                 enableCatalogShardShadowValidation: false,
                 nonGitCodeMapsEnabled: settingsStore.nonGitCodeMapsEnabled,
+                codeMapsGloballyDisabled: settingsStore.globalCodeMapsDisabled(),
                 restorePerfRecorder: AppWorkspaceRestorePerfRecorder(),
                 perfRecorder: AppAgentModePerfRecorder()
             )
         #else
             let defaultWorkspaceFileContextStore = WorkspaceFileContextStore(
+                startupFeatureFlags: .current(),
                 nonGitCodeMapsEnabled: settingsStore.nonGitCodeMapsEnabled,
+                codeMapsGloballyDisabled: settingsStore.globalCodeMapsDisabled(),
                 restorePerfRecorder: AppWorkspaceRestorePerfRecorder(),
                 perfRecorder: AppAgentModePerfRecorder()
             )
@@ -68,6 +126,7 @@ enum WindowStateCompositionFactory {
         )
         if injectedWorkspaceFileContextStore == nil {
             workspaceFilesViewModel.bindNonGitCodeMapsSetting(settingsStore)
+            workspaceFilesViewModel.bindGlobalCodeMapsSetting(settingsStore)
         }
 
         // 2) AI queries
@@ -76,7 +135,7 @@ enum WindowStateCompositionFactory {
             ?? AIQueriesService(keyManager: keyManager)
 
         // 3) API Settings
-        let apiSettingsViewModel = APISettingsViewModel(
+        let apiSettingsViewModel = borrowedAPISettingsViewModel ?? APISettingsViewModel(
             aiQueriesService: aiQueriesService,
             keyManager: keyManager,
             loadStoredDataOnInit: loadStoredAPISettingsDataOnInit,
@@ -94,16 +153,22 @@ enum WindowStateCompositionFactory {
             windowID: windowID,
             settingsManager: settingsManager,
             storedPromptPersistence: storedPromptPersistence,
+            // The borrowed API owner is already live. A second prompt's startup refresh reloads
+            // stored connection flags over it; it must not reset the canonical live connection.
+            refreshAvailableModelsOnInit: sessionRuntimeWorkspace == nil,
             perfRecorder: AppAgentModePerfRecorder()
         )
 
         // 7) Create the workspace manager with construction-time runtime persistence ownership.
-        let domainWorkspaceClient = domainRuntime.map {
-            DomainWorkspaceAuthorityClient(store: $0.workspaceStore, windowID: windowID)
-        }
+        // A nonvisual runtime shares MCP routing, but never owns or projects the visible workspace
+        // document. Its one-carrier snapshot is read-only placement, not a second workspace writer.
+        let domainWorkspaceClient = sessionRuntimeWorkspace == nil ? domainRuntime.map {
+            DomainWorkspaceAuthorityClient(store: $0.workspaceStore, windowID: windowID, metadataPathPolicy: $0.configuration.metadataPathPolicy)
+        } : nil
         let workspaceManager = WorkspaceManagerViewModel(
             fileManager: workspaceFilesViewModel,
             promptViewModel: promptManager,
+            sessionRuntimeWorkspace: sessionRuntimeWorkspace,
             workspaceSearchService: workspaceSearchService,
             domainWorkspaceAuthorityClient: domainWorkspaceClient,
             switchTimingPolicy: workspaceSwitchTimingPolicy,
@@ -117,6 +182,14 @@ enum WindowStateCompositionFactory {
         )
         let domainWorkspacePresentationBridge = domainWorkspaceClient.map {
             DomainWorkspacePresentationBridge(workspaceManager: workspaceManager, client: $0)
+        }
+        if let bridge = domainWorkspacePresentationBridge {
+            // Weak captures: the Bridge already holds the manager weakly; no retain cycle or new owner.
+            workspaceManager.installDomainCatalogRefresh(
+                request: { [weak bridge] isRetry in bridge?.requestCatalogRefresh(isRetry: isRetry) },
+                cancel: { [weak bridge] in bridge?.cancelCatalogRefresh() },
+                awaitRefresh: { [weak bridge] in await bridge?.refreshForAgentAdmission() ?? false }
+            )
         }
         domainWorkspacePresentationBridge?.start()
         let selectionCoordinator = WorkspaceSelectionCoordinator(
@@ -194,7 +267,7 @@ enum WindowStateCompositionFactory {
         )
 
         // 13) Agent mode (for minimal agent UI)
-        let agentModeViewModel = AgentModeViewModel(
+        let agentModeViewModel = agentModeViewModelFactory?(windowID, promptManager, workspaceManager, mcpServer) ?? AgentModeViewModel(
             windowID: windowID,
             promptManager: promptManager,
             workspaceManager: workspaceManager,
@@ -207,6 +280,8 @@ enum WindowStateCompositionFactory {
             restorePerfRecorder: AppWorkspaceRestorePerfRecorder(),
             perfRecorder: AppAgentModePerfRecorder()
         )
+        agentModeViewModel.repromptService = .live(keyManager: keyManager)
+        agentModeViewModel.preparedSessionRuntimes = WindowStatesManager.shared
         workspaceFilesViewModel.setSessionWorktreeBindingStatesProvider { [weak agentModeViewModel] sessionIDs in
             agentModeViewModel?.worktreeBindingStates(forAgentSessionIDs: sessionIDs) ?? [:]
         }

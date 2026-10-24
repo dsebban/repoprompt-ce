@@ -3,8 +3,12 @@ import CoreServices
 import Dispatch
 import Foundation
 import RepoPromptCodeMapCore
+import RepoPromptFileSystem
 import RepoPromptFoundation
 import RepoPromptInstrumentation
+import RepoPromptSettingsCore
+import RepoPromptShared
+import RepoPromptVCS
 import RepoPromptWorkspaceCore
 #if DEBUG
     import CryptoKit
@@ -488,7 +492,11 @@ actor WorkspaceFileContextStore {
         let flightID: UUID
     }
 
-    @TaskLocal private static var activeCodemapRecoveryApplication: CodemapRecoveryApplication?
+    // Boxed: runtime-sized payloads must not use `@TaskLocal` directly (#1039).
+    private nonisolated static let activeCodemapRecoveryApplicationTaskLocal = BoxedTaskLocal<CodemapRecoveryApplication?>(nil)
+    private nonisolated static var activeCodemapRecoveryApplication: CodemapRecoveryApplication? {
+        activeCodemapRecoveryApplicationTaskLocal.get()
+    }
 
     /// Physical-catalog recovery owned by one root epoch after its root authority was revoked.
     ///
@@ -1000,6 +1008,7 @@ actor WorkspaceFileContextStore {
         case managedFilePromotion = "managed_file_promotion"
         case catalogMutation = "catalog_mutation"
         case cacheCapacity = "cache_capacity"
+        case shardRetentionReclaim = "shard_retention_reclaim"
     }
 
     private final class PublicationInvalidationBatch {
@@ -1673,10 +1682,12 @@ actor WorkspaceFileContextStore {
                     let observedManifestMeasurements = await engine.debugManifestMeasurementSnapshot(
                         rootEpoch: capture.rootEpoch
                     )
+                    let writerActivity = await engine.debugManifestWriterActivity(rootEpoch: capture.rootEpoch)
                     manifest = CodemapGraphStatusManifestSnapshot(
                         failureCounts: observedManifest.counts,
                         lastFailure: observedManifest.lastFailure,
-                        measurements: observedManifestMeasurements
+                        measurements: observedManifestMeasurements,
+                        writerActivity: writerActivity
                     )
                     engineEvents = includeEvents
                         ? await engine.debugGraphIndexEvents(
@@ -2101,6 +2112,7 @@ actor WorkspaceFileContextStore {
             guard let state = rootStatesByID[rootID] else {
                 throw WorkspaceFileContextStoreError.rootNotLoaded(rootID)
             }
+            rootLifetimeTokensByID.updateValue(WorkspaceContextRootLifetimeToken(), forKey: rootID)?.revoke()
             rootStatesByID[rootID] = RootState(
                 lifetimeID: UUID(),
                 root: state.root,
@@ -2233,6 +2245,7 @@ actor WorkspaceFileContextStore {
         ) -> UUID? {
             guard let state = rootStatesByID[rootID] else { return nil }
             let replacementLifetimeID = UUID()
+            rootLifetimeTokensByID.updateValue(WorkspaceContextRootLifetimeToken(), forKey: rootID)?.revoke()
             rootStatesByID[rootID] = RootState(
                 lifetimeID: replacementLifetimeID,
                 root: state.root,
@@ -3028,6 +3041,8 @@ actor WorkspaceFileContextStore {
         let validationToken: SearchCatalogSnapshotValidationToken
         let capability: WorkspaceSearchCatalogAccessRequirement
         let snapshot: WorkspaceSearchCatalogSnapshot
+        /// Identity only: the snapshot's generation lease already owns these shards.
+        let leasedShardIdentitiesByRootID: [UUID: ObjectIdentifier]
         var lastAccessSequence: UInt64
     }
 
@@ -3042,6 +3057,7 @@ actor WorkspaceFileContextStore {
     }
 
     private let sessionRootLifetimeClock = WorkspaceSessionRootLifetimeClock()
+    private var rootLifetimeTokensByID: [UUID: WorkspaceContextRootLifetimeToken] = [:]
     private var rootStatesByID: [UUID: RootState] = [:]
     private var rootIDsByStandardizedPath: [String: UUID] = [:]
     private var foldersByID: [UUID: WorkspaceFolderRecord] = [:]
@@ -3095,8 +3111,9 @@ actor WorkspaceFileContextStore {
     private var activePublicationInvalidationBatch: PublicationInvalidationBatch?
     private static let maxCachedSearchCatalogSnapshotScopes = 16
     private static let maxCachedStaticPathMatchSnapshotScopes = 16
-    /// Covers overlapping readers/index builds while bounding retained full-root arrays. At the cap,
-    /// callers receive an authoritative uncached rebuild until older ARC leases drain.
+    /// Bounds tracked shard objects across overlapping readers/index builds, not independent
+    /// array/index storage. Reclaim old cache-owned leases first; at the remaining reader cap,
+    /// callers receive an authoritative uncached rebuild until those ARC leases drain.
     private static let maxLiveRootCatalogShardGenerationsPerRoot = 8
     // The checked-in WI-3 baseline (`docs/investigations/mcp-tool-throughput-wi3-baseline-2026-06-11.md`)
     // records authoritative catalog rebuild work in roots/files, and its fixture
@@ -3114,6 +3131,9 @@ actor WorkspaceFileContextStore {
     private let codemapGitEligibilityProbe: WorkspaceCodemapGitEligibilityProbe
     private let codemapGraphIndexBuildRetryPolicy: CodemapGraphIndexBuildRetryPolicy
     private var nonGitCodeMapsEnabled: Bool
+    private var codeMapsGloballyDisabled: Bool
+    private var codeMapsGlobalSettingRevision: UInt64 = 0
+    private var codeMapsGlobalTransitionID = UUID()
     private let selectionGraphFactory: WorkspaceCodemapSelectionGraphFactory
     private let selectionGraphQueryBudgetPolicy: WorkspaceCodemapAutomaticSelectionBudgetPolicy
     private let automaticSelectionAccountingMaximum: Int
@@ -3267,12 +3287,32 @@ actor WorkspaceFileContextStore {
     #if DEBUG
         private var pendingReceiptConsumptionDecisionByToken: [
             WorkspaceSessionWorktreeOwnershipToken:
-                (correlationID: UUID, decision: WorktreeStartupInstrumentation.ReceiptConsumptionDecision)
+                (correlationID: UUID, decision: WorkspaceContextStartupInstrumentation.ReceiptConsumptionDecision)
         ] = [:]
     #endif
     private var pendingSeededRootVisibilityWaitersByPath: [
         String: [UUID: CheckedContinuation<Void, Error>]
     ] = [:]
+    private struct RepositoryExcludeObservation {
+        let lifetimeID: UUID
+        let repositoryKey: GitWorkspaceAuthorityRepositoryKey
+        let token: GitWorkspaceMetadataMonitor.RetainToken
+        var appliedDigest: String?
+        var invalidationGeneration: UInt64 = 0
+        var isBlocked = false
+    }
+
+    private enum RepositoryExcludeReconciliationError: Error {
+        case unstableIgnorePolicy
+    }
+
+    #if DEBUG
+        private var repositoryExcludeWillPublishHandlerForTesting: (@Sendable () async -> Void)?
+    #endif
+    private var repositoryExcludeObservations: [UUID: RepositoryExcludeObservation] = [:]
+    private var repositoryExcludeRootsByRepository: [GitWorkspaceAuthorityRepositoryKey: Set<UUID>] = [:]
+    private var repositoryExcludeReconciliationTasks: [UUID: Task<Void, Never>] = [:]
+    private var repositoryExcludeDirtyRoots: Set<UUID> = []
     private var seededAuthorityInvalidationListenerTask: Task<Void, Never>?
     private var publishedSeededAuthorityFencesByRootID: [UUID: GitWorkspacePendingInitializationAuthorityFence] = [:]
     private var publishedSeededAuthorityClaimsByRootID: [UUID: WorkspaceRootSeedServingAuthorityClaim] = [:]
@@ -3284,6 +3324,12 @@ actor WorkspaceFileContextStore {
     private var seededAuthorityReconciliationTasksByRootID: [UUID: Task<Void, Never>] = [:]
     private let publisherIngressCoordinator: WorkspaceFileSystemIngressCoordinator
     private let unloadTerminationPolicy: WorkspaceRootUnloadTerminationPolicy
+    private let startupFeatureFlags: WorktreeStartupFeatureFlags
+    #if DEBUG
+        private var automaticReusableSnapshotAdmissionResultsByRootIDForTesting: [
+            UUID: WorkspaceRootReusableSnapshotCoordinator.ObservationResult
+        ] = [:]
+    #endif
     private var scopedIngressBarrierFlightStatesByRootID: [UUID: ScopedIngressBarrierRootFlightState] = [:]
     private var completedScopedIngressBarrierCutsByRootID: [UUID: ScopedIngressBarrierCompletedCut] = [:]
     private var nextScopedIngressBarrierToken: UInt64 = 0
@@ -3298,6 +3344,7 @@ actor WorkspaceFileContextStore {
             searchLaneConfiguration: StoreBackedWorkspaceSearchLane.Configuration = .production,
             debugNowNanoseconds: @escaping @Sendable () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
             unloadTerminationPolicy: WorkspaceRootUnloadTerminationPolicy = .production,
+            startupFeatureFlags: WorktreeStartupFeatureFlags = .standaloneOperationalDefault(),
             enableCatalogShardShadowValidation: Bool = true,
             codemapRuntimeProvider: @escaping CodeMapArtifactRuntimeProvider.Factory = {
                 try CodeMapArtifactRuntime.processWide()
@@ -3306,6 +3353,7 @@ actor WorkspaceFileContextStore {
             codemapGitEligibilityProbe: WorkspaceCodemapGitEligibilityProbe = .production(),
             codemapGraphIndexBuildRetryPolicy: CodemapGraphIndexBuildRetryPolicy = .production,
             nonGitCodeMapsEnabled: Bool = true,
+            codeMapsGloballyDisabled: Bool = false,
             codemapGraphIndexBuildLaunchPolicyForTesting: CodemapGraphIndexBuildLaunchPolicyForTesting = .enabled,
             selectionGraphFactory: WorkspaceCodemapSelectionGraphFactory = .production,
             selectionGraphQueryBudgetPolicy: WorkspaceCodemapAutomaticSelectionBudgetPolicy = .initial,
@@ -3337,11 +3385,13 @@ actor WorkspaceFileContextStore {
             storeBackedSearchLane = StoreBackedWorkspaceSearchLane(configuration: searchLaneConfiguration)
             self.debugNowNanoseconds = debugNowNanoseconds
             self.unloadTerminationPolicy = unloadTerminationPolicy
+            self.startupFeatureFlags = startupFeatureFlags
             self.codemapRuntimeProvider = codemapRuntimeProvider
             self.codemapLocalGitClassificationProbe = codemapLocalGitClassificationProbe
             self.codemapGitEligibilityProbe = codemapGitEligibilityProbe
             self.codemapGraphIndexBuildRetryPolicy = codemapGraphIndexBuildRetryPolicy
             self.nonGitCodeMapsEnabled = nonGitCodeMapsEnabled
+            self.codeMapsGloballyDisabled = codeMapsGloballyDisabled
             self.codemapGraphIndexBuildLaunchPolicyForTesting = codemapGraphIndexBuildLaunchPolicyForTesting
             self.selectionGraphFactory = selectionGraphFactory
             self.selectionGraphQueryBudgetPolicy = selectionGraphQueryBudgetPolicy
@@ -3373,6 +3423,7 @@ actor WorkspaceFileContextStore {
         init(
             searchLaneConfiguration: StoreBackedWorkspaceSearchLane.Configuration = .production,
             unloadTerminationPolicy: WorkspaceRootUnloadTerminationPolicy = .production,
+            startupFeatureFlags: WorktreeStartupFeatureFlags = .standaloneOperationalDefault(),
             codemapRuntimeProvider: @escaping CodeMapArtifactRuntimeProvider.Factory = {
                 try CodeMapArtifactRuntime.processWide()
             },
@@ -3380,6 +3431,7 @@ actor WorkspaceFileContextStore {
             codemapGitEligibilityProbe: WorkspaceCodemapGitEligibilityProbe = .production(),
             codemapGraphIndexBuildRetryPolicy: CodemapGraphIndexBuildRetryPolicy = .production,
             nonGitCodeMapsEnabled: Bool = false,
+            codeMapsGloballyDisabled: Bool = false,
             selectionGraphFactory: WorkspaceCodemapSelectionGraphFactory = .production,
             selectionGraphQueryBudgetPolicy: WorkspaceCodemapAutomaticSelectionBudgetPolicy = .initial,
             automaticSelectionAccountingMaximum: Int = .max,
@@ -3409,11 +3461,13 @@ actor WorkspaceFileContextStore {
         ) {
             storeBackedSearchLane = StoreBackedWorkspaceSearchLane(configuration: searchLaneConfiguration)
             self.unloadTerminationPolicy = unloadTerminationPolicy
+            self.startupFeatureFlags = startupFeatureFlags
             self.codemapRuntimeProvider = codemapRuntimeProvider
             self.codemapLocalGitClassificationProbe = codemapLocalGitClassificationProbe
             self.codemapGitEligibilityProbe = codemapGitEligibilityProbe
             self.codemapGraphIndexBuildRetryPolicy = codemapGraphIndexBuildRetryPolicy
             self.nonGitCodeMapsEnabled = nonGitCodeMapsEnabled
+            self.codeMapsGloballyDisabled = codeMapsGloballyDisabled
             self.selectionGraphFactory = selectionGraphFactory
             self.selectionGraphQueryBudgetPolicy = selectionGraphQueryBudgetPolicy
             precondition(automaticSelectionAccountingMaximum >= 0)
@@ -3442,6 +3496,18 @@ actor WorkspaceFileContextStore {
     #endif
 
     deinit {
+        seededAuthorityInvalidationListenerTask?.cancel()
+        for task in repositoryExcludeReconciliationTasks.values {
+            task.cancel()
+        }
+        let excludeTokens = repositoryExcludeObservations.values.map(\.token)
+        let authority = workspaceStateAuthority
+        Task { for token in excludeTokens {
+            await authority.releaseMetadataObservation(token)
+        } }
+        for token in rootLifetimeTokensByID.values {
+            token.revoke()
+        }
         #if os(macOS)
             searchContentMemoryPressureSource.cancel()
         #endif
@@ -4241,10 +4307,10 @@ actor WorkspaceFileContextStore {
         startupContext: WorktreeStartupContext
     ) async throws -> PendingSeededRootAttempt {
         guard hint.creationReceipt.witnessCoverage.endEventID > 0 else {
-            WorktreeStartupInstrumentation.recordSeedReceiptJournalCut(present: false)
+            WorkspaceContextStartupInstrumentation.recordSeedReceiptJournalCut(present: false)
             return .fallback(.witnessGap)
         }
-        WorktreeStartupInstrumentation.recordSeedReceiptJournalCut(present: true)
+        WorkspaceContextStartupInstrumentation.recordSeedReceiptJournalCut(present: true)
         try Task.checkCancellation()
         guard latestSessionWorktreeOwnershipGenerationByOwnerID[token.ownerID] == token.generation,
               sessionWorktreeReservedPathsByToken[token]?.contains(standardizedPath) == true,
@@ -4361,7 +4427,7 @@ actor WorkspaceFileContextStore {
             pendingSeededRootsByID[pendingID]?.captureIdentity = capture
             pendingSeededRootsByID[pendingID]?.lastAppliedWatcherWatermark = capture.initialAcceptedWatermark
             pendingSeededRootsByID[pendingID]?.phase = .watcherCapturing
-            WorktreeStartupInstrumentation.record(
+            WorkspaceContextStartupInstrumentation.record(
                 .seedWatcherAttached,
                 context: startupContext,
                 route: .diffSeedServing
@@ -4505,12 +4571,12 @@ actor WorkspaceFileContextStore {
                 )
                 return .fallback(.changedIgnoreAuthority)
             }
-            WorktreeStartupInstrumentation.record(
+            WorkspaceContextStartupInstrumentation.record(
                 .seedReplayFenced,
                 context: startupContext,
                 route: .diffSeedServing
             )
-            WorktreeStartupInstrumentation.recordSeedReplay(
+            WorkspaceContextStartupInstrumentation.recordSeedReplay(
                 acceptedPayloadCount: replay.acceptedPayloadCount,
                 acceptedEventCount: replay.acceptedEventCount,
                 initializationWatermarkDelta: Int(
@@ -4531,7 +4597,7 @@ actor WorkspaceFileContextStore {
                 standardizedPath: standardizedPath,
                 expectedPhase: .replaying(replayCut)
             )
-            WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(
+            WorkspaceContextStartupInstrumentation.recordSeedMetadataRevalidation(
                 used: validatedFence.revalidationUsed
             )
             try requirePendingSeededRootCurrent(
@@ -4620,12 +4686,12 @@ actor WorkspaceFileContextStore {
             ready.preparedShard = shard
             ready.phase = .readyForCommit
             pendingSeededRootsByID[pendingID] = ready
-            WorktreeStartupInstrumentation.recordSeedProjectedPreparation(
+            WorkspaceContextStartupInstrumentation.recordSeedProjectedPreparation(
                 baseEntryCount: projected.baseEntryCount,
                 overlayEntryCount: projected.overlayEntryCount,
                 tombstoneCount: projected.tombstoneCount
             )
-            WorktreeStartupInstrumentation.record(
+            WorkspaceContextStartupInstrumentation.record(
                 .seedReadyForCommit,
                 context: startupContext,
                 route: .diffSeedServing
@@ -4691,13 +4757,244 @@ actor WorkspaceFileContextStore {
     private func ensureSeededAuthorityInvalidationListener() async {
         guard seededAuthorityInvalidationListenerTask == nil else { return }
         let events = await workspaceStateAuthority.invalidationEvents()
+        guard seededAuthorityInvalidationListenerTask == nil else { return }
         seededAuthorityInvalidationListenerTask = Task { [weak self] in
             for await event in events {
                 guard !Task.isCancelled else { break }
+                await self?.handleRepositoryExcludeInvalidation(event)
                 await self?.handleSeededAuthorityInvalidation(event)
             }
         }
     }
+
+    /// Ordinary loaded roots share the existing Git metadata owner with seeded worktrees.
+    /// In particular, a linked worktree's info/exclude lives outside its watched source root.
+    private func repositoryExcludeLayout(for state: RootState) throws -> GitRepositoryLayout? {
+        guard case let .gitRoot(prefix) = state.service.ignoreRulePolicy else { return nil }
+        var repositoryRoot = URL(fileURLWithPath: state.root.standardizedFullPath)
+            .resolvingSymlinksInPath().standardizedFileURL
+        for _ in prefix.value.split(separator: "/") {
+            repositoryRoot.deleteLastPathComponent()
+        }
+        guard let layout = GitRepositoryLayoutResolver.resolve(atWorkTreeRoot: repositoryRoot) else {
+            throw IgnoreRulePolicyResolutionError.ambiguousGitTopology
+        }
+        return layout
+    }
+
+    private func observeRepositoryExcludes(rootID: UUID) async throws {
+        guard let state = rootStatesByID[rootID],
+              let layout = try repositoryExcludeLayout(for: state)
+        else { return }
+        if repositoryExcludeObservations[rootID]?.lifetimeID == state.lifetimeID {
+            try await reconcileRepositoryExcludes(rootID: rootID, lifetimeID: state.lifetimeID)
+            return
+        }
+        await ensureSeededAuthorityInvalidationListener()
+        let token = try await workspaceStateAuthority.retainMetadataObservation(for: layout)
+        let appliedDigest = await state.service.repositoryExcludeDigest
+        guard rootStatesByID[rootID]?.lifetimeID == state.lifetimeID, !Task.isCancelled else {
+            await workspaceStateAuthority.releaseMetadataObservation(token)
+            throw CancellationError()
+        }
+        let key = GitWorkspaceAuthorityRepositoryKey(layout: layout)
+        repositoryExcludeObservations[rootID] = RepositoryExcludeObservation(
+            lifetimeID: state.lifetimeID,
+            repositoryKey: key,
+            token: token,
+            appliedDigest: appliedDigest
+        )
+        repositoryExcludeRootsByRepository[key, default: []].insert(rootID)
+        // Observation precedes this check, closing the initial crawl-to-watch gap without
+        // rescanning an unchanged root each time it is loaded.
+        try await reconcileRepositoryExcludes(rootID: rootID, lifetimeID: state.lifetimeID)
+    }
+
+    private func rebindRepositoryExcludeObservation(
+        rootID: UUID,
+        lifetimeID: UUID,
+        layout: GitRepositoryLayout
+    ) async throws {
+        guard let previous = repositoryExcludeObservations[rootID], previous.lifetimeID == lifetimeID else {
+            throw CancellationError()
+        }
+        let key = GitWorkspaceAuthorityRepositoryKey(layout: layout)
+        guard previous.repositoryKey != key else { return }
+        let token = try await workspaceStateAuthority.retainMetadataObservation(for: layout)
+        guard rootStatesByID[rootID]?.lifetimeID == lifetimeID,
+              repositoryExcludeObservations[rootID]?.token == previous.token,
+              !Task.isCancelled
+        else {
+            await workspaceStateAuthority.releaseMetadataObservation(token)
+            throw CancellationError()
+        }
+        repositoryExcludeRootsByRepository[previous.repositoryKey]?.remove(rootID)
+        if repositoryExcludeRootsByRepository[previous.repositoryKey]?.isEmpty == true {
+            repositoryExcludeRootsByRepository.removeValue(forKey: previous.repositoryKey)
+        }
+        repositoryExcludeRootsByRepository[key, default: []].insert(rootID)
+        repositoryExcludeObservations[rootID] = RepositoryExcludeObservation(
+            lifetimeID: lifetimeID,
+            repositoryKey: key,
+            token: token,
+            appliedDigest: previous.appliedDigest,
+            invalidationGeneration: previous.invalidationGeneration &+ 1,
+            isBlocked: previous.isBlocked
+        )
+        await workspaceStateAuthority.releaseMetadataObservation(previous.token)
+    }
+
+    private func handleRepositoryExcludeInvalidation(_ event: GitWorkspaceAuthorityInvalidationEvent) {
+        guard case let .metadata(kinds) = event.kind,
+              !kinds.isDisjoint(with: [.ignoreAuthority, .dotGit, .monitorGap])
+        else { return }
+        for rootID in repositoryExcludeRootsByRepository[event.repositoryKey] ?? [] {
+            guard var observation = repositoryExcludeObservations[rootID] else { continue }
+            observation.invalidationGeneration &+= 1
+            repositoryExcludeObservations[rootID] = observation
+            repositoryExcludeDirtyRoots.insert(rootID)
+            guard repositoryExcludeReconciliationTasks[rootID] == nil else { continue }
+            repositoryExcludeReconciliationTasks[rootID] = Task { [weak self] in
+                await self?.drainRepositoryExcludeChanges(rootID: rootID, lifetimeID: observation.lifetimeID)
+            }
+        }
+    }
+
+    private func drainRepositoryExcludeChanges(rootID: UUID, lifetimeID: UUID) async {
+        defer { repositoryExcludeReconciliationTasks.removeValue(forKey: rootID) }
+        while !Task.isCancelled,
+              rootStatesByID[rootID]?.lifetimeID == lifetimeID,
+              repositoryExcludeDirtyRoots.remove(rootID) != nil
+        {
+            do {
+                try await reconcileRepositoryExcludes(rootID: rootID, lifetimeID: lifetimeID)
+            } catch {
+                // Retry an invalidation that arrived during the failed attempt; without a
+                // newer event leave the root unavailable instead of spinning on a bad control.
+                if !repositoryExcludeDirtyRoots.contains(rootID) { return }
+            }
+        }
+    }
+
+    private func setRepositoryExcludeBlocked(rootID: UUID, lifetimeID: UUID, blocked: Bool) {
+        guard rootStatesByID[rootID]?.lifetimeID == lifetimeID,
+              repositoryExcludeObservations[rootID]?.lifetimeID == lifetimeID,
+              repositoryExcludeObservations[rootID]?.isBlocked != blocked,
+              let root = rootStatesByID[rootID]?.root
+        else { return }
+        repositoryExcludeObservations[rootID]?.isBlocked = blocked
+        invalidatePathMatchSnapshot(
+            affectedRootKinds: [root.kind],
+            reason: .catalogMutation,
+            affectedRootIDs: [rootID]
+        )
+    }
+
+    private func reconcileRepositoryExcludes(rootID: UUID, lifetimeID: UUID) async throws {
+        guard let state = rootStatesByID[rootID], state.lifetimeID == lifetimeID else { return }
+        do {
+            guard let layout = try repositoryExcludeLayout(for: state) else { return }
+            try await rebindRepositoryExcludeObservation(rootID: rootID, lifetimeID: lifetimeID, layout: layout)
+            let currentDigest = try await state.service.currentRepositoryExcludeDigest()
+            guard let observation = repositoryExcludeObservations[rootID], observation.lifetimeID == lifetimeID else {
+                throw CancellationError()
+            }
+            guard currentDigest != observation.appliedDigest || observation.isBlocked else { return }
+            setRepositoryExcludeBlocked(rootID: rootID, lifetimeID: lifetimeID, blocked: true)
+            guard let fence = await beginCodemapRootMutationFence(rootID: rootID, command: .repositoryAuthority),
+                  fence.rootEpoch.rootLifetimeID == lifetimeID
+            else { throw CancellationError() }
+            var committed = false
+            defer { finishCodemapRootMutationFence(fence, didCommitMutation: committed) }
+            for _ in 0 ..< 3 {
+                try Task.checkCancellation()
+                guard let current = rootStatesByID[rootID], current.lifetimeID == lifetimeID,
+                      let currentLayout = try repositoryExcludeLayout(for: current)
+                else { throw CancellationError() }
+                try await rebindRepositoryExcludeObservation(rootID: rootID, lifetimeID: lifetimeID, layout: currentLayout)
+                guard let captured = repositoryExcludeObservations[rootID], captured.lifetimeID == lifetimeID else {
+                    throw CancellationError()
+                }
+                let watermark = workspaceStateAuthority.acceptedMetadataWatermark(for: captured.repositoryKey)
+                try await current.service.refreshIgnoreRules()
+                let policy = await current.service.repositoryExcludePolicyRevision()
+                guard let baseline = rootStatesByID[rootID], baseline.lifetimeID == lifetimeID else {
+                    throw CancellationError()
+                }
+                let indexGeneration = appliedIndexGenerationsByRootID[rootID] ?? 0
+                var publishedItems = Dictionary(
+                    uniqueKeysWithValues: baseline.folderIDsByRelativePath.keys
+                        .filter { !$0.isEmpty }.map { ($0, true) }
+                )
+                for path in baseline.fileIDsByRelativePath.keys {
+                    publishedItems[path] = false
+                }
+                // Each attempt diffs against the published Store inventory. The service may
+                // have advanced its private inventory during an earlier rejected attempt.
+                let deltas = try await current.service.reconcileEntireTreeAfterRecoveryFailure(
+                    publishedBaseline: publishedItems
+                )
+                let prepared = prepareObservedFileSystemDeltas(deltas, root: current.root)
+                let applicable = await preflightPreparedIndexDeltas(
+                    rootID: rootID,
+                    deltas: prepared,
+                    expectedLifetimeID: lifetimeID
+                )
+                #if DEBUG
+                    if let handler = repositoryExcludeWillPublishHandlerForTesting { await handler() }
+                #endif
+                let policyCurrent = try await current.service.repositoryExcludePolicyIsCurrent(policy)
+                let observationCurrent = await workspaceStateAuthority.metadataObservationIsCurrent(
+                    captured.token,
+                    for: currentLayout,
+                    expectedAcceptedWatermark: watermark
+                )
+                guard !Task.isCancelled,
+                      rootStatesByID[rootID]?.lifetimeID == lifetimeID,
+                      rootStatesByID[rootID]?.service === current.service
+                else { throw CancellationError() }
+                guard policyCurrent, observationCurrent,
+                      workspaceStateAuthority.acceptedMetadataWatermark(for: captured.repositoryKey) == watermark,
+                      repositoryExcludeObservations[rootID]?.invalidationGeneration == captured.invalidationGeneration,
+                      (appliedIndexGenerationsByRootID[rootID] ?? 0) == indexGeneration
+                else { continue }
+                // Already owns the root mutation fence: entering the ordinary path-fence
+                // route would wait for the fence held by this same operation.
+                repositoryExcludeObservations[rootID]?.appliedDigest = policy.digest
+                setRepositoryExcludeBlocked(rootID: rootID, lifetimeID: lifetimeID, blocked: false)
+                applyPreparedIndexDeltaMutations(rootID: rootID, deltas: applicable, requiresFullResync: true)
+                committed = true
+                for delta in deltas {
+                    yieldFileSystemDeltaEvent(WorkspaceFileSystemDeltaEvent(
+                        rootID: rootID,
+                        rootPath: current.root.standardizedFullPath,
+                        delta: delta
+                    ))
+                }
+                return
+            }
+            throw RepositoryExcludeReconciliationError.unstableIgnorePolicy
+        } catch {
+            setRepositoryExcludeBlocked(rootID: rootID, lifetimeID: lifetimeID, blocked: true)
+            throw error
+        }
+    }
+
+    #if DEBUG
+        func handleRepositoryExcludeInvalidationForTesting(_ event: GitWorkspaceAuthorityInvalidationEvent) {
+            handleRepositoryExcludeInvalidation(event)
+        }
+
+        func waitForRepositoryExcludeReconciliationForTesting(rootID: UUID) async {
+            while let task = repositoryExcludeReconciliationTasks[rootID] {
+                await task.value
+            }
+        }
+
+        func setRepositoryExcludeWillPublishHandlerForTesting(_ handler: (@Sendable () async -> Void)?) {
+            repositoryExcludeWillPublishHandlerForTesting = handler
+        }
+    #endif
 
     private func handleSeededAuthorityInvalidation(
         _ event: GitWorkspaceAuthorityInvalidationEvent
@@ -4938,6 +5235,9 @@ actor WorkspaceFileContextStore {
         #if DEBUG
             publishedSeededAuthorityFullCrawlCountsByRootID[rootID, default: 0] += 1
         #endif
+        do {
+            try await state.service.refreshIgnoreRules()
+        } catch { return false }
         guard await state.service.reconcileEntireTreeForAuthorityChange() else { return false }
         publishedSeededAuthorityStatesByRootID[rootID]?.fullCrawlCompletedGeneration = capturedGeneration
         await waitForCurrentPublisherIngress(rootIDs: [rootID])
@@ -5115,6 +5415,15 @@ actor WorkspaceFileContextStore {
               authority.fullCrawlCompletedGeneration != nil
         else { return false }
 
+        // The seeded authority retires after a successful full crawl. Transfer ongoing
+        // exclude observation to the ordinary loaded-root owner before releasing its token.
+        do {
+            try await observeRepositoryExcludes(rootID: rootID)
+        } catch { return false }
+        guard isRootLifetimeCurrent(rootID: rootID, expectedLifetimeID: state.lifetimeID),
+              publishedSeededAuthorityStatesByRootID[rootID]?.epoch == authority.epoch,
+              publishedSeededAuthorityStatesByRootID[rootID]?.activeMutationDepth == 0
+        else { return false }
         seededAuthorityPendingGenerationByRootID.removeValue(forKey: rootID)
         let claim = publishedSeededAuthorityClaimsByRootID.removeValue(forKey: rootID)
         let fence = publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID)
@@ -5153,6 +5462,7 @@ actor WorkspaceFileContextStore {
     #endif
 
     private func publishedSeededAuthorityIsQueryable(rootID: UUID) -> Bool {
+        if repositoryExcludeObservations[rootID]?.isBlocked == true { return false }
         #if DEBUG
             if primaryRootQueryabilityFailuresForTesting[rootID] != nil { return false }
         #endif
@@ -5165,6 +5475,10 @@ actor WorkspaceFileContextStore {
     }
 
     private func requirePublishedSeededAuthorityFresh(rootID: UUID) async throws {
+        if repositoryExcludeObservations[rootID]?.isBlocked == true {
+            let path = rootStatesByID[rootID]?.root.standardizedFullPath ?? rootID.uuidString
+            throw WorkspaceSessionWorktreeOwnershipError.unavailableRoot(path)
+        }
         while publishedSeededAuthorityFencesByRootID[rootID] != nil {
             if publishedSeededAuthorityIsQueryable(rootID: rootID) { return }
             guard let state = publishedSeededAuthorityStatesByRootID[rootID],
@@ -5220,13 +5534,13 @@ actor WorkspaceFileContextStore {
         pending.phase = .fallingBack(reason)
         pending.terminalFallbackReason = pending.terminalFallbackReason ?? reason
         pendingSeededRootsByID[pendingID] = pending
-        WorktreeStartupInstrumentation.record(
+        WorkspaceContextStartupInstrumentation.record(
             .seedFallback,
             context: startupContext,
             route: .diffSeedServing,
             fallback: reason
         )
-        WorktreeStartupInstrumentation.recordSeedFullCrawlFallback()
+        WorkspaceContextStartupInstrumentation.recordSeedFullCrawlFallback()
         await discardPendingSeededRoot(pendingID, terminalPhase: .aborted)
     }
 
@@ -5277,11 +5591,19 @@ actor WorkspaceFileContextStore {
         initializationHintsByPhysicalRootPath: [String: WorkspaceRootMaterializationHint] = [:]
     ) async throws -> WorkspaceSessionWorktreeOwnershipPreparation {
         #if DEBUG
-            var receiptConsumptionDecision = WorktreeStartupInstrumentation.ReceiptConsumptionDecision()
+            var receiptConsumptionDecision = WorkspaceContextStartupInstrumentation.ReceiptConsumptionDecision()
         #endif
         let standardizedPaths = Array(Set(physicalRootPaths.map {
             StandardizedPath.absolute(($0 as NSString).expandingTildeInPath)
         })).sorted()
+        // Configuration/ownership conflicts are deterministic admission failures. Reject them
+        // before advancing owner generations or reserving provisional roots; never promote an
+        // ordinary visible workspace folder into session-owned execution authority.
+        for path in standardizedPaths {
+            if let configuration = rootLoadConfigurationsByPath[path], configuration.kind != .sessionWorktree {
+                throw WorkspaceSessionWorktreeOwnershipError.invalidRootKind(path)
+            }
+        }
         if let installedToken = installedSessionWorktreeOwnershipTokenByOwnerID[ownerID],
            let installedRecord = sessionWorktreeOwnershipRecordsByToken[installedToken],
            installedRecord.bindingFingerprint == bindingFingerprint,
@@ -5292,7 +5614,7 @@ actor WorkspaceFileContextStore {
                 if let startupContext {
                     receiptConsumptionDecision.ownershipReused = true
                     receiptConsumptionDecision.finalObservation = .disabled
-                    WorktreeStartupInstrumentation.recordReceiptConsumptionDecision(
+                    WorkspaceContextStartupInstrumentation.recordReceiptConsumptionDecision(
                         correlationID: startupContext.correlationID,
                         decision: receiptConsumptionDecision
                     )
@@ -5402,7 +5724,7 @@ actor WorkspaceFileContextStore {
                         break
                     case let .fallback(reason):
                         servingFallbackReason = reason
-                        WorktreeStartupInstrumentation.record(
+                        WorkspaceContextStartupInstrumentation.record(
                             .seedFallback,
                             context: startupContext,
                             route: .diffSeedServing,
@@ -5445,7 +5767,7 @@ actor WorkspaceFileContextStore {
                         receiptConsumptionDecision.fullCrawlPerformed = true
                         receiptConsumptionDecision.selectedRoute = .fullCrawl
                     #endif
-                    WorktreeStartupInstrumentation.record(
+                    WorkspaceContextStartupInstrumentation.record(
                         .rootLoadStarted,
                         context: startupContext,
                         route: .fullCrawl
@@ -5540,7 +5862,7 @@ actor WorkspaceFileContextStore {
                    let startupContext,
                    startupContext.flags.observeDiffSeededWorktreeStartup
                 {
-                    WorktreeStartupInstrumentation.record(
+                    WorkspaceContextStartupInstrumentation.record(
                         .shadowVerified,
                         context: startupContext,
                         route: .diffSeedObservation,
@@ -5557,7 +5879,7 @@ actor WorkspaceFileContextStore {
                     let planningOutcome = await rootSeedPlanner.plan(hint: hint, service: state.service)
                     switch planningOutcome {
                     case let .fallback(reason):
-                        WorktreeStartupInstrumentation.record(
+                        WorkspaceContextStartupInstrumentation.record(
                             .shadowVerified,
                             context: startupContext,
                             route: .diffSeedObservation,
@@ -5612,7 +5934,7 @@ actor WorkspaceFileContextStore {
                         } catch {
                             matches = false
                         }
-                        WorktreeStartupInstrumentation.recordInventoryComparison(matched: matches)
+                        WorkspaceContextStartupInstrumentation.recordInventoryComparison(matched: matches)
                         if matches {
                             let scope = WorkspaceRootSeedShadowScope(
                                 token: token,
@@ -5628,13 +5950,13 @@ actor WorkspaceFileContextStore {
                                 snapshot: planHandle.snapshot,
                                 planHandle: planHandle
                             ))
-                            WorktreeStartupInstrumentation.record(
+                            WorkspaceContextStartupInstrumentation.record(
                                 .shadowVerified,
                                 context: startupContext,
                                 route: .diffSeedObservation
                             )
                         } else {
-                            WorktreeStartupInstrumentation.record(
+                            WorkspaceContextStartupInstrumentation.record(
                                 .shadowVerified,
                                 context: startupContext,
                                 route: .diffSeedObservation,
@@ -5656,7 +5978,7 @@ actor WorkspaceFileContextStore {
             #if DEBUG
                 if let startupContext {
                     if pendingSeededRootPreparations.isEmpty {
-                        WorktreeStartupInstrumentation.recordReceiptConsumptionDecision(
+                        WorkspaceContextStartupInstrumentation.recordReceiptConsumptionDecision(
                             correlationID: startupContext.correlationID,
                             decision: receiptConsumptionDecision
                         )
@@ -5680,7 +6002,7 @@ actor WorkspaceFileContextStore {
         } catch {
             #if DEBUG
                 if let startupContext {
-                    WorktreeStartupInstrumentation.recordReceiptConsumptionDecision(
+                    WorkspaceContextStartupInstrumentation.recordReceiptConsumptionDecision(
                         correlationID: startupContext.correlationID,
                         decision: receiptConsumptionDecision
                     )
@@ -5795,7 +6117,7 @@ actor WorkspaceFileContextStore {
                     standardizedPath: pending.standardizedPath,
                     expectedPhase: .readyForCommit
                 )
-                WorktreeStartupInstrumentation.recordSeedMetadataRevalidation(
+                WorkspaceContextStartupInstrumentation.recordSeedMetadataRevalidation(
                     used: validated.revalidationUsed
                 )
             }
@@ -6022,6 +6344,7 @@ actor WorkspaceFileContextStore {
                     commit(pending.indexes)
                     rootIDsByStandardizedPath[pending.standardizedPath] = root.id
                     rootStatesByID[root.id] = pending.state
+                    rootLifetimeTokensByID.updateValue(WorkspaceContextRootLifetimeToken(), forKey: root.id)?.revoke()
                     rootLoadConfigurationsByPath[pending.standardizedPath] = pending.loadConfiguration
                     rootLoadOrder.append(root.id)
                     appliedIndexGenerationsByRootID[root.id] = 0
@@ -6148,7 +6471,7 @@ actor WorkspaceFileContextStore {
                     pendingService.service
                 ))
             }
-            WorktreeStartupInstrumentation.record(
+            WorkspaceContextStartupInstrumentation.record(
                 .seedPublished,
                 context: pendingService.context,
                 route: .diffSeedServing
@@ -6165,7 +6488,7 @@ actor WorkspaceFileContextStore {
             if let pendingDecision = pendingReceiptConsumptionDecisionByToken.removeValue(
                 forKey: preparation.token
             ) {
-                WorktreeStartupInstrumentation.recordReceiptConsumptionDecision(
+                WorkspaceContextStartupInstrumentation.recordReceiptConsumptionDecision(
                     correlationID: pendingDecision.correlationID,
                     decision: pendingDecision.decision
                 )
@@ -6212,7 +6535,7 @@ actor WorkspaceFileContextStore {
             guard latestSessionWorktreeOwnershipGenerationByOwnerID[preparation.token.ownerID]
                 == preparation.token.generation
             else { throw WorkspaceSessionWorktreeOwnershipError.staleUpdate }
-            WorktreeStartupInstrumentation.record(
+            WorkspaceContextStartupInstrumentation.record(
                 .rootLoadStarted,
                 context: root.startupContext,
                 route: .fullCrawl
@@ -6259,7 +6582,7 @@ actor WorkspaceFileContextStore {
                 pendingDecision.decision.fullCrawlPerformed = true
                 pendingDecision.decision.finalObservation = .fallback(reason)
                 pendingDecision.decision.selectedRoute = .fullCrawl
-                WorktreeStartupInstrumentation.recordReceiptConsumptionDecision(
+                WorkspaceContextStartupInstrumentation.recordReceiptConsumptionDecision(
                     correlationID: pendingDecision.correlationID,
                     decision: pendingDecision.decision
                 )
@@ -6748,7 +7071,7 @@ actor WorkspaceFileContextStore {
             guard let pendingDecision = pendingReceiptConsumptionDecisionByToken.removeValue(
                 forKey: token
             ) else { return }
-            WorktreeStartupInstrumentation.recordReceiptConsumptionDecision(
+            WorkspaceContextStartupInstrumentation.recordReceiptConsumptionDecision(
                 correlationID: pendingDecision.correlationID,
                 decision: pendingDecision.decision
             )
@@ -7115,7 +7438,7 @@ actor WorkspaceFileContextStore {
         #endif
         guard isRootLifetimeCurrent(rootID: root.id, expectedLifetimeID: expectedLifetimeID) else { return }
         #if DEBUG
-            MCPApplyEditsRebaseProbeRecorder.recordPublisherIngress(
+            WorkspaceApplyEditsRebaseProbeHooks.recordPublisherIngress(
                 rootID: root.id,
                 source: publication.source,
                 deltas: publication.deltas
@@ -7335,8 +7658,8 @@ actor WorkspaceFileContextStore {
         )
         let ingressSamples = await {
             #if DEBUG
-                let span = WorktreeStartupPreparationInstrumentation.currentRecorder?
-                    .begin(.loadedRootIngressFence)
+                let span = WorkspacePreparationInstrumentation.currentRecorder?
+                    .beginPhase(.loadedRootIngressFence)
                 defer { span?.end() }
             #endif
             return await awaitAppliedIngress(rootRefs: [rootRef])
@@ -7392,8 +7715,8 @@ actor WorkspaceFileContextStore {
         let service = state.service
         let catalogPolicyIdentity = await {
             #if DEBUG
-                let span = WorktreeStartupPreparationInstrumentation.currentRecorder?
-                    .begin(.loadedRootPolicySnapshot)
+                let span = WorkspacePreparationInstrumentation.currentRecorder?
+                    .beginPhase(.loadedRootPolicySnapshot)
                 defer { span?.end() }
             #endif
             return await service.currentWorkspaceRootCatalogPolicyIdentity()
@@ -7421,8 +7744,8 @@ actor WorkspaceFileContextStore {
             return result
         }
         #if DEBUG
-            let finalCurrentnessSpan = WorktreeStartupPreparationInstrumentation.currentRecorder?
-                .begin(.finalLoadedRootCurrentness)
+            let finalCurrentnessSpan = WorkspacePreparationInstrumentation.currentRecorder?
+                .beginPhase(.finalLoadedRootCurrentness)
             defer { finalCurrentnessSpan?.end() }
         #endif
         if Task.isCancelled {
@@ -7944,6 +8267,7 @@ actor WorkspaceFileContextStore {
         let roots = rootsForPathLookup(scope: rootScope)
         let generation = scopedSnapshotGeneration(scope: rootScope, validationToken: validationToken)
         var shouldCacheSnapshot = false
+        var leasedShardIdentitiesByRootID: [UUID: ObjectIdentifier] = [:]
         let snapshot: WorkspaceSearchCatalogSnapshot
         #if DEBUG
             let preparedShards = WorkspaceFileSearchDebugContext.$catalogBuildObserver.withValue(
@@ -7963,6 +8287,9 @@ actor WorkspaceFileContextStore {
                 requirement: requirement
             )
             shouldCacheSnapshot = true
+            leasedShardIdentitiesByRootID = Dictionary(
+                uniqueKeysWithValues: shards.map { ($0.key.rootID, ObjectIdentifier($0)) }
+            )
             #if DEBUG
                 if isCatalogShardShadowValidationEnabled {
                     let authoritativeSnapshot = buildAuthoritativeSearchCatalogSnapshot(
@@ -8034,7 +8361,8 @@ actor WorkspaceFileContextStore {
                 snapshot,
                 validationToken: validationToken,
                 capability: requirement,
-                scope: rootScope
+                scope: rootScope,
+                leasedShardIdentitiesByRootID: leasedShardIdentitiesByRootID
             )
         }
         #if DEBUG
@@ -8136,12 +8464,6 @@ actor WorkspaceFileContextStore {
         }
 
         for candidate in rootsNeedingAuthoritativeBuild {
-            let liveGenerationCount = liveRootCatalogShards(rootID: candidate.root.id).count
-            if rootCatalogShardDeltaStatesByRootID[candidate.root.id]?.isDirty == true,
-               liveGenerationCount >= Self.maxLiveRootCatalogShardGenerationsPerRoot
-            {
-                return nil
-            }
             guard canPublishAnotherRootCatalogShard(rootID: candidate.root.id) else {
                 #if DEBUG
                     recordRootCatalogShardFallback(
@@ -8340,7 +8662,7 @@ actor WorkspaceFileContextStore {
               catalogGenerationsByRootID[scope.rootID] == scope.catalogGeneration,
               appliedIndexGenerationsByRootID[scope.rootID] == scope.appliedIndexGeneration
         else {
-            WorktreeStartupInstrumentation.recordShadowFallback(.ownerSuperseded)
+            WorkspaceContextStartupInstrumentation.recordShadowFallback(.ownerSuperseded)
             return
         }
         let entries = buildAuthoritativeCatalogComponents(roots: [state.root]).entries
@@ -8351,7 +8673,7 @@ actor WorkspaceFileContextStore {
             root: state.root,
             authoritativeEntries: entries
         ) else {
-            WorktreeStartupInstrumentation.recordShadowFallback(.projectedSearchMismatch)
+            WorkspaceContextStartupInstrumentation.recordShadowFallback(.projectedSearchMismatch)
             return
         }
         invalidateRootSeedSearchShadow(rootID: scope.rootID)
@@ -8393,7 +8715,7 @@ actor WorkspaceFileContextStore {
         rootCatalogShardWeakReferencesByRootID[shard.key.rootID, default: []]
             .append(WeakRootCatalogShardReference(shard))
         #if DEBUG
-            let liveCount = liveRootCatalogShards(rootID: shard.key.rootID).count
+            let liveCount = liveRootCatalogShardCount(rootID: shard.key.rootID)
             rootCatalogShardMaxLiveGenerationCountsByRootID[shard.key.rootID] = max(
                 rootCatalogShardMaxLiveGenerationCountsByRootID[shard.key.rootID] ?? 0,
                 liveCount
@@ -8439,14 +8761,47 @@ actor WorkspaceFileContextStore {
         return live
     }
 
+    private func liveRootCatalogShardCount(rootID: UUID) -> Int {
+        // Do not materialize a strong array here: it would keep cache-owned shards alive
+        // across the eviction and recount that admission performs below.
+        rootCatalogShardWeakReferencesByRootID[rootID]?.removeAll { $0.shard == nil }
+        let count = rootCatalogShardWeakReferencesByRootID[rootID]?.count ?? 0
+        if count == 0 {
+            rootCatalogShardWeakReferencesByRootID.removeValue(forKey: rootID)
+        }
+        return count
+    }
+
+    private func reclaimCacheOwnedRootCatalogShardPins(rootID: UUID) {
+        let publishedIdentity = publishedRootCatalogShardsByRootID[rootID].map(ObjectIdentifier.init)
+        let scopes = Set(searchCatalogSnapshotsByScope.compactMap { scope, entry in
+            guard let leasedIdentity = entry.leasedShardIdentitiesByRootID[rootID],
+                  leasedIdentity != publishedIdentity
+            else { return nil as WorkspaceLookupRootScope? }
+            return scope
+        })
+        guard !scopes.isEmpty else { return }
+        // Modification-only patches leave scope tokens valid, but their cached leases can
+        // pin older shard objects indefinitely. Drop only those cache-owned pins; a cache
+        // entry holding the current publication cannot free an old generation.
+        evictSearchCatalogSnapshots(
+            scopes: scopes,
+            reasons: [.shardRetentionReclaim],
+            affectedRootIDs: [rootID]
+        )
+    }
+
     private func canPublishAnotherRootCatalogShard(rootID: UUID) -> Bool {
-        let liveGenerations = liveRootCatalogShards(rootID: rootID)
-        guard liveGenerations.count < Self.maxLiveRootCatalogShardGenerationsPerRoot else {
+        if liveRootCatalogShardCount(rootID: rootID) >= Self.maxLiveRootCatalogShardGenerationsPerRoot {
+            reclaimCacheOwnedRootCatalogShardPins(rootID: rootID)
+        }
+        let liveCount = liveRootCatalogShardCount(rootID: rootID)
+        guard liveCount < Self.maxLiveRootCatalogShardGenerationsPerRoot else {
             #if DEBUG
                 rootCatalogShardBackstopCountsByRootID[rootID, default: 0] += 1
                 rootCatalogShardMaxLiveGenerationCountsByRootID[rootID] = max(
                     rootCatalogShardMaxLiveGenerationCountsByRootID[rootID] ?? 0,
-                    liveGenerations.count
+                    liveCount
                 )
             #endif
             return false
@@ -10400,11 +10755,11 @@ actor WorkspaceFileContextStore {
         profile: PathLocateProfile = .uiAssisted
     ) async -> WorkspaceFileTreePresentation {
         #if DEBUG
-            let benchmarkMetricTag = WorktreeStartupInstrumentation.currentBenchmarkMetricTag
+            let benchmarkMetricTag = WorkspaceContextStartupInstrumentation.currentBenchmarkMetricTag
             let benchmarkStarted = DispatchTime.now().uptimeNanoseconds
             defer {
                 let benchmarkFinished = DispatchTime.now().uptimeNanoseconds
-                WorktreeStartupInstrumentation.recordBenchmarkPassiveTree(
+                WorkspaceContextStartupInstrumentation.recordBenchmarkPassiveTree(
                     tag: benchmarkMetricTag,
                     durationMicroseconds: (benchmarkFinished - benchmarkStarted) / 1000
                 )
@@ -10948,8 +11303,49 @@ actor WorkspaceFileContextStore {
         }
     }
 
+    /// Global suspension is independent of user-paused roots, so OFF never resumes a manual pause.
+    func setCodeMapsGloballyDisabled(_ disabled: Bool, settingsRevision: UInt64? = nil) async {
+        if let settingsRevision {
+            guard settingsRevision > codeMapsGlobalSettingRevision else { return }
+            codeMapsGlobalSettingRevision = settingsRevision
+        }
+        // An OFF delivery can overtake ON in this store while the process-wide engine
+        // already cancelled its graph. Even an unchanged enabled flag must resume work.
+        guard codeMapsGloballyDisabled != disabled || !disabled else { return }
+        codeMapsGloballyDisabled = disabled
+        let transitionID = UUID()
+        codeMapsGlobalTransitionID = transitionID
+        let epochs = rootStatesByID.map { rootID, state in
+            WorkspaceCodemapRootEpoch(rootID: rootID, rootLifetimeID: state.lifetimeID)
+        }
+        // Retire stale handed-off launches on OFF too: the engine's independent ON
+        // observer may have cancelled them without this store ever receiving ON.
+        for rootEpoch in epochs {
+            codemapResumeTransitionIDsByRootEpoch.removeValue(forKey: rootEpoch)
+            codemapGraphIndexBuildReschedulePendingRootEpochs.remove(rootEpoch)
+            _ = detachCodemapSession(rootEpoch: rootEpoch)
+            filesystemCodemapEvidenceByRootEpoch.removeValue(forKey: rootEpoch)
+        }
+        publishCodemapRootStatusesIfChanged()
+        await awaitCodemapCleanupFlights(rootIDs: Set(epochs.map(\.rootID)))
+        guard codeMapsGlobalTransitionID == transitionID, !codeMapsGloballyDisabled else { return }
+        // Re-enable the shared engine from the live setting before admitting setup;
+        // its subscription may deliver OFF after this window's subscription does.
+        if !epochs.isEmpty, let engine = try? codemapRuntimeProvider().bindingEngine() {
+            await engine.refreshGlobalCodeMapsDisabled()
+        }
+        guard codeMapsGlobalTransitionID == transitionID, !codeMapsGloballyDisabled else { return }
+        for rootEpoch in epochs {
+            guard rootStatesByID[rootEpoch.rootID]?.lifetimeID == rootEpoch.rootLifetimeID else { continue }
+            restartCodemapCatalogRecoveryIfPending(rootEpoch: rootEpoch)
+            scheduleCodemapGraphIndexBuildAfterRootReady(rootEpoch: rootEpoch)
+        }
+        publishCodemapRootStatusesIfChanged()
+    }
+
     private func codemapGenerationIsSuspended(rootEpoch: WorkspaceCodemapRootEpoch) -> Bool {
-        codemapSuspendedRootEpochs.contains(rootEpoch)
+        codeMapsGloballyDisabled || codemapSuspendedRootEpochs.contains(rootEpoch) ||
+            repositoryExcludeObservations[rootEpoch.rootID]?.isBlocked == true
     }
 
     /// True when the deltas being applied on *this* call chain are the ones produced by the root's
@@ -11332,11 +11728,11 @@ actor WorkspaceFileContextStore {
         completion: RootLoadFlightCompletion
     ) async throws -> WorkspaceRootRecord {
         #if DEBUG
-            let benchmarkMetricTag = WorktreeStartupInstrumentation.currentBenchmarkMetricTag
+            let benchmarkMetricTag = WorkspaceContextStartupInstrumentation.currentBenchmarkMetricTag
             let benchmarkFilesystemStarted = DispatchTime.now().uptimeNanoseconds
             defer {
                 let finished = DispatchTime.now().uptimeNanoseconds
-                WorktreeStartupInstrumentation.recordBenchmarkFilesystemWork(
+                WorkspaceContextStartupInstrumentation.recordBenchmarkFilesystemWork(
                     tag: benchmarkMetricTag,
                     durationMicroseconds: finished >= benchmarkFilesystemStarted
                         ? (finished - benchmarkFilesystemStarted) / 1000
@@ -11401,7 +11797,7 @@ actor WorkspaceFileContextStore {
                 "durationSinceStoreRootLoadBegin": performLoadStartMS.map { restorePerfRecorder.formatElapsedMS(since: $0) } ?? "notMeasured"
             ]
             rootRecordCreatedFields.merge(
-                WorkspaceRootLoadDiagnostics.rootRecordCreatedFields(forPath: standardizedPath),
+                WorkspaceRootLoadFieldHooks.rootRecordCreatedFields(forPath: standardizedPath),
                 uniquingKeysWith: { _, diagnostic in diagnostic }
             )
             restorePerfRecorder.event("store.rootLoad.rootRecordCreated", fields: rootRecordCreatedFields)
@@ -11449,7 +11845,7 @@ actor WorkspaceFileContextStore {
                         "durationSinceStoreRootLoadBegin": performLoadStartMS.map { restorePerfRecorder.formatElapsedMS(since: $0) } ?? "notMeasured"
                     ]
                     firstChunkFields.merge(
-                        WorkspaceRootLoadDiagnostics.firstPreparedChunkFields(forPath: standardizedPath),
+                        WorkspaceRootLoadFieldHooks.firstPreparedChunkFields(forPath: standardizedPath),
                         uniquingKeysWith: { _, diagnostic in diagnostic }
                     )
                     restorePerfRecorder.event("store.rootLoad.firstPreparedChunk", fields: firstChunkFields)
@@ -11498,6 +11894,7 @@ actor WorkspaceFileContextStore {
         }
         rootIDsByStandardizedPath[root.standardizedFullPath] = root.id
         rootStatesByID[root.id] = state
+        rootLifetimeTokensByID.updateValue(WorkspaceContextRootLifetimeToken(), forKey: root.id)?.revoke()
         completion.record(rootID: root.id, lifetimeID: state.lifetimeID)
         rootLoadOrder.append(root.id)
         appliedIndexGenerationsByRootID[root.id] = 0
@@ -11517,13 +11914,22 @@ actor WorkspaceFileContextStore {
             rootAppliedIndexGeneration: appliedIndexGenerationsByRootID[root.id],
             kind: .rootLoaded
         ))
+        do {
+            try await observeRepositoryExcludes(rootID: root.id)
+        } catch {
+            await unloadRoot(id: root.id)
+            throw error
+        }
         if root.kind == .sessionWorktree,
-           WorktreeStartupFeatureFlags.current().observeDiffSeededWorktreeStartup
+           startupFeatureFlags.observeDiffSeededWorktreeStartup
         {
-            _ = try? await admitReusableSnapshotForLoadedRoot(
+            let observation = try? await admitReusableSnapshotForLoadedRoot(
                 rootID: root.id,
                 expectedStandardizedPath: root.standardizedFullPath
             )
+            #if DEBUG
+                automaticReusableSnapshotAdmissionResultsByRootIDForTesting[root.id] = observation
+            #endif
         }
         let rootEpoch = WorkspaceCodemapRootEpoch(
             rootID: root.id,
@@ -11546,6 +11952,14 @@ actor WorkspaceFileContextStore {
         #endif
         return root
     }
+
+    #if DEBUG
+        func automaticReusableSnapshotAdmissionResultForTesting(
+            rootID: UUID
+        ) -> WorkspaceRootReusableSnapshotCoordinator.ObservationResult? {
+            automaticReusableSnapshotAdmissionResultsByRootIDForTesting[rootID]
+        }
+    #endif
 
     /// Constructs fresh target-local IDs and records for a pending seeded root.
     /// No source-worktree record, metadata, descriptor, or cache is reused.
@@ -11699,6 +12113,16 @@ actor WorkspaceFileContextStore {
         var ownershipResourcesReleasedByUnload = SessionWorktreeOwnershipRemoval()
         var invalidatedOwnershipTokens = Set<WorkspaceSessionWorktreeOwnershipToken>()
         for rootID in orderedRootIDs {
+            repositoryExcludeReconciliationTasks.removeValue(forKey: rootID)?.cancel()
+            repositoryExcludeDirtyRoots.remove(rootID)
+            if let observation = repositoryExcludeObservations.removeValue(forKey: rootID) {
+                repositoryExcludeRootsByRepository[observation.repositoryKey]?.remove(rootID)
+                if repositoryExcludeRootsByRepository[observation.repositoryKey]?.isEmpty == true {
+                    repositoryExcludeRootsByRepository.removeValue(forKey: observation.repositoryKey)
+                }
+                let authority = workspaceStateAuthority
+                Task { await authority.releaseMetadataObservation(observation.token) }
+            }
             if let claim = publishedSeededAuthorityClaimsByRootID.removeValue(forKey: rootID) {
                 seededAuthorityClaimsToRelease.append(claim)
                 publishedSeededAuthorityFencesByRootID.removeValue(forKey: rootID)
@@ -11747,6 +12171,10 @@ actor WorkspaceFileContextStore {
                 sessionRootLifetimeClock.advance()
             }
             guard let state = rootStatesByID.removeValue(forKey: rootID) else { continue }
+            rootLifetimeTokensByID.removeValue(forKey: rootID)?.revoke()
+            #if DEBUG
+                automaticReusableSnapshotAdmissionResultsByRootIDForTesting.removeValue(forKey: rootID)
+            #endif
             invalidateRootSeedSearchShadow(rootID: rootID)
             let rootEpoch = WorkspaceCodemapRootEpoch(
                 rootID: rootID,
@@ -13892,7 +14320,7 @@ actor WorkspaceFileContextStore {
         rootEpoch: WorkspaceCodemapRootEpoch,
         flightID: UUID
     ) async -> Bool {
-        await Self.$activeCodemapRecoveryApplication.withValue(
+        await Self.activeCodemapRecoveryApplicationTaskLocal.withValue(
             CodemapRecoveryApplication(rootEpoch: rootEpoch, flightID: flightID)
         ) {
             await performLoadedRootCatalogReconciliation(rootID: rootEpoch.rootID).succeeded
@@ -16078,15 +16506,21 @@ actor WorkspaceFileContextStore {
             #if DEBUG
                 let buildHandler = codemapGraphIndexCatalogBuildHandler
             #endif
-            let shard = await Task.detached(priority: .userInitiated) { [snapshot] in
+            let buildTask = Task.detached(priority: .userInitiated) { [snapshot] in
                 #if DEBUG
                     if let buildHandler {
                         await buildHandler(snapshot.authority.rootEpoch)
                     }
                 #endif
+                guard !Task.isCancelled else { return nil as RootCatalogShard? }
                 return Self.buildCodemapGraphIndexCatalogShard(snapshot: snapshot)
-            }.value
-            guard !Task.isCancelled else { return false }
+            }
+            let shard = await withTaskCancellationHandler {
+                await buildTask.value
+            } onCancel: {
+                buildTask.cancel()
+            }
+            guard !Task.isCancelled, let shard else { return false }
             switch publishCodemapGraphIndexCatalogShard(shard, snapshot: snapshot) {
             case .ready:
                 return true
@@ -16419,8 +16853,8 @@ actor WorkspaceFileContextStore {
         )
         codemapSessionsByRootEpoch[authority.rootEpoch] = session
         #if DEBUG
-            WorktreeStartupInstrumentation.recordBenchmarkMarkerPublication(
-                tag: WorktreeStartupInstrumentation.currentBenchmarkMetricTag,
+            WorkspaceContextStartupInstrumentation.recordBenchmarkMarkerPublication(
+                tag: WorkspaceContextStartupInstrumentation.currentBenchmarkMetricTag,
                 rootID: authority.rootEpoch.rootID,
                 rootLifetimeID: authority.rootEpoch.rootLifetimeID,
                 revision: session.markerReadinessRevision,
@@ -17886,7 +18320,7 @@ actor WorkspaceFileContextStore {
                 if publishedCanonicalModification {
                     publishAppliedIndexEvent(root: state.root, modifiedFileIDs: [file.id])
                     #if DEBUG
-                        MCPApplyEditsRebaseProbeRecorder.recordStoreModification(
+                        WorkspaceApplyEditsRebaseProbeHooks.recordStoreModification(
                             rootID: rootID,
                             fileID: file.id,
                             generation: appliedIndexGenerationsByRootID[rootID] ?? 0
@@ -20916,6 +21350,99 @@ actor WorkspaceFileContextStore {
         }
     }
 
+    func rootContextSnapshot(scope: WorkspaceLookupRootScope = .visibleWorkspace) -> WorkspaceContextRootSnapshot? {
+        guard rootScopeAvailability(scope) == .available else { return nil }
+        let selectedRoots = rootsForPathLookup(scope: scope)
+        var roots: [WorkspaceContextRootSnapshot.Root] = []
+        var lifetimeTokens: [WorkspaceContextRootLifetimeToken] = []
+        roots.reserveCapacity(selectedRoots.count)
+        lifetimeTokens.reserveCapacity(selectedRoots.count)
+        for root in selectedRoots {
+            guard let state = rootStatesByID[root.id],
+                  let token = rootLifetimeTokensByID[root.id],
+                  let key = rootCatalogShardKey(for: root),
+                  key.lifetimeID == state.lifetimeID
+            else { return nil }
+            roots.append(WorkspaceContextRootSnapshot.Root(
+                reference: WorkspaceRootRef(id: root.id, name: root.name, fullPath: root.standardizedFullPath),
+                lifetimeID: state.lifetimeID,
+                catalogGeneration: key.topologyGeneration
+            ))
+            lifetimeTokens.append(token)
+        }
+        let requirement: WorkspaceSearchCatalogAccessRequirement = .recordsAndPathIndexes
+        let generation = scopedSnapshotGeneration(
+            scope: scope,
+            validationToken: searchCatalogSnapshotValidationToken(scope: scope)
+        )
+        let preparedShards = prepareAndPublishRootCatalogShardBatch(
+            for: selectedRoots,
+            requirement: requirement
+        )
+        let matchingShards = preparedShards.flatMap { shards -> [RootCatalogShard]? in
+            guard shards.count == selectedRoots.count,
+                  zip(selectedRoots, shards).allSatisfy({ root, shard in
+                      shard.key == rootCatalogShardKey(for: root) && shard.pathSearchIndex != nil
+                  })
+            else { return nil }
+            return shards
+        }
+        let catalog: WorkspaceSearchCatalogSnapshot = if let shards = matchingShards {
+            composeSearchCatalogSnapshot(
+                rootScope: scope,
+                generation: generation,
+                roots: selectedRoots,
+                shards: shards,
+                requirement: requirement
+            )
+        } else {
+            // Retention or retag failure may leave no publishable shard. Retain a complete
+            // immutable catalog instead of claiming a partially covered generation.
+            buildAuthoritativeSearchCatalogSnapshot(
+                rootScope: scope,
+                generation: generation,
+                roots: selectedRoots,
+                requirement: requirement
+            )
+        }
+        guard catalog.roots.map(\.id) == selectedRoots.map(\.id),
+              catalog.rootPathIndexes.count == selectedRoots.count,
+              zip(catalog.rootPathIndexes, roots).allSatisfy({ index, root in
+                  index.identity.rootID == root.reference.id
+                      && index.identity.lifetimeID == root.lifetimeID
+                      && index.identity.topologyGeneration == root.catalogGeneration
+              })
+        else { return nil }
+        return WorkspaceContextRootSnapshot(
+            scope: scope,
+            roots: roots,
+            catalog: catalog,
+            lifetimeTokens: lifetimeTokens
+        )
+    }
+
+    #if DEBUG
+        func evictPublishedRootCatalogShardForTesting(rootID: UUID) {
+            publishedRootCatalogShardsByRootID.removeValue(forKey: rootID)
+        }
+
+        func advanceRootCatalogGenerationWithoutRetagForTesting(rootID: UUID) {
+            catalogGenerationsByRootID[rootID, default: 0] &+= 1
+        }
+    #endif
+
+    func isRootContextSnapshotCurrent(_ snapshot: WorkspaceContextRootSnapshot) -> Bool {
+        guard snapshot.lifetimeIsCurrent(), rootScopeAvailability(snapshot.scope) == .available else { return false }
+        let currentRoots = rootsForPathLookup(scope: snapshot.scope)
+        guard currentRoots.count == snapshot.roots.count else { return false }
+        return zip(currentRoots, snapshot.roots).allSatisfy { root, captured in
+            root.id == captured.reference.id
+                && root.standardizedFullPath == captured.reference.standardizedFullPath
+                && rootStatesByID[root.id]?.lifetimeID == captured.lifetimeID
+                && (catalogGenerationsByRootID[root.id] ?? 0) == captured.catalogGeneration
+        }
+    }
+
     func codemapRootEpochs(scope: WorkspaceLookupRootScope = .allLoaded) -> [UUID: WorkspaceCodemapRootEpoch] {
         Dictionary(uniqueKeysWithValues: rootsForPathLookup(scope: scope).compactMap { root in
             guard let state = rootStatesByID[root.id] else { return nil }
@@ -21693,8 +22220,10 @@ actor WorkspaceFileContextStore {
         let snapshotState = EditFlowPerf.begin(EditFlowPerf.Stage.ReadFile.pathLookupStaticSnapshotBuild)
         defer { EditFlowPerf.end(EditFlowPerf.Stage.ReadFile.pathLookupStaticSnapshotBuild, snapshotState) }
         let allowedRootIDs = Set(roots.map(\.id))
+        // Records land in path-keyed dictionaries, so iteration order is irrelevant; sorting every
+        // path here dominated chat token estimation on large workspaces.
         var fileRecords: [String: FileRecord] = [:]
-        for file in filesByID.values.sorted(by: { $0.standardizedFullPath < $1.standardizedFullPath }) {
+        for file in filesByID.values {
             guard allowedRootIDs.contains(file.rootID),
                   isDiscoverableFileID(file.id),
                   let root = rootStatesByID[file.rootID]?.root,
@@ -21708,7 +22237,7 @@ actor WorkspaceFileContextStore {
             ) as FileRecord
         }
         var folderRecords: [String: FolderRecord] = [:]
-        for folder in foldersByID.values.sorted(by: { $0.standardizedFullPath < $1.standardizedFullPath }) {
+        for folder in foldersByID.values {
             guard allowedRootIDs.contains(folder.rootID),
                   isDiscoverableFolderID(folder.id),
                   let root = rootStatesByID[folder.rootID]?.root,
@@ -21907,7 +22436,8 @@ actor WorkspaceFileContextStore {
         _ snapshot: WorkspaceSearchCatalogSnapshot,
         validationToken: SearchCatalogSnapshotValidationToken,
         capability: WorkspaceSearchCatalogAccessRequirement,
-        scope: WorkspaceLookupRootScope
+        scope: WorkspaceLookupRootScope,
+        leasedShardIdentitiesByRootID: [UUID: ObjectIdentifier]
     ) {
         if searchCatalogSnapshotsByScope[scope] == nil,
            searchCatalogSnapshotsByScope.count >= Self.maxCachedSearchCatalogSnapshotScopes,
@@ -21926,6 +22456,7 @@ actor WorkspaceFileContextStore {
             validationToken: validationToken,
             capability: capability,
             snapshot: snapshot,
+            leasedShardIdentitiesByRootID: leasedShardIdentitiesByRootID,
             lastAccessSequence: nextSearchCatalogAccessSequence()
         )
     }
@@ -22530,7 +23061,7 @@ actor WorkspaceFileContextStore {
         )
         let generation = nextAppliedIndexGeneration(forRootID: root.id)
         #if DEBUG
-            MCPApplyEditsRebaseProbeRecorder.recordAppliedIndexModification(
+            WorkspaceApplyEditsRebaseProbeHooks.recordAppliedIndexModification(
                 rootID: root.id,
                 fileIDs: modifiedFileIDs,
                 generation: generation

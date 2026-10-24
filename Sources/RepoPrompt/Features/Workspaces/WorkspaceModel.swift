@@ -1,6 +1,8 @@
 import Foundation
 import OSLog
+import RepoPromptDomainRuntime
 import RepoPromptFoundation
+import RepoPromptSettingsCore
 
 struct WorkspaceDuplicateGroupSummary: Identifiable, Equatable {
     struct DuplicateWorkspaceRow: Identifiable, Equatable {
@@ -123,56 +125,6 @@ struct WorkspacePreset: Codable, Identifiable, Equatable {
     }
 }
 
-struct StoredSelection: Codable, Equatable, Hashable {
-    let selectedPaths: [String]
-    let manualCodemapPaths: [String]
-    let slices: [String: [LineRange]]
-    let codemapAutoEnabled: Bool
-
-    init(
-        selectedPaths: [String] = [],
-        manualCodemapPaths: [String] = [],
-        slices: [String: [LineRange]] = [:],
-        codemapAutoEnabled: Bool = true
-    ) {
-        self.selectedPaths = selectedPaths
-        self.manualCodemapPaths = manualCodemapPaths
-        self.slices = slices
-        self.codemapAutoEnabled = codemapAutoEnabled
-    }
-
-    var isEmptyForSelectedFileTree: Bool {
-        selectedPaths.isEmpty && manualCodemapPaths.isEmpty && slices.isEmpty
-    }
-
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        try self.init(
-            selectedPaths: container.decodeIfPresent([String].self, forKey: .selectedPaths) ?? [],
-            manualCodemapPaths: container.decodeIfPresent([String].self, forKey: .manualCodemapPaths) ?? [],
-            slices: container.decodeIfPresent([String: [LineRange]].self, forKey: .slices) ?? [:],
-            codemapAutoEnabled: container.decodeIfPresent(Bool.self, forKey: .codemapAutoEnabled) ?? true
-        )
-    }
-
-    func encode(to encoder: Encoder) throws {
-        var container = encoder.container(keyedBy: CodingKeys.self)
-        try container.encode(selectedPaths, forKey: .selectedPaths)
-        try container.encode(manualCodemapPaths, forKey: .manualCodemapPaths)
-        try container.encode([String](), forKey: .autoCodemapPaths)
-        try container.encode(slices, forKey: .slices)
-        try container.encode(codemapAutoEnabled, forKey: .codemapAutoEnabled)
-    }
-
-    private enum CodingKeys: String, CodingKey {
-        case selectedPaths
-        case manualCodemapPaths
-        case autoCodemapPaths
-        case slices
-        case codemapAutoEnabled
-    }
-}
-
 /// Records when workspace decoding synthesized values that are not a pure
 /// function of the input bytes — `UUID()`/`Date()` fallbacks in the custom
 /// decoders, and `normalizeComposeTabInvariants` creating a tab. Results that
@@ -257,6 +209,10 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
     var isPinned: Bool
     /// Explicit order among pinned Agent sessions. nil preserves legacy activity sorting.
     var pinnedOrder: Int?
+    /// Optional sidebar group label for this tab's Agent session. nil means ungrouped.
+    var sidebarGroup: String?
+    /// Order of `sidebarGroup` among the workspace's groups, mirrored on every tab in the group.
+    var sidebarGroupOrder: Int?
     var activeChatSessionID: UUID?
     var activeAgentSessionID: UUID?
 
@@ -270,12 +226,24 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
     /// Active Context Builder tab config. Encodes/decodes under the legacy JSON key `discover`.
     var contextBuilder: ContextBuilderTabConfig
 
+    /// Matches empty, chat-placeholder and T-number titles eligible for automatic naming.
+    var hasDefaultName: Bool {
+        if ChatSession.isPlaceholderName(name) { return true }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count >= 2 else { return false }
+        let prefix = trimmed.prefix(1)
+        guard prefix == "T" || prefix == "t" else { return false }
+        return Int(trimmed.dropFirst()) != nil
+    }
+
     init(
         id: UUID = UUID(),
         name: String = "T1",
         lastModified: Date = Date(),
         isPinned: Bool = false,
         pinnedOrder: Int? = nil,
+        sidebarGroup: String? = nil,
+        sidebarGroupOrder: Int? = nil,
         activeChatSessionID: UUID? = nil,
         activeAgentSessionID: UUID? = nil,
         selection: StoredSelection = .init(),
@@ -291,6 +259,8 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         self.lastModified = lastModified
         self.isPinned = isPinned
         self.pinnedOrder = pinnedOrder
+        self.sidebarGroup = sidebarGroup
+        self.sidebarGroupOrder = sidebarGroupOrder
         self.activeChatSessionID = activeChatSessionID
         self.activeAgentSessionID = activeAgentSessionID
         self.selection = selection
@@ -309,6 +279,11 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         lastModified = try c.decodeIfPresent(Date.self, forKey: .lastModified) ?? WorkspaceDecodeSynthesis.mark(Date())
         isPinned = try c.decodeIfPresent(Bool.self, forKey: .isPinned) ?? false
         pinnedOrder = try? c.decode(Int.self, forKey: .pinnedOrder)
+        // Additive and optional like `pinnedOrder`: absent, malformed, or invalid names (empty,
+        // multi-line, over-long) decode as ungrouped; valid names are trimmed like the ops write them.
+        sidebarGroup = (try? c.decode(String.self, forKey: .sidebarGroup))
+            .flatMap(DomainAgentSessionSidebarGroup.normalizedName)
+        sidebarGroupOrder = sidebarGroup == nil ? nil : try? c.decode(Int.self, forKey: .sidebarGroupOrder)
         activeChatSessionID = try c.decodeIfPresent(UUID.self, forKey: .activeChatSessionID)
         activeAgentSessionID = try c.decodeIfPresent(UUID.self, forKey: .activeAgentSessionID)
         selection = (try? c.decodeIfPresent(StoredSelection.self, forKey: .selection)) ?? .init()
@@ -327,6 +302,8 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         try c.encode(lastModified, forKey: .lastModified)
         try c.encode(isPinned, forKey: .isPinned)
         try c.encodeIfPresent(pinnedOrder, forKey: .pinnedOrder)
+        try c.encodeIfPresent(sidebarGroup, forKey: .sidebarGroup)
+        try c.encodeIfPresent(sidebarGroupOrder, forKey: .sidebarGroupOrder)
         try c.encodeIfPresent(activeChatSessionID, forKey: .activeChatSessionID)
         try c.encodeIfPresent(activeAgentSessionID, forKey: .activeAgentSessionID)
         try c.encode(selection, forKey: .selection)
@@ -344,6 +321,8 @@ struct ComposeTabState: Codable, Identifiable, Equatable {
         case lastModified
         case isPinned
         case pinnedOrder
+        case sidebarGroup
+        case sidebarGroupOrder
         case activeChatSessionID
         case activeAgentSessionID
         case selection
