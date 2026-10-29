@@ -1,5 +1,4 @@
 import Foundation
-import os
 @testable import RepoPromptDomainRuntime
 import XCTest
 
@@ -66,8 +65,8 @@ final class OracleGroupRuntimeTests: XCTestCase {
     func testStartPersistsPrepareBeforeCallbacksAndReturnsExactWhitespace() async throws {
         let fixture = try makeRuntime()
         defer { fixture.cleanup() }
-        let preparedSeen = OSAllocatedUnfairLock(initialState: false)
-        let laneStarted = OSAllocatedUnfairLock(initialState: false)
+        let preparedSeen = DomainTestLockedState(initialState: false)
+        let laneStarted = DomainTestLockedState(initialState: false)
         let start = try makeStart(count: 3, seed: "start", models: ["alpha", "alpha", "beta"])
         let input = try OracleInput(mode: .chat, userMessage: "ask")
         let store = fixture.store
@@ -199,7 +198,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                 invocationID: UUID(),
                 runID: UUID(),
                 claimID: UUID(),
-                input: try OracleInput(mode: .chat, userMessage: "ask"),
+                input: OracleInput(mode: .chat, userMessage: "ask"),
                 intent: .start(start)
             ),
             callbacks: .init(
@@ -256,7 +255,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                 invocationID: UUID(),
                 runID: UUID(),
                 claimID: UUID(),
-                input: try OracleInput(mode: .chat, userMessage: "next"),
+                input: OracleInput(mode: .chat, userMessage: "next"),
                 intent: .continuation(
                     Continuation(
                         group: prepared.group,
@@ -292,7 +291,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
         let fixture = try makeRuntime()
         defer { fixture.cleanup() }
         let start = try makeStart(count: 2, seed: "prepared-fail")
-        let laneCalls = OSAllocatedUnfairLock(initialState: 0)
+        let laneCalls = DomainTestLockedState(initialState: 0)
 
         await XCTAssertOracleRuntimeThrowsErrorAsync {
             _ = try await fixture.runtime.execute(
@@ -300,7 +299,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .start(start)
                 ),
                 callbacks: .init(
@@ -334,7 +333,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .start(start)
                 ),
                 callbacks: .init(executeLane: { invocation in
@@ -365,7 +364,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .start(start)
                 ),
                 callbacks: .init(
@@ -389,7 +388,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
         let fixture = try makeRuntime()
         defer { fixture.cleanup() }
         let start = try makeStart(count: 2, seed: "settlement-clock")
-        let timestamp = Date(timeIntervalSince1970: 12_345)
+        let timestamp = Date(timeIntervalSince1970: 12345)
         let runtime = OracleGroupRuntime(
             store: fixture.store,
             claimManager: fixture.claimManager,
@@ -402,7 +401,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .start(start)
                 ),
                 callbacks: .init(
@@ -430,7 +429,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .continuation(
                         Continuation(
                             group: missing.group,
@@ -453,9 +452,9 @@ final class OracleGroupRuntimeTests: XCTestCase {
             publicChatID: "single-chat",
             model: model
         )
-        let invalidStart = OracleGroupRuntime.Start(
-            group: try OracleGroupDescriptor(size: 2),
-            owner: try OracleConversationOwner(kind: "runtime", identifier: "single"),
+        let invalidStart = try OracleGroupRuntime.Start(
+            group: OracleGroupDescriptor(size: 2),
+            owner: OracleConversationOwner(kind: "runtime", identifier: "single"),
             name: "single",
             roster: roster,
             members: [member]
@@ -466,7 +465,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .start(invalidStart)
                 ),
                 callbacks: .init(executeLane: { _ in OracleLaneExecutionResponse(response: "unused") })
@@ -486,12 +485,12 @@ final class OracleGroupRuntimeTests: XCTestCase {
         let runtime = fixture.runtime
         let store = fixture.store
 
-        async let first = runtime.execute(
+        async let first = try runtime.execute(
             Request(
                 invocationID: UUID(),
                 runID: UUID(),
                 claimID: UUID(),
-                input: try OracleInput(mode: .chat, userMessage: "ask"),
+                input: OracleInput(mode: .chat, userMessage: "ask"),
                 intent: .start(start)
             ),
             callbacks: .init(
@@ -512,7 +511,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "other"),
+                    input: OracleInput(mode: .chat, userMessage: "other"),
                     intent: .continuation(
                         Continuation(
                             group: start.group,
@@ -555,7 +554,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "ask"),
+                    input: OracleInput(mode: .chat, userMessage: "ask"),
                     intent: .start(start)
                 ),
                 callbacks: .init(
@@ -611,7 +610,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                 invocationID: UUID(),
                 runID: UUID(),
                 claimID: UUID(),
-                input: try OracleInput(mode: .chat, userMessage: "ask"),
+                input: OracleInput(mode: .chat, userMessage: "ask"),
                 intent: .start(start)
             ),
             callbacks: .init(executeLane: { invocation in
@@ -636,7 +635,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
                     invocationID: UUID(),
                     runID: UUID(),
                     claimID: UUID(),
-                    input: try OracleInput(mode: .chat, userMessage: "next"),
+                    input: OracleInput(mode: .chat, userMessage: "next"),
                     intent: .continuation(
                         Continuation(
                             group: first.terminalDocument.group,
@@ -808,7 +807,7 @@ private extension OracleGroupRuntimeTests {
             roster: start.roster,
             members: start.members,
             turns: [OracleTurnRecord(
-                input: try OracleInput(mode: .chat, userMessage: "first"),
+                input: OracleInput(mode: .chat, userMessage: "first"),
                 state: .prepared,
                 startedAt: timestamp
             )]
