@@ -3602,6 +3602,25 @@ class OperationRegistry:
         "REPOPROMPT_CODEX_CACHE_ROOT",
         "REPOPROMPT_CLEAN_PUBLIC_SWIFTPM_BUILDS",
     ]
+    # SwiftPM resolves Git dependencies inside the child process. Preserve the
+    # client's proxy routing and CA trust when the daemon builds on restricted
+    # networks; inheriting only PATH leaves those builds unable to fetch packages.
+    NETWORK_ENV_KEYS = [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "CURL_CA_BUNDLE",
+        "GIT_SSL_CAINFO",
+        "GIT_SSL_CAPATH",
+        "REQUESTS_CA_BUNDLE",
+    ]
     STYLE_ENV_KEYS = [
         "GITHUB_ACTIONS",
         "CI",
@@ -3637,6 +3656,7 @@ class OperationRegistry:
             SIGNING_ENV_KEYS
             + DEBUG_ENV_KEYS
             + BUILD_ENV_KEYS
+            + NETWORK_ENV_KEYS
             + STYLE_ENV_KEYS
             + TEST_ENV_KEYS
             + CONDUCTOR_ENV_KEYS
