@@ -1638,10 +1638,10 @@ final class AgentSessionLinkHandoffInheritanceTests: XCTestCase {
                             rows = session.items.map(\.id)
                             defer {
                                 session.instructionTimeoutTask?.cancel()
-                                session.instructionTimeoutTask = nil
+                                session.instructionWait?.timeoutTask = nil
                                 session.instructionContinuation?.resume(throwing: CancellationError())
-                                session.instructionContinuation = nil
-                                session.instructionWaitID = nil
+                                session.instructionWait = nil
+
                                 session.waitingPrompt = nil
                                 waiting.cancel()
                             }
@@ -1653,10 +1653,10 @@ final class AgentSessionLinkHandoffInheritanceTests: XCTestCase {
                             fixture.viewModel.agentSessionLinkScheduleAutoWakeReevaluation(wakeID: attempt.wakeID, endpoint: endpoint)
                             session.oversight.autoWakeOnUpdates = false
                             session.instructionTimeoutTask?.cancel()
-                            session.instructionTimeoutTask = nil
+                            session.instructionWait?.timeoutTask = nil
                             let continuation = session.instructionContinuation
-                            session.instructionContinuation = nil
-                            session.instructionWaitID = nil
+                            session.instructionWait = nil
+
                             continuation?.resume(throwing: CancellationError())
                             _ = try? await waiting.value
                         }
@@ -3227,10 +3227,10 @@ final class AgentSessionLinkHandoffInheritanceTests: XCTestCase {
                 XCTAssertEqual(session.runState, .waitingForUser, "The real wait must own the waiting state the gate keys on")
                 defer {
                     session.instructionTimeoutTask?.cancel()
-                    session.instructionTimeoutTask = nil
+                    session.instructionWait?.timeoutTask = nil
                     session.instructionContinuation?.resume(throwing: CancellationError())
-                    session.instructionContinuation = nil
-                    session.instructionWaitID = nil
+                    session.instructionWait = nil
+
                     session.waitingPrompt = nil
                     waiting.cancel()
                 }
@@ -3337,7 +3337,7 @@ final class AgentSessionLinkHandoffInheritanceTests: XCTestCase {
                 session.beginRunAttempt(source: "test.forceSwitchInteraction")
                 session.waitingPrompt = "answer?"
                 session.pendingApproval = AgentApprovalRequest(
-                    requestID: .codex(.int(1)),
+                    requestID: .codex(.fixture(.int(1))),
                     method: "item/commandExecution/requestApproval",
                     kind: .commandExecution, threadID: "t", turnID: "t", itemID: "i"
                 )
@@ -3663,7 +3663,7 @@ final class AgentSessionLinkHandoffInheritanceTests: XCTestCase {
                     session.pendingHandoff = .init(payload: "foreign-slot", createdAt: Date())
                     if awaitingApproval {
                         session.pendingApproval = AgentApprovalRequest(
-                            requestID: .codex(.int(1)),
+                            requestID: .codex(.fixture(.int(1))),
                             method: "item/commandExecution/requestApproval",
                             kind: .commandExecution, threadID: "t", turnID: "t", itemID: "i"
                         )

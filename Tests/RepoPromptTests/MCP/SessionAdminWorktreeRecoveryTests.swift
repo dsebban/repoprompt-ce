@@ -11,6 +11,141 @@ import XCTest
 
 @MainActor
 final class SessionAdminWorktreeRecoveryTests: XCTestCase {
+    private actor MergeCommitProbe {
+        private(set) var commits = 0
+        private(set) var physicalChecks = 0
+        func commit() {
+            commits += 1
+        }
+
+        func physicalCheck() {
+            physicalChecks += 1
+        }
+    }
+
+    func testColdSavedTargetCreatesBindsMergesAndUnbindsThroughPreparedCanonicalWriter() async throws {
+        try await withFixture { fixture in
+            let manager = WindowStatesManager.shared
+            // Keep the production prepared owner available across the three separate commands
+            // and their durable reads. The host must release its own nested hold each time;
+            // otherwise normal idle retirement may legitimately refuse the next command.
+            manager.beginPreparedOversightPreparation(fixture.sessionID)
+            @MainActor func cleanupPreparedOwner() async {
+                manager.endPreparedOversightPreparation(fixture.sessionID)
+                if manager.preparedOversightWindows[fixture.sessionID] != nil {
+                    let released = await manager.releasePreparedOversightOwnerForVisit(sessionID: fixture.sessionID)
+                    XCTAssertTrue(released)
+                }
+            }
+            do {
+                let viewModel = fixture.window.agentModeViewModel
+                let workspace = try XCTUnwrap(fixture.window.workspaceManager.activeWorkspace)
+                let savedSource = try await fixture.savedSession()
+                let source = try XCTUnwrap(savedSource)
+                _ = try await AgentSessionDataService.shared.saveAgentSession(source, for: workspace)
+                // Use the same real durable service as saved-target preparation, including if it can
+                // reuse the visible composition. No acknowledgement stub or post-command flush.
+                viewModel.test_setAgentSessionSaver { payload, workspace, count in
+                    try await AgentSessionDataService.shared.saveAgentSession(
+                        payload, for: workspace, preparation: .alreadyCanonicalTranscript, trustedCanonicalItemCount: count
+                    )
+                }
+                viewModel.test_removeSession(tabID: fixture.session.tabID)
+                XCTAssertNil(try SessionAdminWindows.command(for: fixture.sessionID))
+                let host = SessionAdminWindowsWorktreeHost()
+                let created = try await host.createWorktree(
+                    forSession: fixture.sessionID, repoRoot: nil, branch: "e2e/cold-target", baseRef: nil,
+                    isStillAuthorized: { true }
+                )
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                let sourcePath = URL(fileURLWithPath: created.path)
+                try fixture.git.write("cold merge\n", to: "cold-merge.txt", at: sourcePath)
+                try fixture.git.stage("cold-merge.txt", at: sourcePath)
+                try fixture.git.commit("Cold target change", at: sourcePath)
+                var published: Set<String>?
+                _ = try await host.bindWorktree(
+                    sessionID: fixture.sessionID, worktree: created.path, repoRoot: nil,
+                    isStillAuthorized: { true }, admitBindings: { _ in }, bindingsCommitted: { published = $0 }
+                )
+                XCTAssertEqual(published, [created.worktreeID])
+                let bound = try await AgentSessionDataService.shared.loadAgentSession(id: fixture.sessionID, for: workspace)
+                XCTAssertEqual(bound?.worktreeBindings.map(\.worktreeID), [created.worktreeID])
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                _ = try await host.previewMerge(sessionID: fixture.sessionID, repoRoot: nil, mergeTarget: "@main", isStillAuthorized: { true })
+                let mergeCommand = try XCTUnwrap(SessionAdminWindows.command(for: fixture.sessionID))
+                let mergeOperation = try mergeCommand.writer.scope.worktrees.statusMerge(command: mergeCommand, operationID: nil)
+                let probe = MergeCommitProbe()
+                let controller = DomainMutationCommitController(
+                    physicalMutationGuard: { await probe.physicalCheck()
+                        return nil
+                    },
+                    willCommit: { await probe.commit() }
+                )
+                var applyFinished = false
+                let applying = Task { @MainActor in
+                    defer { applyFinished = true }
+                    return try await MCPDomainMutationCommitContext.controllerTaskLocal.withValue(controller) {
+                        try await host.applyMerge(sessionID: fixture.sessionID, operationID: mergeOperation.id, isStillAuthorized: { true })
+                    }
+                }
+                defer { applying.cancel() }
+                try await AsyncTestWait.waitUntil("cold target merge review or early refusal") {
+                    mergeCommand.writer.session.pendingWorktreeMergeReview != nil || applyFinished
+                }
+                if applyFinished { _ = try await applying.value }
+                let review = try XCTUnwrap(mergeCommand.writer.session.pendingWorktreeMergeReview)
+                XCTAssertTrue(try XCTUnwrap(mergeCommand.writer.scope.installedInteractions).submitWorktreeMergeReviewDecision(
+                    command: mergeCommand, reviewID: review.id, decision: .accept
+                ))
+                _ = try await applying.value
+                let merged = try await AgentSessionDataService.shared.loadAgentSession(id: fixture.sessionID, for: workspace)
+                XCTAssertEqual(merged?.worktreeMergeOperations.first?.status, .completed)
+                XCTAssertEqual(mergeCommand.writer.session.runState, .idle, "Standalone review must return to its original idle state")
+                let commits = await probe.commits
+                let physicalChecks = await probe.physicalChecks
+                XCTAssertGreaterThan(commits, 0, "Admin root composition must forward the outer journal")
+                XCTAssertGreaterThan(physicalChecks, 0, "Admin root composition must retain outer physical policy")
+                XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.repository.appendingPathComponent("cold-merge.txt").path))
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                let removed = try await host.unbindWorktrees(
+                    sessionID: fixture.sessionID, worktreeID: nil, isStillAuthorized: { true }, bindingsRemoved: { _ in }
+                )
+                XCTAssertEqual(removed, [created.worktreeID])
+                let unbound = try await AgentSessionDataService.shared.loadAgentSession(id: fixture.sessionID, for: workspace)
+                XCTAssertEqual(unbound?.worktreeBindings, [])
+                XCTAssertEqual(manager.preparedOversightPreparationInFlight[fixture.sessionID], 1)
+                fixture.assertForegroundUnchanged()
+            } catch {
+                await cleanupPreparedOwner()
+                throw error
+            }
+            await cleanupPreparedOwner()
+            XCTAssertNil(manager.preparedOversightPreparationInFlight[fixture.sessionID])
+        }
+    }
+
+    func testIdleWaitStopsOnWriterReacquisitionInsteadOfFollowingSuccessor() async throws {
+        try await withFixture { fixture in
+            fixture.session.mcpFollowUpRunPending = true
+            let command = try XCTUnwrap(SessionAdminWindows.command(for: fixture.sessionID))
+            var entered = false
+            let finished = expectation(description: "original writer wait ended")
+            let waiter = Task { @MainActor in
+                entered = true
+                await SessionAdminWindowsWorktreeHost().waitForIdleBoundary(sessionID: fixture.sessionID)
+                finished.fulfill()
+            }
+            defer { waiter.cancel() }
+            try await AsyncTestWait.waitUntil("idle waiter entered") { entered }
+            fixture.window.agentModeViewModel.test_removeSession(tabID: fixture.session.tabID)
+            fixture.window.agentModeViewModel.test_installLiveSession(fixture.session)
+            XCTAssertFalse(command.isCurrent)
+            XCTAssertTrue(fixture.session.mcpFollowUpRunPending, "Successor remains busy")
+            await fulfillment(of: [finished], timeout: 3)
+            fixture.session.mcpFollowUpRunPending = false
+        }
+    }
+
     func testUnscopedWriterDefersBeforeConfiguredPayloadPreparation() async throws {
         try await withFixture(canonicalHost: true) { fixture in
             let viewModel = fixture.window.agentModeViewModel
@@ -516,8 +651,8 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
         }
     }
 
-    func testHeldResolutionAbortsWhenTargetBindingsOrDeclaredOrderChangeBeforeCommit() async throws {
-        for change in ["bindings", "declared_order"] {
+    func testHeldResolutionAbortsWhenTargetBindingsDeclaredOrderOrWriterIncarnationChangeBeforeCommit() async throws {
+        for change in ["bindings", "binding_metadata", "declared_order", "writer_incarnation"] {
             let hold = DiscoveryHold()
             let live = GitRepoTargetResolver.Dependencies.live
             let resolver = GitRepoTargetResolver(dependencies: .init(
@@ -530,6 +665,9 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
             try await withFixture(election: true, resolver: resolver) { fixture in
                 let repos = try XCTUnwrap(fixture.election)
                 let topicID = try fixture.worktreeID(repos.alphaTopic)
+                if change == "binding_metadata" {
+                    fixture.session.worktreeBindings = try [fixture.binding(logical: repos.alpha, worktree: repos.alphaPrime)]
+                }
                 await hold.arm()
                 let request = Task { @MainActor in
                     try await fixture.call([
@@ -541,16 +679,41 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 switch change {
                 case "bindings":
                     fixture.session.worktreeBindings = try [fixture.binding(logical: repos.beta, worktree: repos.betaPrime)]
+                case "binding_metadata":
+                    let fingerprint = AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(fixture.session.worktreeBindings)
+                    let previous = fixture.session.worktreeBindings[0]
+                    fixture.session.worktreeBindings = [.init(
+                        id: previous.id, repositoryID: previous.repositoryID, repoKey: previous.repoKey,
+                        logicalRootPath: previous.logicalRootPath, logicalRootName: previous.logicalRootName,
+                        worktreeID: previous.worktreeID, worktreeRootPath: previous.worktreeRootPath,
+                        commonGitDir: previous.commonGitDir, isMainWorktree: previous.isMainWorktree,
+                        worktreeName: previous.worktreeName, branch: previous.branch, head: previous.head,
+                        visualLabel: "Changed during discovery", visualColorHex: previous.visualColorHex,
+                        boundAt: previous.boundAt, source: previous.source
+                    )]
+                    XCTAssertEqual(AgentWorkspaceLookupContextSource.worktreeBindingFingerprint(fixture.session.worktreeBindings), fingerprint)
+                case "writer_incarnation":
+                    let viewModel = fixture.window.agentModeViewModel
+                    let origin = try XCTUnwrap(viewModel.runtimeCommand(sessionID: fixture.sessionID))
+                    viewModel.test_removeSession(tabID: fixture.session.tabID)
+                    viewModel.test_installLiveSession(fixture.session)
+                    let successor = try XCTUnwrap(viewModel.runtimeCommand(sessionID: fixture.sessionID))
+                    XCTAssertNotEqual(origin.identity, successor.identity)
+                    XCTAssertFalse(origin.isCurrent)
+                    XCTAssertTrue(successor.isCurrent)
                 default:
                     let index = try XCTUnwrap(fixture.window.workspaceManager.workspaces.firstIndex { $0.id == fixture.workspaceID })
                     fixture.window.workspaceManager.workspaces[index].repoPaths = [repos.beta, repos.alpha, repos.gamma].map(\.path)
                 }
                 let expected = fixture.session.worktreeBindings
+                let persistedBefore = try await fixture.savedSession()?.worktreeBindings
                 await hold.release()
                 let reply = try await request.value
                 let item = try XCTUnwrap(reply["items"]?.arrayValue?.first?.objectValue, Self.json(reply))
                 XCTAssertEqual(item["code"], .string("scope_revoked"), "\(change): \(Self.json(reply))")
                 XCTAssertEqual(fixture.session.worktreeBindings, expected, change)
+                let persistedAfter = try await fixture.savedSession()?.worktreeBindings
+                XCTAssertEqual(persistedAfter, persistedBefore, "Discovery refusal must not save a successor: \(change)")
             }
         }
     }
@@ -562,11 +725,14 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
                 fixture.binding(logical: repos.alpha, worktree: repos.alphaPrime),
                 fixture.binding(logical: repos.beta, worktree: repos.betaPrime)
             ]
-            // A non-previewed saved operation fails only inside the saved-endpoint apply, after the host's
-            // capture-only admission; default election would refuse earlier with an ambiguity. Both endpoints sit
-            // inside workspace roots: the host admits a linked endpoint only when its own checkout root is a
-            // workspace repository, which is separate from #1431.
-            let operation = try Self.savedMergeOperation(source: repos.gamma, target: repos.alpha, status: .cancelled)
+            // A non-previewed saved operation fails inside saved-endpoint apply, after exact endpoint
+            // admission; default election would refuse earlier with ambiguity. Use real HEADs so this
+            // fixture tests operation-state refusal rather than a fabricated stale endpoint.
+            let operation = try Self.savedMergeOperation(
+                source: repos.gamma, target: repos.alpha, status: .cancelled,
+                sourceHead: fixture.git.runGit(["rev-parse", "HEAD"], at: repos.gamma).trimmingCharacters(in: .whitespacesAndNewlines),
+                targetHead: fixture.git.runGit(["rev-parse", "HEAD"], at: repos.alpha).trimmingCharacters(in: .whitespacesAndNewlines)
+            )
             fixture.session.worktreeMergeOperations = [operation]
             let text: String
             do {
@@ -1449,7 +1615,8 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
     }
 
     private static func savedMergeOperation(
-        source: URL, target: URL, status: AgentSessionWorktreeMergeOperation.Status
+        source: URL, target: URL, status: AgentSessionWorktreeMergeOperation.Status,
+        sourceHead: String = String(repeating: "a", count: 40), targetHead: String = String(repeating: "b", count: 40)
     ) throws -> AgentSessionWorktreeMergeOperation {
         func endpoint(_ root: URL, head: String) throws -> GitWorktreeMergeEndpoint {
             let identity = try XCTUnwrap(GitWorktreeIdentityResolver.resolve(atWorkTreeRoot: root))
@@ -1460,8 +1627,8 @@ final class SessionAdminWorktreeRecoveryTests: XCTestCase {
             )
         }
         let operationID = "merge_\(UUID().uuidString)"
-        let sourceEndpoint = try endpoint(source, head: String(repeating: "a", count: 40))
-        let targetEndpoint = try endpoint(target, head: String(repeating: "b", count: 40))
+        let sourceEndpoint = try endpoint(source, head: sourceHead)
+        let targetEndpoint = try endpoint(target, head: targetHead)
         let now = Date()
         let inspection = GitWorktreeMergeInspection(
             source: sourceEndpoint, target: targetEndpoint,

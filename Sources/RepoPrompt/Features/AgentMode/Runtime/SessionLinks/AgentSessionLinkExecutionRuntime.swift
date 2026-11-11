@@ -30,6 +30,7 @@ final class AgentSessionLinkExecutionRuntime {
         let start: @MainActor (AgentTabSession, String, AgentDirectRunStartOptions, AgentRunStartOutcomeRecorder?, AgentProviderSwitchSendPreparation?) async -> CodexAgentModeCoordinator.NativeSendOutcome?
         let settleSelfCompact: @MainActor (AgentTabSession) -> Void
         let selfCompactBlocksWake: @MainActor (AgentTabSession) -> Bool
+        let selfCompactHoldsWakeAcquisition: @MainActor (AgentTabSession) -> Bool
     }
 
     private(set) weak var scope: AgentSessionRuntimeStore.Scope?
@@ -71,6 +72,7 @@ final class AgentSessionLinkExecutionRuntime {
 
     #if DEBUG
         var test_endpointRead: (() -> Void)?
+        var test_selfCompactAfterSupport: (() async -> Void)?
         var test_beforeRoutineIdleFollowUpStart: ((AgentTabSession, UUID) -> Bool)?
         var test_agentSessionLinkAfterProviderInputRouteReadiness: (() async -> Void)?
         var test_agentSessionLinkHasActiveOutboundLink: ((DomainAgentSessionLinkEndpointIdentity) async -> Bool)?
@@ -99,11 +101,15 @@ final class AgentSessionLinkExecutionRuntime {
     }
 
     func admit(_ candidate: AgentSessionLinkEndpointCandidate) -> AgentSessionRuntimeStore.Command? {
+        admit(endpoint: candidate.domainEndpoint)
+    }
+
+    func admit(endpoint: DomainAgentSessionLinkEndpointIdentity) -> AgentSessionRuntimeStore.Command? {
         guard let scope,
               case let .unique(writer) = scope.resolveWriter(
-                  sessionID: candidate.sessionID, expectedWorkspaceID: candidate.workspaceID
-              ), writer.scope === scope, writer.session.tabID == candidate.tabID,
-              agentSessionLinkObserverEndpoint(tabID: candidate.tabID) == candidate.domainEndpoint
+                  sessionID: endpoint.sessionID, expectedWorkspaceID: endpoint.workspaceID
+              ), writer.scope === scope, writer.session.tabID == endpoint.tabID,
+              agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
         else { return nil }
         return try? writer.admitCommand().get()
     }

@@ -359,6 +359,8 @@ final class AgentTabSession: ObservableObject {
     /// and intentionally never persisted as session state.
     var pendingInitialStartLocation: AgentModeViewModel.InitialStartLocation = .local
     var composerSubmissionToken = UUID()
+    /// Exact pending-start capability; runtime-only and never persisted.
+    var composerStartCancellation: AgentComposerStartCancellation?
     var activeComposerSubmitAttempt: AgentComposerSubmitAttempt? {
         didSet {
             // Only the in-flight transition matters to an observer; attempt-internal churn does
@@ -370,7 +372,7 @@ final class AgentTabSession: ObservableObject {
     }
 
     var isComposerSubmissionInFlight: Bool {
-        activeComposerSubmitAttempt != nil
+        activeComposerSubmitAttempt != nil || composerStartCancellation != nil
     }
 
     /// These gate delivery readiness and published `idle_for_send`, so wake observers when either
@@ -387,8 +389,11 @@ final class AgentTabSession: ObservableObject {
         }
     }
 
+    /// A direct setter takes over the gate; an old runtime lease may only clear its own token.
+    var executionLocationChangeOwner: UUID?
     var isChangingExecutionLocation: Bool = false {
         didSet {
+            executionLocationChangeOwner = nil
             if oldValue != isChangingExecutionLocation {
                 noteMonitorObservationInputsChanged()
             }
@@ -400,7 +405,10 @@ final class AgentTabSession: ObservableObject {
     /// unbound state; Handoff performs the destination's first save explicitly afterwards.
     var isInstallingHandoffWorktreeBindings = false
 
-    var worktreeBindingTransitionInProgress: Bool = false
+    var worktreeBindingTransitionOwner: UUID?
+    var worktreeBindingTransitionInProgress: Bool = false {
+        didSet { worktreeBindingTransitionOwner = nil }
+    }
 
     /// Runtime-only: an execution-worktree change this session requested for itself from its own
     /// live turn, applied at that turn's completed terminal boundary and then continued
@@ -540,8 +548,7 @@ final class AgentTabSession: ObservableObject {
 
     var applyEditsApprovalSubscriptionID: UUID?
     var applyEditsApprovalSubscriptionTask: Task<Void, Never>?
-    var worktreeMergeReviewContinuation: CheckedContinuation<WorktreeMergeReviewDecision, Never>?
-    var worktreeMergeReviewTimeoutTask: Task<Void, Never>?
+    var worktreeMergeReviewWait: AgentWorktreeMergeReviewWait?
     /// External MCP control attachment. Its presence and effective task label determine whether this
     /// exact session may act as an oversight observer.
     var mcpControlContext: AgentMCPControlContext? {
@@ -571,8 +578,11 @@ final class AgentTabSession: ObservableObject {
     }
 
     var mcpFollowUpRunPendingUpdatedAt: Date?
+    /// The self-relocation lease only. Any direct setter transfers ownership away from old cleanup.
+    var selfWorktreeRelocationFollowUpOwner: UUID?
     var mcpFollowUpRunPending: Bool = false {
         didSet {
+            selfWorktreeRelocationFollowUpOwner = nil
             if oldValue != mcpFollowUpRunPending {
                 mcpFollowUpRunPendingUpdatedAt = Date()
                 noteMonitorObservationInputsChanged()
@@ -848,12 +858,22 @@ final class AgentTabSession: ObservableObject {
     }
 
     /// Instruction steering coordination state
-    var instructionContinuation: CheckedContinuation<UserInstructionResponse, Error>? {
+    var instructionWait: AgentInstructionWait? {
         didSet { noteMonitorObservationInputsChanged() }
     }
 
-    var instructionTimeoutTask: Task<Void, Never>?
-    var instructionWaitID: UUID?
+    /// Read-only projections; installation, consumption and cleanup own the exact wait record.
+    var instructionContinuation: CheckedContinuation<UserInstructionResponse, Error>? {
+        instructionWait?.continuation
+    }
+
+    var instructionTimeoutTask: Task<Void, Never>? {
+        instructionWait?.timeoutTask
+    }
+
+    var instructionWaitID: UUID? {
+        instructionWait?.id
+    }
 
     /// Agent run — transient run-attempt lifecycle/settlement state is owned by
     /// the extracted `AgentRunAttemptLifecycle` facade. Run identity is
@@ -1451,6 +1471,20 @@ final class AgentTabSession: ObservableObject {
     ///
     /// Never persisted: it describes a live process-local controller generation.
     var codexSessionLinkCatalogRepairCycle: AgentSessionLinkCodexCatalogRepair.Cycle?
+    /// Retained across controller replacements, but not persisted across cold restoration.
+    var codexContextWindowSelection: CodexContextWindowPreferences.Selection?
+
+    func clearCodexConversationIdentity() {
+        codexConversationID = nil
+        codexContextWindowSelection = nil
+    }
+
+    func codexContextWindowForBinding(current: CodexContextWindowPreferences.Selection) -> CodexContextWindowPreferences.Selection {
+        if let selection = codexContextWindowSelection { return selection }
+        codexContextWindowSelection = current
+        return current
+    }
+
     /// The permission profile the current Codex controller was created with.
     /// Used to detect when MCP control changes require controller recycling.
     var codexControllerPermissionProfile: AgentModeViewModel.AgentPermissionProfile?
@@ -1545,10 +1579,21 @@ final class AgentTabSession: ObservableObject {
     var selfCompactState = AgentSelfCompactState() {
         didSet {
             if oldValue != selfCompactState { isDirty = true }
+            // Only correlated native/ACP completion enters the verified note boundary.
+            if let active = selfCompactState.active, active.phase == .awaitingNoteBoundary,
+               active.compactTurnSucceeded == true, active.acpCompletionUnverified != true
+            {
+                selfCompactVerifiedWakeRequestID = active.id
+            }
+            if selfCompactState.active?.id != selfCompactVerifiedWakeRequestID {
+                selfCompactVerifiedWakeRequestID = nil
+            }
             noteMonitorObservationInputsChanged()
         }
     }
 
+    /// Runtime evidence from the correlated completion coordinator, never restored as authority.
+    var selfCompactVerifiedWakeRequestID: UUID?
     var selfCompactPersistenceWarning = false
 
     /// Runtime-only fence: a same-key MCP retry cannot claim a scheduled receipt until the
@@ -1558,10 +1603,12 @@ final class AgentTabSession: ObservableObject {
     /// Runtime-only owner/exclusivity fence, rechecked at provider-bound send seams after startup awaits.
     /// A restored attempt has no executable fence and cannot resume dispatch.
     var selfCompactDispatchIsCurrent: (@MainActor () -> Bool)?
+    /// Notes need the same ownership proof, but not the expired compact-start deadline.
+    var selfCompactNoteOwnerIsCurrent: (@MainActor () -> Bool)?
 
     @MainActor
     func selfCompactNoteDispatchIsCurrent(_ dispatchID: AgentSelfCompactionDispatchID) -> Bool {
-        guard selfCompactDispatchIsCurrent?() != false else {
+        guard (selfCompactNoteOwnerIsCurrent ?? selfCompactDispatchIsCurrent)?() != false else {
             selfCompactNativeCompletion?.cancelUnattemptedNoteIfOwnerLost(dispatchID)
             return false
         }
@@ -1661,6 +1708,8 @@ final class AgentTabSession: ObservableObject {
     var lastUserMessageAt: Date?
     var lastCommandOutputSaveAt: Date?
     var saveDebounceTask: Task<Void, Never>?
+    /// Identifies a pending timer independently of the payload/save revision.
+    var saveDebounceRequestID: UUID?
     var isDirty: Bool = false {
         didSet {
             if isDirty {
@@ -1787,6 +1836,7 @@ final class AgentTabSession: ObservableObject {
         guard codexHookGateDispatchOwnerToken == token else { return }
         codexHookGateDispatchOwnerToken = nil
         codexHookGateActiveBinding = nil
+        codexHookGateOrigin = nil
         let continuations = Array(codexHookGateCoalescedContinuations.values)
         codexHookGateCoalescedContinuations.removeAll()
         for continuation in continuations {
@@ -1820,10 +1870,19 @@ final class AgentTabSession: ObservableObject {
         return true
     }
 
+    struct CodexHookGateOrigin: Equatable {
+        let writer: AgentSessionRuntimeStore.WriterIdentity
+        let runID: UUID?
+        let runAttemptID: UUID?
+    }
+
+    var codexHookGateOrigin: CodexHookGateOrigin?
+
     func resetCodexHookGateBinding() {
         _ = cancelCodexHookReview()
         codexHookGateInventoryFingerprint = nil
         codexHookGateActiveBinding = nil
+        codexHookGateOrigin = nil
         codexHookGateBindingMemo = nil
         codexHookGateAudit = nil
     }
@@ -2093,7 +2152,7 @@ final class AgentTabSession: ObservableObject {
     }
 
     @discardableResult
-    func beginRunAttempt(source: String, attemptID: UUID = UUID()) -> AgentRunOwnership {
+    func beginRunAttempt(source: String, attemptID: UUID = UUID(), beginsProviderRun: Bool = true) -> AgentRunOwnership {
         claudeProviderOutputBoundary = nil
         claudeLiveSuccessorTurnIDs.removeAll()
         claudeAcceptedHostTurnIDs.removeAll()
@@ -2125,6 +2184,9 @@ final class AgentTabSession: ObservableObject {
             ),
             attemptID: attemptID
         )
+        // Cancellation/startup-failure bookkeeping can manufacture a terminal-only attempt.
+        // That is not the pending input's provider prologue and must not retire its capability.
+        if beginsProviderRun { composerStartCancellation?.runAttemptBegan(on: self) }
         if pendingHandoff.providerSwitchDelivery == .sending,
            let proof = pendingHandoff.providerSwitchDispatch
         {

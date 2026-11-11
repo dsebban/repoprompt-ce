@@ -28,6 +28,15 @@ final class AgentSessionAttachmentRuntime {
     struct Configuration {
         let location: (AgentTabSession) -> AgentSessionAttachmentLocation?
         let locationIsCurrent: (AgentSessionAttachmentLocation, AgentTabSession) -> Bool
+
+        static func canonical(
+            location: @escaping (AgentTabSession) -> AgentSessionAttachmentLocation?
+        ) -> Self {
+            .init(location: location, locationIsCurrent: { captured, session in
+                guard let current = location(session) else { return false }
+                return current.retainedRoot == captured.retainedRoot
+            })
+        }
     }
 
     private weak var scope: AgentSessionRuntimeStore.Scope?
@@ -150,6 +159,11 @@ final class AgentSessionAttachmentRuntime {
 
     var hasPendingRetention: Bool {
         !retentionTasks.isEmpty
+    }
+
+    func hasPendingRetention(for session: AgentTabSession) -> Bool {
+        guard let sessionID = session.activeAgentSessionID else { return false }
+        return retentionTasks.values.contains { $0.sessionID == sessionID }
     }
 
     /// Cancellation of a waiter is not completion of the admitted disk operation.

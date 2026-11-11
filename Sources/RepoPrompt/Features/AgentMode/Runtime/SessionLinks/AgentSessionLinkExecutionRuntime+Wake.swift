@@ -595,6 +595,20 @@ extension AgentSessionLinkExecutionRuntime {
             return false
         }
         if attempt.phase != .dispatching {
+            // Keep the producer's identity fenced until its no-call finalizer runs. Automatic
+            // queue content remains owed; a manual Wake now is a one-shot and is not requeued.
+            if commands.selfCompactHoldsWakeAcquisition(session) {
+                if let claim = agentSessionLinkPromptClaimStore.pendingClaim(
+                    dispatchID: effectiveID,
+                    observerSessionID: attempt.observerEndpoint.sessionID
+                ) {
+                    agentSessionLinkPromptClaimStore.abandon(claim)
+                }
+                if !attempt.isManual { session.oversight.autoWakeReevaluationOwed = true }
+                attempt.phase = .cancelledBeforeDispatch
+                session.oversight.pendingAutoWake = attempt
+                return false
+            }
             // The acceptance fence, evaluated exactly once and only on this side of the transport
             // boundary. A re-entrant acquire for an attempt that is already `dispatching` must not
             // consult it: the physical call may already have happened, so retracting the identity
@@ -1092,14 +1106,30 @@ extension AgentSessionLinkExecutionRuntime {
         else {
             return
         }
+        func cancelOriginalWake(_ reason: AgentSessionLinkAutoWakeCancellationReason) {
+            guard agentSessionLinkAutoWakeSession(for: endpoint) === session,
+                  session.oversight.pendingAutoWake?.wakeID == wakeID else { return }
+            cancelAgentSessionLinkAutoWake(for: endpoint, reason: reason)
+        }
+        guard let command = instructionCommand(for: session), let waitID = session.instructionWaitID,
+              ownsInstructionWait(command: command, waitID: waitID)
+        else {
+            cancelOriginalWake(.eligibilityLost)
+            return
+        }
         let proof = await agentSessionLinkProveProviderInput(for: session, claim: claim)
-        guard agentSessionLinkAutoWakeSession(for: endpoint) === session,
+        guard ownsInstructionWait(command: command, waitID: waitID),
+              agentSessionLinkAutoWakeSession(for: endpoint) === session,
               session.oversight.pendingAutoWake?.wakeID == wakeID,
-              agentSessionLinkAutoWakeRoute(session) == .waitingContinuation else { return }
+              agentSessionLinkAutoWakeRoute(session) == .waitingContinuation
+        else {
+            cancelOriginalWake(.eligibilityLost)
+            return
+        }
         guard !Task.isCancelled else {
             // Retire preparation through its existing owner. A bare return leaves the
             // cancelled task waiting for a physical attempt that must never happen.
-            cancelAgentSessionLinkAutoWake(for: endpoint, reason: .eligibilityLost)
+            cancelOriginalWake(.eligibilityLost)
             return
         }
         // A .sending marker already owned by this live run means the handover is in flight on the
@@ -1108,13 +1138,21 @@ extension AgentSessionLinkExecutionRuntime {
         if !switchInFlightOnActiveRun, case .failure = await providerSwitchSendAdmission(
             session: session, input: claim.fragment, skipsAugmentation: true,
             inputAlreadyIncludesSupplement: true,
-            isCurrent: { self.agentSessionLinkAutoWakeSession(for: endpoint) === session
+            isCurrent: { self.ownsInstructionWait(command: command, waitID: waitID)
+                && self.agentSessionLinkAutoWakeSession(for: endpoint) === session
                 && session.oversight.pendingAutoWake?.wakeID == wakeID
                 && self.agentSessionLinkAutoWakeRoute(session) == .waitingContinuation
             }
         ) {
             abandonAgentSessionLinkPromptClaim(claim)
-            cancelAgentSessionLinkAutoWake(for: endpoint, reason: .requiredClaimUnavailable)
+            cancelOriginalWake(ownsInstructionWait(command: command, waitID: waitID) ? .requiredClaimUnavailable : .eligibilityLost)
+            return
+        }
+        guard ownsInstructionWait(command: command, waitID: waitID),
+              agentSessionLinkAutoWakeSession(for: endpoint) === session,
+              session.oversight.pendingAutoWake?.wakeID == wakeID
+        else {
+            cancelOriginalWake(.eligibilityLost)
             return
         }
         // This continuation carries the wake, not the handover already owned by its active run.
@@ -1132,7 +1170,7 @@ extension AgentSessionLinkExecutionRuntime {
             guard AgentSelfCompactParkedPrefix.markAttempted(noteID, session: session) else { return }
         }
         let accepted = resumeWaitingInstructionContinuation(
-            session: session,
+            command: command, waitID: waitID,
             providerText: carry.text,
             claim: claim,
             origin: .laneUpdateAutoWake(wakeID: wakeID),

@@ -154,6 +154,9 @@ struct AgentRunCancellationAdmission {
     enum Scope {
         case activeRun
         case pendingStart
+        /// An exact runtime wait can predate run ownership. Only its originating wait claim
+        /// may use this case; ordinary active-run Stop still requires non-nil ownership.
+        case instructionWaitTimeout
     }
 
     let scope: Scope
@@ -163,6 +166,7 @@ struct AgentRunCancellationAdmission {
     let expectedRunID: UUID?
     let cancellationGeneration: UUID
     let pendingStartFence: AgentRunStartStopFence?
+    var expectedComposerAttemptID: UUID?
     let validateAndClaim: @MainActor () -> Bool
 
     func claim(for candidate: AgentTabSession) -> Bool {
@@ -178,11 +182,21 @@ struct AgentRunCancellationAdmission {
                   candidate.activeRunOwnership == expectedOwnership,
                   candidate.runID == expectedRunID
             else { return false }
+        case .instructionWaitTimeout:
+            guard candidate.runState == .waitingForUser,
+                  !candidate.terminalCommitInProgress,
+                  candidate.activeRunOwnership == expectedOwnership,
+                  candidate.runID == expectedRunID else { return false }
         case .pendingStart:
             guard candidate.activeRunOwnership == nil,
-                  candidate.mcpFollowUpRunPending || !candidate.pendingInstructions.isEmpty,
-                  pendingStartFence?.permitsStart(of: candidate) ?? true
-            else { return false }
+                  pendingStartFence?.permitsStart(of: candidate) ?? true else { return false }
+            if let expectedComposerAttemptID {
+                guard let start = candidate.composerStartCancellation,
+                      start.attemptID == expectedComposerAttemptID, start.canWithdraw(on: candidate) else { return false }
+            } else {
+                guard candidate.composerStartCancellation == nil,
+                      candidate.mcpFollowUpRunPending || !candidate.pendingInstructions.isEmpty else { return false }
+            }
         }
         return validateAndClaim()
     }

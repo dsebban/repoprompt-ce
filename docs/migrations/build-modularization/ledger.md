@@ -5340,6 +5340,85 @@ stash remain excluded and preserved. PR #1655 stays draft; no live-app lifecycle
   claim that the repository has no existing warnings; the clean hosted aggregate ratchet remains
   separate. Final Swift-tree lint: `e58f94fa-e23f-4c2b-beb6-fff6dfa2113e`, passed.
 
+### M9.3a phase A: window-free saved-target loading groundwork
+
+This phase deliberately **does not cut over execution or retire prepared windows**. The overseer
+split those changes into phase B, after M9.2b (#1662), because today's provider/start, MCP and link
+composition still requires the excluded VM/window seams. Existing prepared-window execution and
+ordinary close-cancels-run behavior remain unchanged. This does not complete M9.3 or #1406.
+
+`AgentSavedSessionTargetLoader.loadRuntime` joins the existing UUID metadata point reader to
+`AgentSessionDataService.preparePersistedHydration`, `AgentSessionHydrationRuntime` and a
+caller-retained `AgentSessionRuntimeStore.Scope`. A cold load publishes only a restoration-pending
+claim before payload IO; it starts no provider and cannot admit a command until hydration commits.
+An existing canonical writer is reused, never elected from UI replicas. Conflicts, unavailable
+writers, cancellation, lost consent and changed catalog/storage evidence refuse admission. Failed
+load receipts distinguish released loading claims from effects that must remain with their owner.
+
+`AgentSessionStorageInputs` supplies catalog point reads, display names, suppression and attachment
+storage to the existing persistence/attachment runtimes. It owns no catalog, session map, lifecycle
+or save queue. Creation still requires the exact explicit configured-creation transaction; merely
+having a binding cannot turn a required flush into first-save admission. The ordinary VM attachment
+root uses the same root calculation; preview invalidation remains presentation-owned (M9.4).
+
+The load/composition API is **phase-B groundwork, not yet a production saved-target host**. Phase B
+must supply current canonical catalog reads and carrier/provenance fences; copying an immutable
+workspace snapshot into these closures does not qualify as live catalog authority. Phase A does
+not replace those checks with a disk-only catalog or add another subscribed workspace store.
+
+#### Phase-B cutover dependency and retirement plan
+
+| Cutover seam | Dependency on M9.2b / required replacement | Retired branch at activation |
+| --- | --- | --- |
+| Run service/provider-input composition | Consume M9.2b's scope-owned commands and provider/terminal settlement; compose real `AgentModeRunService`, continuation, attempt and terminal owners with canonical workspace/context/API-settings inputs | VM-captured `makeRunService` hooks, `makeRunStartEnvironment`, `makeFollowUpLaunch` and `AgentModeRunComposition` workspace factories for saved execution |
+| MCP route/catalog host | Consume canonical M9.2b `AgentSessionMCPRuntime` and `AgentRunMCPToolService` routing; install and withdraw a runtime route without constructing an MCP/window VM | Prepared `WindowState` route and window lookup as execution-owner lookup |
+| Link endpoint/command host | Consume M9.2b `Runtime/SessionLinks/*` command routing; expose exact scope writer candidates, observations and publication, preserving link/notices/claim/wake ownership | `agentSessionLinkOwningViewModel` and prepared-window census paths for saved endpoints |
+| Provider/coordinator host | Use M9.2b's explicit coordinator/service composition; supply real provider availability, input, cancellation, self-compaction and worktree settlement, not no-op hooks | Saved-host `configureCodexRuntime`/VM provider callbacks (presentation detach remains M9.4) |
+| Saved catalog and hydration caller | Read the canonical workspace authority, revalidate carrier/provenance and storage over IO, invoke `loadRuntime`, then compose on the **returned writer's scope**; retain existing-writer handling rather than constructing a second host | `resolveSavedOversightLocation` window-catalog adapter and `prepareSavedOversightSession` prepared-window construction/hydration path |
+| Prepared owner lifetime | Keep the existing scope/store, run service, attempt owner, domain run registration and terminal barrier; join final effects/save before releasing the exact writer | `WindowState.makePreparedSessionOwner`, `tearDownPreparedSessionOwner`, `preparedOversightWindows`/retiring maps, `AgentSessionCarrierResolver.preparedSessionRuntimes` weak registry and `addingPreparedRuntimeCarriers` |
+| Host storage | Install canonical `AgentSessionStorageInputs` composition with live suppression/names/admission and the actual provider-switch save fence | Saved-host `installPersistenceComposition` window inputs and `attachmentRuntime.configuration` location/current-root adapter; optional UI callbacks remain M9.4 |
+
+Phase B must activate the executable replacement and retire those branches together. Required
+qualification includes no-window **execution**, provider/route failure and cancellation before
+publication, zero/one/conflicting writers, deletion/revocation during IO, actual durable writes and
+partial-effect receipts. Loading-only tests are not that execution receipt. Live app/hosted CI
+qualification is separate; phase A performs no visible app lifecycle action.
+
+Validation (base `7442551fc891adc2d66c6e750a1073507f212873`, 2026-11-09):
+
+- Final focused loading/metadata/persistence/transcript gate: ticket
+  `dd3ab4aa-a151-46f0-b115-c722f87da84c`, **34 passed, zero failures**, including 11
+  real-persistence runtime-loading tests in the existing saved-target test file. The prior
+  focused ticket `f803b8d8-fdf2-49d0-824d-a737c6f4f236` also passed all 34 before file
+  consolidation. Initial ticket `47c4ea36-25a3-4265-9fd9-fc96debd196d` was canceled before
+  review fixes; it is not a pass.
+- Related SessionLinks/handoff, restoration/first-save/writer/worktree admission, sidebar,
+  attachment, save and observation suites: `100ae90f-0ada-461e-9169-6c5ef16383a6`,
+  **493 passed, zero failures** across 30 suites.
+- Both products (`RepoPrompt`, `repoprompt-mcp`):
+  `56b6fa89-946f-4657-a803-0c7bb7cc5604`, passed. Subsequent edits only consolidated tests
+  and recorded receipts; product sources did not change.
+- Full lint `70aca56d-c118-44a2-a26d-6377c45408ec`: passed (0/2,147 formatting changes;
+  strict SwiftLint passed). Final consolidated test file was checked with pinned SwiftFormat
+  0.61.1; all six touched Swift files passed scoped strict SwiftLint with cache disabled.
+- Compiler-index check after final test completion: passed, wrong-way file edges
+  **1,248/1,360**, largest cycle components **53/66**. An earlier check overlapped the next
+  coordinated build's fingerprint invalidation and correctly refused unknown freshness;
+  no baseline was raised.
+- Compiler warning occurrences in the fresh focused build and product logs, then the final
+  focused log: **0 each** for `AgentSessionAttachmentRuntime.swift`,
+  `AgentSessionStorageInputs.swift`, `AgentSavedSessionTargetLoader+Runtime.swift`,
+  `AgentModeViewModel+DraftsAttachments.swift`, `AgentSavedSessionTargetLoaderTests.swift`
+  and `AgentSessionPersistenceRuntimeTests.swift`. The two new source files have base count
+  zero because they did not exist. Existing-file base counts were **not independently
+  rebuilt**; current zero proves no increase over any nonnegative base count, not an exact
+  historical count. Unrelated existing compiler/package warnings remain outside this claim.
+- One independent source review completed; its ownership, first-save and partial-effect
+  concerns were addressed or explicitly documented. Import-count preflight initially refused
+  a separate test file (340/339); consolidating into the existing file preserves the 339
+  ratchet rather than weakening it. No live app launch, stop, relaunch or live execution smoke
+  was performed; production window-free execution remains phase B.
+
 ### M9.2 in progress: writer admission, placement, and Send/Stop routing
 
 This is a partial routing milestone, not completion of M9.2 or #1406.
@@ -6055,3 +6134,1743 @@ pinned scoped formatting changed zero files. The failed broad run is not a quali
 No local full-suite, live-app, release or hosted-CI success is claimed. No CI logs were read.
 After the validated M9.2a push and PR update, this lane stops feature work; only CI failures
 reported by the overseer are assigned to it. M9.2b belongs to the fresh follow-on session.
+
+### M9.2b checkpoint 1 — copied control resources and provisional unwind (2026-11-09)
+
+The copied-resource portion of the MCP inventory is implemented. Cleanup recognizes the
+structural installation holder in the existing scope/tab/incarnation index, independently of
+unique-writer admission. A copied registration or approval receipt in another scope cannot
+release the holder's resources, including under a deliberately corrupted conflicting claim.
+No parallel registry or lifecycle manager was added; the scope-local ambiguity veto remains.
+
+Failed activation now unwinds its exact provisional context on the original object after
+removal, replacement or rebinding. Payload restoration is limited to the original restoration
+token. The former same-tab-occupant-as-successor heuristic is retired: a copied occupant does
+not own the abandoned registration. A progressed installation or freshly registered successor
+keeps its resources. Causal coverage exercises registration and approval-only copies, raw
+conflicts, removal, real binding transition, copied replacement, registration recovery and an
+actual nested successor activation, including resource release and payload-setting assertions.
+
+Validation for this checkpoint:
+- Focused `AgentSessionMCPRuntimeTests`, `AgentSessionRuntimeStoreTests` and
+  `AgentRunMCPToolServiceSteerResumeTests`: **62 passed, 0 failures**, Conductor
+  `66c4764a-ce7b-46aa-89be-db81ed27eacc`. The earlier 61-pass/1-failure run exposed a new
+  fixture that reinstalled the same binding without advancing its restoration generation;
+  it now performs a real binding transition and retains the preservation assertion.
+- Both products passed `539c31b8-ce1f-42d6-af65-e743c32efb3d`.
+- Full lint passed `e0ea1090-c1cd-4a1f-8a49-c2617055c510`; final test-only edits also passed
+  pinned SwiftFormat 0.61.1 and scoped strict SwiftLint.
+- Fresh index: **1242/1360** wrong-way file edges, **53/66** largest-cycle components;
+  no baseline changes. An index query during the running test correctly refused freshness;
+  the post-completion check above passed.
+- Actual cold compile and final incremental logs contain **zero warning occurrences in each
+  touched Swift file** (not merely zero new warning signatures). Product logs were checked too.
+- One Oracle review completed; settings and successor assertions were strengthened afterward.
+  No full-suite, live-app, release or hosted-CI success is claimed; no CI logs were read.
+
+**Still open:** every other M9.2b inventory group above, including remaining MCP metadata/tool
+selection and VM adapter retirement. The review also identified a pre-existing first-setup-await
+progression concern: an epoch/registration can advance before permission setup finishes, retaining
+a partially configured control despite the failed activation response. Second-boundary progression
+is covered here; first-boundary completion/unwind remains in the control-routing inventory.
+M9.3 saved-target composition and M9.4 presentation/handoff/drain remain out of scope.
+
+### M9.2b checkpoint 2 — apply-edits review response routing (2026-11-09)
+
+The apply-edits review card captures the canonical writer command when rendered, rather than
+selecting a tab/window again when clicked. `AgentModeViewModel.submitApplyEditsReviewDecision`
+and its untracked approval-store task are removed. The interaction runtime validates the exact
+writer and review, tracks the admitted effect in its existing drain, revalidates before dispatch,
+and joins the store's exact-review Boolean acknowledgement. Actor-hop completion never writes
+back to a successor session. The approval store still owns review settlement; ordinary originating
+Stop/cancellation cleanup retains its separate exact-receipt path.
+
+The causal matrix covers successful settlement, removal, claim reacquisition, raw conflicting
+writers (after typed admission refusal), retirement and an undisplayed successor review. A stale
+command must leave the receipt pending, and duplicate/stale review settlement returns false.
+`AgentSessionInteractionRuntimeTests` passed **13 tests, 0 failures**, Conductor
+`4417a5d7-24ac-4def-8f77-8207620922c2`; pinned scoped formatting and strict lint passed.
+The actual compile emitted zero warnings in the six touched Swift files. The filter also named
+`ApplyEditsApprovalStoreTests`, which does not exist; no separate store-suite coverage is claimed.
+Caller/body search leaves only the runtime method and its two card calls; the notification
+architecture inventory now names this runtime path. This checkpoint does not complete other
+interaction/provider-approval routing or any other outstanding M9.2b group.
+
+### M9.2b checkpoint 3 — question responses and managed admission (2026-11-09)
+
+Ask-user submit/skip/resolve now require the captured canonical writer command and acknowledge
+whether the pending continuation was actually consumed. A stale command cannot change drafts or
+consume a continuation. The card captures the rendered writer; notification replies perform exact
+writer admission; MCP response parsing now passes the command directly to the interaction runtime.
+Managed responses capture the same capability before authorization and recheck it after the await,
+including same-object claim reacquisition rather than only binding/object equality. The existing
+endpoint/grant checks, one-time approval policy and provider decision checks remain in place.
+
+Actual Agent Mode VM methods retired: both `submitAskUserResponse` overloads, `skipAskUser`,
+private `resolveAskUserResponse`, the `applyPendingInteractionResolution` forwarding body, and
+unused `noteQuestionCardActivity`/`submitQuestionResponse`/`skipQuestion` legacy shims. Searches
+confirm only the runtime response implementation remains in Agent Mode. Context Builder's
+separate question implementation is unchanged. Draft/index/activity forwarding and other provider
+response bodies remain open; this is not completion of the interaction group.
+
+Validation for checkpoints 2–3:
+- Final focused run: **280 passed, 0 failures**, Conductor
+  `c6f8c97b-36f6-471a-a8d4-4b6f6a5db571`, covering interaction runtime, notification actions,
+  Codex approval choices, MCP response diagnostics and session-link runtime bridge suites.
+  The preceding 277-pass/3-failure run exposed three unbound/unrestored response fixtures;
+  these now install restored writers while retaining their outcome/continuation assertions.
+  Added reacquisition and raw-conflict response refusal plus authorization-await reacquisition.
+- Final both-product build: `a2570571-0b36-4e96-96fe-5f303c5d7115`, completed successfully.
+  Its waiter briefly timed out contacting the daemon; the same ticket's terminal status, not
+  the waiter exit, establishes completion. Earlier products `bb87508f-3c25-43fc-849b-656be1dcd6af`
+  also passed before the final guard/test changes.
+- Full lint: `46a045a9-3846-4ef3-9e8f-6ff2726f16f7` passed, **0/2144** files needing formatting.
+  The first attempt overlapped scoped formatting and failed on the VM file; a stable-source,
+  cache-independent formatter check passed before the full retry. Final guard/fixture changes
+  additionally passed scoped pinned formatting and strict lint.
+- Fresh index: **1242/1360**, **53/66**; baseline unchanged.
+- **Corrected during checkpoint 4:** the earlier zero-occurrence warning audit missed ANSI-coded
+  diagnostics. The exact-base compile has four occurrences in `AgentModeViewModel.swift` and one
+  in `AgentRunMCPToolServiceSteerResumeTests.swift`; earlier M9.2b compilation logs also contain
+  these baseline diagnostics. An additional unused-`try?` result in `AgentModeView.swift` introduced
+  by checkpoint 3 is fixed in checkpoint 4. Incremental logs that did not compile a file are not
+  evidence of zero warnings. Final validation compares ANSI-stripped occurrence counts per file.
+  Existing runtime SwiftUI diagnostics in untouched `AgentSessionRows.swift` remain distinct from
+  compiler warnings.
+- No full-suite, live-app, release or hosted-CI success is claimed; no CI logs were read.
+
+All remaining M9.2b inventory and the first-control-setup progression concern remain open.
+
+#### M9.2b checkpoint 4 — question draft and activity commands
+
+Question draft edits, page selection and timeout rearming now consume the same exact writer
+command captured when the card is rendered. They acknowledge only a changed, current pending
+question with a live continuation. Cross-scope commands, reacquired claims and raw writer
+conflicts cannot alter drafts, page index or timeout generation. The existing response-refusal
+witness now covers these mutations, valid detached-presentation editing and invalid question/page
+inputs without changing its budgets or response assertions. Originating timeout/cancellation
+cleanup remains independent of fresh writer admission.
+
+Removed Agent Mode VM `updateAskUserDraft`, `updateAskUserQuestionIndex` and
+`noteAskUserCardActivity` methods; source/caller searches leave only runtime commands and direct
+card calls. Context Builder's separate implementation is untouched. An optional exact-object
+presentation notification preserves activity's narrow interaction refresh instead of refreshing
+all bindings on every user activity. This callback projects state only; it cannot admit writes.
+Question creation/loading and provider response bodies remain open. No endpoint/incarnation
+lookup or run-ownership publication implementation was changed.
+
+Validation history (including the superseded provisional attribution and its resolution):
+Scoped pinned formatting/strict lint and full lint `21294799-7c5f-406a-be01-1c43c035172e`
+passed. The newly required all-SessionLinks/admission/sidebar/lane-policy baseline at `cc4a92e`
+(`45c434ff-4704-4037-a241-6cba394225e8`) ran **1867 tests**, with **8 skipped** and **19 failing
+cases / 43 failure diagnostics**. The six suites reported by M9.2a account for 17 failing cases.
+Two additional `AgentSessionLinkHandoffInheritanceTests` cases failed: the cold-Claude picker
+composer-body equality assertion (60 vs 50) and the provider-switch scale budget (12.05s vs 10s).
+These were escalated before another push. Checkpoint-4 test `7a21c8a9-54c9-4a76-b487-363db21a14de`
+and product `3de0c87a-da48-464c-9142-6f87cf92a503` were cancelled for the exact-base comparison;
+neither is a passing validation receipt.
+
+**Known intermittent, overseer-classified:** the handoff suite is load-correlated, not yet
+root-caused. Exact base `e42006ff8` passed **104/104** (`62638293-1672-43c2-a1bc-51ad5efdf872`,
+scale 5.36s), and intermediate `a29638caf` passed **104/104**
+(`b7f54fd6-682b-420b-97fd-732ee299fae6`, scale 7.63s). The first focused `cc4a92e` run
+(`39fadef7-7bc7-438a-8085-104ab3375f5b`) failed composer counts (65/55 and 93/83), scale
+(32.85s), and a controlled-MCP refusal case. Subsequent head runs passed: the three isolated
+cases with temporary render logging (`0f81cab3-f271-4329-a9d4-9d72bf49c55c`, scale 6.29s),
+the full **104/104** with logging (`0c0aad6e-6787-4e66-b20f-cf90d94abfed`, scale 5.10s),
+and unmodified **104/104** (`c3d0c54a-8deb-49e9-a415-cabba6e805db`, scale **4.93s**).
+All temporary diagnostics were removed; no causal production fix is claimed. The failing runs
+overlapped other agent-lane work. The overseer permits pushing with this explicit classification,
+requires the suite at every push gate, and requires stopping to root-cause any recurrence using
+repeated head/base comparisons. **No assertions or budgets changed.** The complete selection plus
+the interaction-runtime suite then ran on checkpoint 4:
+`179f4f7a-a5d1-43a5-8436-92a9f9c8b9be` executed **1881 tests**, **8 skipped**, **17 failing
+cases / 37 diagnostics**. The focused interaction-runtime suite passed; handoff scale passed
+at **6.47s**, but the composer assertion recurred (**33 vs 23**). Per the overseer's condition,
+the push is stopped and repeated exact-head/base investigation is required. Products
+`c4c7d1b7-7dee-44c1-9305-6b1297ba0af0` and full lint
+`35cb539e-8e56-4f2a-828e-539ae76cd98e` passed.
+
+**Inherited-baseline classification (supersedes the provisional attribution above):** exact base
+`e42006ff8` reproduced both failures under the same broad 90-suite selection
+(`905e68ed-7ce6-4c29-9820-3aa89a77dc5b`): composer **30 vs 26**, scale **10.76s**;
+**1867 tests**, **8 skipped**, **18 failing cases / 38 diagnostics**. Unchanged head and base each
+passed three consecutive isolated **104-test** runs. Head tickets:
+`6a2cc95b-22e8-4ed5-a3ff-d5e48d54417b`, `ed8ff23c-48a0-4a8e-88ef-afb1a543a505`,
+`916662a7-1cc9-4d77-bb79-2f9425704baa`; base tickets:
+`dc3947a3-5340-494f-af41-5af3d0b5305b`, `62d5d409-9ae3-4f8f-99ce-791d806e1ebb`,
+`e00e9c76-2780-44b5-a0bc-ce7fcd73e947`.
+The overseer assigns root-cause work to a separate flake lane and releases this checkpoint to push:
+**HandoffInheritance render/scale: inherited baseline (reproduces on base `e42006ff8` under broad
+load; isolated 3×104 pass on base and head); tracked separately.** Later push gates continue to
+require an isolated handoff-suite pass. No assertion, budget or production composer path changed.
+
+The corrected compiler-warning audit compares complete ANSI-stripped diagnostic occurrence counts
+for all **16 touched Swift files**: base `62638293…` and checkpoint-4 `179f4f7a…` each report
+**four** in `AgentModeViewModel.swift`, **one** in `AgentRunMCPToolServiceSteerResumeTests.swift`,
+and **zero** in the other touched files. The new unused-`try?` result warning is absent after the
+explicit discard fix. The both-product incremental log adds no warnings; it is not treated as an
+independent full recompilation of every touched file.
+
+Final checkpoint-4 receipts after restoring the candidate source:
+- **118 passed, 0 failures** (104 handoff + 14 interaction runtime),
+  `6f4ef934-09d1-4929-8a6e-e0578400415b`; scale **6.46s**. The complete warning occurrence
+  audit again matches the base's four VM and one steer/resume-test diagnostics, with no additions.
+- Both products passed: `b5d86978-223c-426d-a770-e151be08df76`.
+- Full lint `35cb539e-8e56-4f2a-828e-539ae76cd98e` passed on the same Swift source.
+- Fresh index after final products: **1242/1360** wrong-way edges, **53/66** cycle components;
+  no baseline changes.
+- Broad-suite baseline failures are disclosed above; no full-suite, live-app, release or hosted-CI
+  success is claimed. This is a validated checkpoint, not completion of M9.2b.
+
+#### M9.2a integration into M9.2b — `ddf34184a`
+
+Normal merge of `ddf34184a177b47e41ab61f6a198556d3bd65df9` into checkpoint-4
+`d2e1af2415845769e06a54ad4e0186e85a866f21`; no rebase or force-push. The automatic merge was
+conflict-free. Both the M9.2a peer-admission/Stop changes and Codex parked-input/attempt fences
+remain intact, alongside M9.2b's captured interaction commands. The incoming fixture and warning
+repairs are preserved, not replaced with looser assertions.
+
+Merged-tree validation:
+- All SessionLinks suites, admission/sidebar/lane-policy, interaction runtime and Codex resume/wedge:
+  `c5ed5a92-6890-44d5-b634-11e96782da84`, **1956 executed, 8 skipped, one failing case / three
+  diagnostics**. All six previously failing suite families now pass: concurrent workspace admission,
+  lane policy, sidebar tab filtering, monitor pill props, link prompt view-model and Codex prompt
+  adapter. The handoff suite passed **104/104**, with scale **6.82s**, in this broad run.
+- The separate handoff run `b0dc9055-853e-4456-8a47-fb3420b3e07b` had one scale failure,
+  **11.30s vs 10s**; render assertions passed. The overseer explicitly classifies this as the
+  inherited baseline owned by the separate flake lane and permits this integration push.
+- **Additional intermittent:** `AgentSessionLinkLateQualificationTests.testReconnectionCannotInheritPredecessorOffer`
+  was the broad run's sole failing case: a 3-second retention-edge timeout, cancellation, and MCP
+  `tools[23].inputSchema.properties.sort.enum[2]` decoding error. It then passed in isolation on
+  both the merged candidate (`4bbacb04-271a-4011-bf4a-f0503f140edc`) and exact `ddf34184a` in a
+  temporary detached worktree (`924b06e8-c805-42c2-9918-1122dc58e415`): each executed **12 tests,
+  1 skipped, 0 failures**. Per the overseer's explicit rule this broad-only result is recorded as
+  intermittent and does not block pushing. Its cause is **not** established, and the schema error
+  is not dismissed as a load symptom. No MCP tool-schema/argument-definition or decoding source
+  differs from `ddf34184a`; no schema, assertion or timeout was changed. The temporary worktree was
+  removed after validation; Conductor retains its logs.
+- Both products `0de5d882-3782-40e3-9b25-7d947f0e34a9` and full lint
+  `5b3c641b-7efa-4eea-9ec9-ce3d55653642` passed. Fresh index: **1242/1360**, **53/66**; no ratchet
+  baseline changes.
+- ANSI-stripped warning occurrence audit over **24 Swift files** (M9.2b diff plus incoming merge
+  paths): exact-base and merged compile logs each contain **4** VM diagnostics, **6** in
+  `AgentSessionLinkPromptAdapterTests.swift`, **1** in `AgentRunMCPToolServiceSteerResumeTests.swift`,
+  and **0** in the other audited files. **No positive occurrence deltas.**
+
+No full-suite or hosted-CI success is claimed for M9.2b. The overseer reports #1659 green at this
+base; this lane did not read CI logs. The previously frozen endpoint/incarnation and run-ownership
+paths may be worked on after this validated integration, as authorized. M9.2b remains incomplete.
+
+#### M9.2b checkpoint 5 — provider-response body cutover
+
+The interaction runtime now owns the actual Codex/Claude/ACP approval, Codex permissions,
+MCP elicitation and user-input response bodies. Each explicit response synchronously checks its
+captured writer command and pending interaction UUID, consumes once, and admits a tracked effect.
+Cards capture the command at render; notifications admit the exact addressed session. MCP and
+managed responses retain their synchronous authorization-to-consumption boundary. Permissions and
+elicitation can no longer report success when the controller route is absent or the request was
+not consumed. The coordinator response bodies, VM mutation forwarders and runtime's Codex command
+callback are deleted, rather than retained as forwarding adapters. Claude cancellation composition
+remains because provider-adoption cancellation is a separate outstanding path.
+
+A response's Boolean acknowledges **local consumption and dispatch admission**, not provider delivery.
+Controller response methods still return Void and report transport failures separately. Ordinary
+UI user-input and ACP nil-controller local settlement are pre-existing behavior preserved here.
+MCP/managed user-input requires a controller before consuming, preserving the existing missing-route
+refusal contract instead of acknowledging a response that has no provider route. Codex responses still target the captured
+controller's current transport: the client can reconnect and requests do not carry its existing
+transport generation. Ingress-stamped transport receipt validation at the client's actual write is
+**required remaining M9.2b work**, not solved by a pre-send main-actor writer check. Event-side
+auto-approvals still need their own physical receipt fence; the existing MCP-input auto-answer now
+joins its existing event handler rather than launching an untracked response task.
+
+Cancel follow-ups use only an authoritative turn tuple matching the consumed request's controller,
+thread, generation and run attempt. The old fallback that asynchronously discovered and interrupted
+a later current turn is removed. With no matching authoritative turn, cancellation settles the
+request without guessing an interrupt target. The controller's expected-turn API is the final fence.
+
+Causal coverage checks duplicate consumption, same-object claim reacquisition and raw writer
+conflicts, original-controller dispatch after replacement, successor prompt preservation, tracked
+drain completion, foreign-controller/unknown turn cancellation, missing-controller MCP refusal and
+fresh composer first-turn approval through the card's command expression. Existing computer-use,
+ACP and approval-choice assertions remain. The unchecked VM approval overload is retired; its
+rejection assertion now exercises a repeated captured-command denial instead. Production run-start
+already commits fresh creation and admits a restored command before dispatch; no creation bypass
+was introduced. Review was performed once for this slice; its drain-witness and turn-tuple hardening
+recommendations were incorporated. No transport exactness or full M9.2b completion is claimed.
+
+Initial focused validation caught and repaired obsolete test references to retired APIs, three
+nonisolated test-table helpers accessing main-actor session state, a missing-provider managed-input
+acknowledgement regression, and a coordinator fixture's attempt still tied to its pre-binding
+identity. The fixture now explicitly opens and asserts an attempt for its restored binding; terminal
+publication/turn-count assertions are unchanged. No timing budgets were adjusted.
+
+Checkpoint validation before integrating the next M9.2a base:
+- Focused `c3b13943-6d01-4223-aa59-65c6fb763449`: **129 passed, zero failures**, including the
+  three new response-command tests and the fresh-composer first-provider-approval witness.
+- Scoped pinned formatting and strict lint passed; the three response-command tests were then
+  consolidated unchanged into the existing provider-effects test file to preserve the testable-app
+  import-file ratchet (**339**, not **340**). The resulting **13 Swift files** were scoped-checked
+  again; executable test names and behavioral assertions are unchanged. Full lint
+  `164ca997-3f5d-4c18-82bb-a49ea80efcaf` passed; subsequent test-fixture/route fixes were scoped
+  formatted and linted again.
+- Actual compile logs show at most **4** VM warning occurrences and **17** in
+  `CodexResumeWedgeCommitTests.swift`, with zero in the other touched files. The exact `ddf34184a`
+  baseline compile (`924b06e8…`) has the same **4/17** counts; no positive occurrence deltas.
+- The broader SessionLinks/isolated-handoff, product and fresh-index push gates are still required
+  after the requested normal integration of the updated M9.2a branch. This is not a push or a
+  complete M9.2b validation receipt.
+
+#### M9.2b checkpoint 5 integration — M9.2a `8d3b3d1ac`
+
+Normally merged `8d3b3d1ac52cd4d6b804b3393b81ed8b56f8101a` onto checkpoint 5
+`424d76bb6`. The only textual conflict placed two helpers at the same runtime-store insertion
+point; both the structural copied-control holder check and incoming control-read identity check
+are retained. Incoming control reads remain available across writer transitions, while mutations
+still require exact command admission. The non-terminal unavailable wait result and main's #1664
+flake-test fixes are preserved. No rebase, history rewrite or assertion/budget relaxation.
+
+Merged-tree push gates:
+- Broad 105-suite selection `41fb6f2b-26d3-4d2d-9761-9878f60b83c6`: **2086 executed,
+  8 skipped, zero failures**. Includes every SessionLinks suite, admission/sidebar/lane-policy,
+  all provider-effects classes, MCP steer/resume, and the affected response/coordinator suites.
+  This reruns the former six M9.2a failure families and the prior LateQualification intermittent.
+- Isolated HandoffInheritance `702b763c-1d82-4b09-8d45-9ccc94200ff2`: **104 passed**;
+  scale **4.47s** (broad run **5.13s**). Historical render/scale failures were inherited baseline
+  (reproduced on `e42006ff8` under broad load; isolated 3×104 passed on base and head), tracked
+  separately; this integration includes the subsequently merged flake fixes.
+- Both products `1020e342-b65a-4418-8304-129d81154958` and full lint
+  `1da826d5-83b6-43ca-a387-fe1f61fb4b80` passed. Fresh compiler index: **1243/1360** wrong-way
+  file edges and **53/66** largest cycle components. The new response-body file introduces its
+  payload dependency on `ViewModels/AgentTabSession.swift`; the count increased by one from the
+  prior checkpoint. No ratchet baseline was changed; payload ownership retirement remains open.
+- Warning occurrence audit across **18 Swift files**, using actual merged compilation and the
+  retained exact `ddf34184a` baseline compilation: **4** VM, **3** MCP tool-service, **17** Codex
+  resume/wedge, **1** MCP steer/resume diagnostic occurrences, zero in the other audited paths.
+  Counts match the baseline; **no positive deltas**. This is not a zero-total-warning claim.
+- Local `make ci-app-test-runner-selftest`: the sandboxed attempt could not execute `ps` and
+  failed process-supervision assertions. The approved unsandboxed rerun passed **200 tests**
+  across eight groups. No harness source or assertions were changed to obtain the pass.
+
+These are local selected-suite/product receipts, not full-suite, live-app, release or hosted-CI
+qualification. The provider transport receipt fence and remaining ledger routing groups are open;
+M9.2b is not complete.
+
+#### M9.2b checkpoint 6 — originating Codex response and cancel-follow-up receipts
+
+Server-request ingress now carries a required `CodexServerRequestReceipt` containing the client
+instance UUID, the reading transport generation and the typed wire request ID. Recovery parsing
+and termination-buffer flushes retain that ingress generation. The raw-ID response APIs are
+retired: client response/error writes validate the receipt synchronously next to the physical
+write, without an intervening await. A same-client reconnect or a different client cannot reuse
+an old response capability. No parallel lifecycle manager or outstanding-request registry was
+added. The pinned Codex sender uses monotonically allocated request IDs within one sender; the
+receipt distinguishes reconnects and integer/string wire-ID kinds rather than inventing another
+local ordinal.
+
+User-input, permissions, elicitation and Codex approval identities now include that receipt;
+Claude/ACP identity seeds and explicit test ID overrides are unchanged. Coordinator dedup and
+the parked-input Cancel card carry the same origin instead of comparing only the raw ID. The
+runtime still acknowledges synchronous command consumption, not provider delivery. Its tracked
+response effect receives a separate written/refused/failed outcome. Only a written cancellation
+response may issue an interrupt, with the original thread, authoritative turn and receipt. The
+client checks this answering receipt at the actor-owned write boundary, before pending-request/
+timer bookkeeping and without suspension before the write; ordinary standalone Stop remains separate. No later-turn discovery
+fallback was restored.
+
+New stale-origin refusals are non-terminal: they are returned/logged rather than emitted as a
+generic controller error that could fail a successor run. Genuine write errors retain their
+existing error path. Existing consent/provenance policy and auth-refresh liveness emission order
+are preserved. Broader provider-event error routing, Claude/ACP physical reply semantics and the
+remaining inventory are not claimed complete.
+
+Causal coverage exercises real client transport replacement and foreign-client refusal, exact
+wire ID kinds, no pending timeout state after refused follow-up, original-thread/turn protection,
+tracked response outcomes, deferred auth refresh across reconnect, and an old parked-input Cancel
+card confronting the same raw ID on a new generation. Existing computer-use consent assertions
+remain unchanged; its recorder now accepts both explicit fixture IDs (42 and 43) rather than
+silently dropping the newly distinct permissions reply. One review was completed; compile-only
+migration errors and the successor-terminal-error concern were addressed. A new unnecessary
+`await` warning in the test was removed rather than spending warning-ratchet headroom.
+
+Checkpoint 6 validation:
+- Focused `0dee9a45-1de5-444b-816e-36dd1f962c78`: **424 executed, one skipped, zero failures**.
+  Earlier attempts were compile-only migration failures; the first executing run found the
+  recorder's obsolete single-ID filter. No policy assertion or timing budget was relaxed.
+- Broad 109-suite selection `632dc0eb-4682-4072-8b93-928c5acc11f0`: **2125 executed,
+  nine skipped, zero failures**, including every SessionLinks suite and admission/sidebar/
+  lane-policy suites. Isolated HandoffInheritance `a0df5251-2370-4164-81b0-1b00632397d7`:
+  **104 passed**, scale **7.49s** (broad **5.22s**). The historical render/scale inherited baseline
+  remains separately tracked; the integrated flake fixes and current budgets are unchanged.
+- Complete owning `RepoPromptCodexProviderTests` module `633ff8d7-4590-4d05-b661-c5139067ef5e`:
+  **20 passed**. Both products `f3732ca1-9e02-4fcf-9752-378d86eee160` and full lint
+  `ea18afea-ed9f-47ce-8899-1e4076b56c98` passed. Fresh index remains **1243/1360** wrong-way
+  file edges and **53/66** largest cycle components; no ratchet baseline changed.
+- Actual compile-log occurrence comparison across **30 touched Swift files** against retained
+  exact-base compilation has **4** VM, **3** native-controller, **17** resume/wedge,
+  **2** runtime-bridge and **5** steer-transaction warnings, matching baseline counts. Other
+  touched files have zero, including the final recompiled integration fixture after removing
+  its unnecessary `await`. The provider client decreased from one baseline occurrence to zero.
+  **No positive occurrence deltas**; not a zero-total-warning claim. Existing unhandled domain
+  JSON-fixture resource warnings are unchanged.
+
+These are local selected/module/product receipts, not full-suite, live-app, release or hosted-CI
+qualification. Remaining interaction review/lifecycle, event and other routing groups are open;
+M9.2b is not complete.
+
+#### M9.2b integration — M9.2a squash and #1665 measurement boundary
+
+Normally merged #1665 (`633fab2c9`) as `fbb18c248`, retaining the receipt fixture changes and
+incoming scale measurement boundary. Before the explicitly authorized ancestry-only merge,
+`git merge-tree --write-tree 8d3b3d1ac 633fab2c9` produced tree
+`1387934b9959fd690cdd4f3165556ee396eb7f09`; its diff against the exact squash
+`ade839433d93ee4f2736f7900c300cf1dcfb4244` was empty. Commit `ded91e12e` used `-s ours`
+against that exact SHA only; its first-parent tree diff is empty. The earlier local ancestry
+commit also pointed to that same squash, but was re-recorded against its explicit SHA after the
+overseer warned that the shared `origin/main` ref had advanced. The ledger was preserved before
+the explicitly authorized reset; no published history was rewritten.
+
+A subsequent **normal** merge integrates main `7442551fc`, including #1666 (`59926156a`)
+interactive sidebar-menu test opt-in and #1656's batched lane-binding census. These changes are
+not discarded by the ancestry-only merge. No rebase or force-push.
+
+The incoming test now times the provider-switch workload after manufacturing its 300 saved-chat
+fixtures, and reports excluded fixture cost separately. Its ten-second ceiling covers a smaller
+explicit workload; this is not evidence of lower end-to-end persistence latency.
+
+Latest merged-tree validation:
+- Broad `d4137980-3754-4add-a215-f2d8a6bbee97`: **2126 executed, 22 skipped, zero failures**.
+  Includes all SessionLinks suites, sidebar/menu, lane/admission and receipt-response suites.
+  #1656's `AgentSessionLaneFirstSaveTests` passed **48** cases. Hosted sidebar menu coverage
+  executed **18**, with **13** interactive-tracking opt-in skips and zero failures; those
+  additional skips are #1666's intended desktop-focus protection, not new local exclusions.
+- Isolated HandoffInheritance `d667ebe5-edf9-4fc6-a329-a296d5e13162`: **104 passed**. The
+  new measured workload was **1.40s**, with **9.91s** excluded fixture setup; broad measured
+  **0.93s**, excluding **4.61s** setup. These are not comparable to the old end-to-end ceiling.
+- Both products `a17291a7-46f7-4589-97d5-791c18aa2005` passed; the final fresh index remains
+  **1243/1360** wrong-way edges and **53/66** largest cycle, with no baseline changes. Full lint
+  `d1046166-51dd-4457-915b-7a82186c5308` passed. `make conductor-selftest` initially failed
+  because the sandbox denied `ps`; the approved unsandboxed rerun passed **372 tests across
+  22 groups**. No test or process-supervision behavior was weakened.
+- The four incoming main Swift files are byte-identical to `7442551fc`; actual compilation has
+  **four** sidebar-menu warning occurrences, matching the retained base's **four**, and zero
+  in the other three files or handoff fixture. The checkpoint-6 warning audit remains applicable
+  to the unchanged receipt implementation. No positive occurrence deltas.
+
+The prior exact-squash-only gates also passed, but do not substitute for these newer-main gates.
+M9.2b remains open; no full-suite, live-app, release or hosted-CI qualification is claimed.
+
+#### M9.2b checkpoint 7 — worktree review lifecycle, not the VCS apply pipeline
+
+Moved the actual review installation, timeout, response and settlement bodies into the existing
+interaction runtime. One non-persisted wait record owns the continuation, timer and originating
+writer identity. New admission and UI/MCP responses require the canonical command; a reacquired
+claim cannot consume an older wait. MCP now reports refusal instead of silently acknowledging an
+unconsumed review. The card captures its command at render time. Removed the VM's review-install
+body, response/cancel/finish forwarding and duplicate cancellation-operation update.
+
+The timer and run teardown settle the exact originating wait without a tab lookup, even after
+presentation detach or writer loss. Operation mutation, explicit publication and save are gated
+by the originating persistent claim. Removing the original run's blocker reconciles its derived
+state only while the binding and run/attempt still match; a rebound binding or successor attempt
+is not reconciled. Acceptance alone does not schedule an unchanged-operation save. The VM captures
+its command before preview authorization/revalidation, checks it afterward, and checks it again
+before acting on an accepted result. Non-accept outcomes never return through a stale tab-keyed
+cancellation save. If admission is suspended before an accepted waiter resumes, no apply starts;
+claim-owned cleanup can record that abandoned decision instead.
+
+One review was completed. Its enum-label compile issue and original-run derived-state issue were
+addressed. Removed-symbol scans found no remaining callers; the existing presentation handler
+still invokes the index/sidebar/current-tab interaction projection. Causal tests cover synchronous
+publication ordering, refusal and duplicate settlement, raw conflicts, same-object reacquisition
+and rebound, detached expiry, a newer same-tab waiter, actual timer execution and exact save-request
+counts. Three tests were added to the existing worktree-review suite, with no relaxed assertions
+or budgets. VM authorization-await/accepted-resumption ordering is source-checked, not covered by
+a new injected VCS test seam. The existing load reconciler already cancels persisted
+`awaitingApproval` operations whose continuations cannot survive relaunch; no new recovery owner
+or schema was added.
+
+Still open: ask-user creation and its MCP external cancellation callback need an exact per-wait
+cutover; hook review and the administrative VCS apply/preview/continue/abort pipeline remain open.
+In particular, later VCS awaits/result persistence are not claimed writer-complete by this slice.
+
+Checkpoint 7 validation (in progress): focused `3ac6ba2f-8c61-4dbf-b76b-6c1512a415cf`
+passed **30 tests** (12 worktree review, 14 interaction runtime, four MCP response diagnostics).
+Full lint `db47ec13-1167-46bc-9730-a5cf4edaa14f` passed. Actual compile occurrence counts across
+eight touched Swift files match retained base: **four VM warnings**, zero in the other seven;
+no positive deltas. Isolated handoff `ca3933c9-925e-4fd1-bf40-293f7da6689f` passed **104**;
+both products `79696295-0c5d-496a-9d39-a24deadeb420` passed. Broad
+`da19f3fe-d82c-4aa4-b788-1098b30b4340` is **failed/incomplete**, not a pass: XCTest exited
+with signal 11 during LiveDiscovery's queued-observation Stop case. The local crash report places
+`EXC_BAD_ACCESS` in `CodexNativeSessionController.shutdown` clearing
+`completedCanonicalItemScopes`, via coordinator retirement; it has no Swift overlapping-access
+or exclusivity diagnostic. Isolated head `744fd8ac-fc82-4f83-9f29-3c6ef2cd091d` executed **36**,
+with four skips and zero failures. Exact base `7bd6f8188`, tested after preserving checkpoint 7
+in stash, executed **36**, with four skips and three timeout failures
+(`testW3RegisteredRingClaudeFirstDoesNotEchoQuietClosures`,
+`testW3RepromptRequiresAcceptedDeclarationBeforeFrameAndNoLaterTool`,
+`testW3SilentUndeclaredCloseRemainsOrdinary`) on ticket
+`1608955d-c234-4b0f-99d7-c8b7d85bea88`; no crash reproduced there. Checkpoint 7 was restored.
+These isolated results do not classify the signal-11 cause. Source shows direct fixture shutdown
+of the same decoder that Stop retires through the coordinator, with no controller-level joining
+or event-mutex acquisition in shutdown. Production lifecycle repair and a passing broad gate are
+required before this checkpoint can be pushed. No full-suite, live-app, release or hosted-CI
+qualification; M9.2b remains open.
+
+Shutdown blocker repair (validation in progress): the controller now owns one locked, joinable
+shutdown task, including direct retirement callers outside the coordinator's existing deduplication.
+Cancelled callers join the same task. It closes event delivery, serializes stream retirement with
+installation, and then drains the existing event mutex before clearing event-derived state; the
+async mutexes are never nested. PID/client cleanup remains owned by that task, and deinit's fallback
+is reserved for controllers never explicitly retired. Recovery refuses a retired controller rather
+than acknowledging skipped installation. No coordinator or LiveDiscovery test cleanup was changed.
+
+The state-writer audit found production collection mutation in the existing event-mutex paths;
+the transport-exit path also checks its stream ownership token before acquiring that mutex.
+`CodexAppServerClient.request` has explicit task-cancellation settlement, rather than relying on
+its request timeout. Current production auth-refresh callbacks are nil. These source facts and the
+new join/drain tests establish the repaired contract, not proof of the observed SIGSEGV's exact
+interleaving. The first focused repair run `6207eabb-fc08-410e-9532-5b2f9e07e9dd` passed **32**.
+A separate review of this blocker fix prompted the early delivery cutoff and explicit recovery
+refusal. Tests additionally cover cancelled concurrent callers, handler-before-clear ordering,
+stream cutoff before drain, terminal-state cleanup, physical client stop and controller release.
+Final validation: `e12119cf-f382-4662-917f-a51357da39c7` passed **70 executed, four skipped,
+zero failures**, including all 36 LiveDiscovery cases. Broad
+`c79a0de3-86cc-4068-9ad3-621bbe9fafec` passed **2,145 executed, 22 skipped, zero failures**
+(2,134 app, seven domain, four provider), including all SessionLinks and the admission/sidebar/
+lane-policy families. Isolated handoff `3f728727-9045-40ec-8c56-1d33e557d5e7` passed **104**;
+both products `86e50746-bb5b-45e5-ac4d-fa0b8c6351a6` passed. Full lint
+`0e44824c-5641-4034-8d72-108bc84f6973` passed; the subsequent nonthrowing-lock-helper compile
+repair was scoped-formatted and strict-linted before the final passing runs. The intermediate
+`05441d1c-9771-4835-8940-47d180123082` was a compile failure, not a test pass.
+
+Fresh post-build index: **1,244/1,360 wrong-way edges, 53/66 largest-cycle components**; baseline
+unchanged. The new review runtime retains app-local edges to the existing review DTO/operation
+helpers in `AgentModeViewModel+WorktreeMerge` and to `AgentTabSession`; no target-move closure is
+claimed. Actual final compilation across 11 touched Swift files matches retained base warning
+occurrences: **four VM, three native-controller, two native-interrupt-test**, zero in the other
+eight files. No positive occurrence deltas. No permanent trace, sanitizer run, live-app smoke,
+full-suite or hosted-CI qualification is claimed. The repaired join/drain contract and passing
+broad rerun release this checkpoint's local push hold; M9.2b's remaining inventory stays open.
+
+#### M9.2b checkpoint 8 — question admission and exact MCP cancellation
+
+Question creation now requires the canonical command. The VM captures the writer before hydration,
+retains the existing object/restoration and MutationTarget checks, and admits that same writer after
+readiness; refusal remains a typed MCP error. Availability requires the same local writer but does
+not require hydration to have completed. There is no absent/unbound or conflicting-writer fallback.
+The existing question wait-ID map now records originating writer, run and attempt identities.
+Responses, drafts, page changes and activity must match the original writer, not a fresh claim on
+the same payload. Timer/caller cancellation additionally carries the exact wait ID, so a reused
+public interaction ID cannot identify a successor wait. Timeout zero keeps its immediate-expiry
+meaning. Cleanup releases the original continuation after detachment; it reconciles only the same
+binding/run/attempt and performs writer publication only with the originating claim. A live,
+reacquired/rebound payload receives only the existing exact-object interaction projection to hide
+its cleared card, never stale binding/save publication or reconciliation of a successor run.
+
+The Agent Mode MCP path now owns the exact question invocation behind a registration start gate.
+External cancellation cancels and joins that task, including preparation, instead of re-resolving a
+window/tab and cancelling by public interaction ID. The VM cancel adapter is retired. Early or
+refused registration cannot begin presentation. Context Builder retains its separate run-scoped
+path. Membership `owns` remains for observation and composite managed-response checks; it is no
+longer question-creation admission. No M9.3a-owned composition file changed.
+
+One review prompted typed refusal mapping, exact-object interaction-only repaint after claim loss,
+and external-cancellation/preparation coverage. Two existing managed-response fixtures and the
+multiple-choice link fixture now install a real runtime wait instead of fabricating continuation
+state; no production bypass was added. New causal coverage includes early registration cancellation,
+caller and coordinator cancellation joining a held preparation, a same-tab/public-ID successor,
+reacquired-claim response refusal, and original timeout versus rebound/successor-attempt state.
+The VM hydration-await mutation itself remains source-reviewed rather than injected by a new test
+seam. The broad provider-native cancellation hook and hook-review workflow remain open, as do the
+other M9.2b inventory groups; this is not interaction or milestone closeout.
+
+Initial focused `56dd16b6-0b54-4c53-afc2-fa35c6d45208` failed compilation because observation/
+managed-response callers still require `owns`; those uses were retained, not silently tightened.
+Focused `ca6d1dd8-a3c4-45c6-a6a5-18dc7b8b5a3b` executed **276**, with one failing new fixture:
+its supposedly held preparation used the cancellation-aware `TestReleaseFence`. Replacing that
+fixture with an explicitly held continuation preserves the join assertion. Final focused
+`c9a4c042-df87-4d8c-8aa8-489febac55bd` passed **276**, zero failures. Full lint
+`e819afd7-e90b-4f91-9e9f-669fd478b204` passed; the subsequent fixture-only correction was
+scoped-formatted and strict-linted. Broad `2e823a28-4d7d-48c9-9fa7-88863af32adc` passed
+**2,147 executed, 22 skipped, zero failures** (2,136 app, seven domain, four provider), including
+all SessionLinks and admission/sidebar/lane-policy suites. Isolated handoff
+`6f31a359-349c-4a55-be80-2bf7b3bf7d23` passed **104**. Both products
+`f161b52e-9736-462e-a3b5-fd03bcd8e940` passed. Fresh index remains **1,244/1,360 wrong-way
+edges, 53/66 largest-cycle components**; no baseline change. Actual compile warning occurrence
+counts across seven touched Swift files match retained base: **four VM, two link-runtime-bridge
+test warnings**, zero in the other five. No positive occurrence delta. No full-suite, live-app,
+release or hosted-CI qualification is claimed; M9.2b remains open.
+
+#### M9.2d checkpoint 1 — administration fork command and destination receipt
+
+`session_admin fork` now resolves the canonical writer instead of selecting an owning view model.
+The scope-owned administration runtime captures source admission and passes its exact command
+through destination preparation. An absent writer or a bound, unvisited saved source uses the
+existing targeted preparation; conflicting identities, provisional creation, retirement and deletion
+cannot become hydration fallbacks. Runtime admission failures are mapped to the host's refusal
+rather than leaking an internal command error. The existing reference-counted preparation hold
+keeps a prepared source alive until the fork settles.
+
+The existing Handoff creation owner still performs background-tab creation, transcript/attachment
+copying, worktree installation and configured first-save acknowledgement; this checkpoint does not
+move those other-lane responsibilities. Its minimal new optional acknowledgement callback captures
+the destination writer identity synchronously after the actual configured durable save. The runtime
+returns that immutable receipt, never a tab's later occupant. Late source revocation or cancellation
+after acknowledgement cannot discard the saved fork. Existing partial-fork errors retain their exact
+destination identity; there is no compensating deletion or replacement fork.
+
+One bounded review completed. Its admission concern was addressed; the suspected nested-hold issue
+was checked against the existing counted begin/end implementation, not worked around. Tests cover
+reacquired source claims, preparation suspension, a replacement destination after its receipt,
+foreign receipt refusal, agreeing UI replicas, real saved-source preparation and real destination
+persistence after late authorization loss and task cancellation. The production persistence witness
+performs no test flush. No provider starts or visible-app lifecycle actions were introduced.
+
+Validation: final Conductor ticket `1c9df7aa-72c9-4b0c-aaec-67109240c3a0` passed **37 tests,
+zero failures**: four administration-runtime, ten writer-store, twenty handoff/worktree persistence,
+two production fork and one preparation-refusal cases. Scoped pinned SwiftFormat and strict
+SwiftLint passed. The initial ticket failed test-fixture compilation (missing initializer isolation);
+the second executed 35 with one new fixture hydration-latch failure. Both were corrected without
+weakening production admission; the intermediate third ticket passed 35 before final review coverage.
+Commit preflight caught the app-test import-count ratchet; the four new tests were moved unchanged
+into the existing writer-store test file rather than raising its baseline. Rerun
+`f743effa-7d01-4414-a6a3-ce8af29a61d0` passed the same **37** tests after that consolidation.
+
+Remaining M9.2d: worktree bind/unbind/create/relocation and merge preview/apply/continue/abort routing,
+including post-effect durable receipts and physical mutation fences. This is a local fork checkpoint,
+not completion of the administration/worktree group, M9.2 or #1406. Both-product, full-lint, broad-suite,
+fresh-index and per-file base-warning comparison push gates have not yet run; no push, full-suite,
+live smoke, release or hosted-CI qualification is claimed.
+
+#### M9.2d checkpoint 2 — runtime-owned worktree transition
+
+The canonical scope now owns the actual execution-location transition algorithm, not a forwarding
+callback to a selected VM. `AgentSessionWorktreeRuntime` carries one admitted command and an immutable
+workspace/resource witness through Oracle drain, provider probes, root preparation, authorization,
+provider retirement, root installation and binding publication. The VM entry point only admits and
+forwards. Creation callers pass their existing handle: both MCP startup branches and Handoff install;
+ordinary composer-created tabs already await configured durability before initial location selection.
+No unbound, unhydrated or provisional-creation fallback was introduced.
+
+The runtime owns dirtying, required-save completion and origin-qualified recovery. Post-effect errors
+carry the original writer identity, publication/retirement evidence and save status, rather than
+re-resolving a tab or reporting a retryable refusal. The administration handler retains a typed scope
+revocation cause while reporting partial effects, non-retryability and inspection guidance; a deferred
+provider-only failure does not claim a committed bind. Physical worktree create and Git merge fences
+are not part of this checkpoint and remain open.
+
+Provider adapters use the existing synchronous detach and captured-instance retirement APIs. All old
+context metadata is cleared before suspension; later retirement cannot clear a rebound writer or
+shut down its replacement controller. Codex detachment keeps its prior provider predicate. Claude's
+detached tracking cleanup was source-checked: it clears only the captured handler's correlation maps,
+not the session's later handler. Existing provider lifecycle owners were not moved or rewritten.
+
+One bounded review completed. Gate cleanup now uses operation tokens: claim loss still releases an
+origin-owned gate, while a direct successor setter invalidates the token and keeps its own gate.
+The existing prepared-runtime finish joins in-flight transitions before teardown/final persistence;
+only that existing drain owner releases claims. This is a minimal shared drain seam, not M9.4 closure.
+The required-save internals and prepared-window/carrier composition remain with their existing lanes.
+
+Final Conductor ticket `56dc8c62-55b2-40e3-b3ad-1b6f338d7dd1` passed **204 tests, zero failures**:
+49 worktree admission, 32 worktree provider regression, 83 administration structure, 20 Handoff,
+ten writer-store, four administration-runtime, four location-presentation and two production fork
+cases. New coverage includes same-object reacquisition and conflicts, origin versus successor gate
+cleanup, detached-provider rebinding, refusing a successor save, actual durable unbind without a test
+flush, retirement joining, explicit creation admission and handler-level partial revocation receipts.
+Pinned scoped SwiftFormat and strict SwiftLint passed; `git diff --check` passed.
+
+Initial ticket `7f78bcf6-2bc2-43a0-9591-2af790da1709` failed compilation on an optional run ID in
+the new detach adapter. The next ticket `0e24532b-b2e2-4f78-93ba-0ed5b15aac52` executed 204 with
+two failures: an omitted recovery explanation and overly broad root release after a refused
+metadata-only change. Both were corrected: receipts retain the explicit old-location recovery text,
+and metadata-only refusal keeps roots that an active provider still owns. The final run above
+re-executed the same selection, not just the two failures.
+
+Remaining M9.2d: outer admin/UI/MCP worktree creation and mutation selection across pre-transition
+awaits, self-relocation provenance, and all merge command routing/physical mutation fences and
+acknowledgements. Both-product, full-lint, broad SessionLinks/admission/sidebar, fresh-index and
+base-warning push gates remain unrun. No push, full-suite, live-app or hosted-CI qualification is claimed.
+
+#### M9.2d checkpoint 3 — outer administration worktree command provenance
+
+`session_admin` create/bind/unbind now captures the canonical command before repository discovery,
+not a presenting window's view model. The captured workspace resources, declared root order and full
+binding value remain the authority across every pre-transition await and the Git creation fence.
+Full value equality deliberately replaces the lookup fingerprint for mutation freshness: visual
+metadata and binding identity can change without changing execution lookup paths. Discovery may
+never overwrite those intervening changes or switch to a reacquired writer on the same tab object.
+
+Saved targets use the existing targeted preparation owner with a counted hold spanning the command.
+Fork and worktree commands share the same narrow preparation admission: absent or legitimate
+unrestored writers may prepare; creating, retiring and conflicting writers remain refusals. Bind and
+unbind invoke the original command's scope transition directly, retaining authorization and ownership
+callbacks and partial-effect receipts. Exact no-op unbind needs a current writer, but no workspace
+resources. Idle waiting samples one captured writer and ends on replacement instead of following its
+successor. Read-only retained-root/index accounting is unchanged.
+
+Regression coverage includes a cold saved target's real create/bind/unbind and durable reads without
+post-command test flushes or focus changes; writer reacquisition while discovery or idle waiting is
+held; metadata-only changes with an unchanged lookup fingerprint; and resource-free no-op refusal on
+a stale command. The cold fixture retains a separate preparation hold across its three commands and
+durable reads, checks that each host releases its own nested hold, then drains its prepared owner.
+This avoids racing normal idle retirement; no production retirement/admission rule was relaxed.
+
+Local validation: scoped pinned formatter, strict lint and whitespace checks passed. Conductor
+`d9f652ae-1be0-472a-91bf-7a5af4feff86` passed **84 tests**, zero failures (50 binding-admission,
+32 administration recovery and two fork journey cases). Earlier execution found the cold fixture's
+between-command retirement race; a subsequent compile exposed missing MainActor isolation on its
+local async cleanup helper. Both test-only corrections are included in the final full focused run.
+The preceding normal merge of M9.2c (`37471342f`) passed 425 integration tests, both products, full
+lint and the index ratchet. This checkpoint's separate push gates are not yet claimed.
+
+Remaining M9.2d: outer UI/MCP creation and binding provenance, deferred self-relocation identity,
+and merge preview/apply/continue/abort runtime ownership, physical fences and acknowledgements.
+This is not completion of M9.2 or #1406; no live-app or hosted-CI qualification is claimed here.
+
+#### M9.2f checkpoint 4 — UI/MCP worktree and deferred-relocation provenance
+
+Follow-up to M9.2d/#1677: outer UI and MCP commands capture a call-scoped runtime admission
+(command, workspace resources and full bindings) before authorization, discovery or Git creation
+suspends. The ordinary command-level no-op remains resource-free; callers with outer awaits validate
+the captured admission even for no-ops. Started UI changes now acknowledge the originating writer's
+required save. Initial-send preparation retains its configured first-save owner and explicit startup
+creation capabilities are unchanged. Git creation checks the admission at the existing physical
+commit fence, and later failures retain the created path rather than implying nothing happened.
+
+MCP composes the captured writer witness with the existing target authorization and domain-mutation
+fences. Unauthorized callers do not receive liveness results before authorization. Post-create failure
+handling observes only the original writer; it never reads or annotates a replacement writer to infer
+whether the old request applied. Physical descriptors remain in the reply when later binding or
+presentation fails. Presentation callbacks are not writer-selection authority.
+
+Deferred self-relocation stores a writer identity value, not a retaining command/admission. Scheduling
+and terminal application refuse a replacement incarnation, including reuse of the same tab object.
+Application holds one admission across its idle loop. Resource loss under the original writer gets
+an explanatory transcript row; writer replacement settles quietly. A token-owned continuation hold
+is released after post-publication failure only if it still belongs to this relocation. Direct setters
+invalidate the token, so cleanup cannot clear a successor's follow-up reservation. The UI location
+gate follows the same ownership discipline. No provider continuation or terminal owner was replaced.
+
+Coverage exercises changed bindings/resources, synchronous no-op admission, same-object writer
+replacement at scheduling/terminal/save boundaries, unavailable resources, post-create receipts,
+required-save failure and successor gate/reservation preservation. Scoped pinned formatting, strict
+lint and whitespace checks passed. Conductor `83d3a61c-d465-4f4a-a559-eafcd58c6f30` passed
+**164 tests**, four skipped, zero failures in 279.998 seconds. This includes LiveDiscovery in
+isolation. The preceding run found a new test hook firing again on a later background save; the hook
+now replaces the writer once, without weakening assertions. Checkpoint 3's broad selection executed
+2,480 tests with 19 skipped and three assertions failing in one LiveDiscovery workspace-CAS case;
+that run is not green. The same family previously passed isolated head/base runs, and the current
+isolated suite also passes. Both-product/full-lint/index/warning follow-up gates are not yet claimed.
+
+Remaining M9.2f: merge preview/apply/continue/abort runtime ownership, physical mutation fences,
+required acknowledgements and honest partial receipts. This checkpoint is not completion of M9.2
+or #1406. No hosted-CI, live-app, release or full-suite qualification is claimed.
+
+#### M9.2f checkpoint 5 — final Git and preview-artifact fences
+
+Optional callbacks now reach apply/continue/abort's first physical Git command after process
+admission and the existing mutation guard. They are explicit runner parameters, not inherited
+TaskLocals; apply's later commit does not repeat the first-effect callback. Worktree creation uses
+the same explicit runner path. Fenced continue propagates refusal/uncertain errors, and an abort
+whose final HEAD read fails retains its completed-abort fact and invalidates the VCS cache.
+
+Preview publication checks its callback after async inputs/graph collection and before ID allocation
+and writes. Typed partial receipts preserve the exact artifact directory and completed-write flags;
+a false completion flag does not assert that no partial filesystem effect occurred. Sidecar failure
+also retains the completed snapshot receipt. Legacy callback-free callers retain their contracts.
+
+Validation: scoped pinned formatting, strict lint and diff checks passed. Conductor
+`b7df30d9-17b7-4347-a1a9-6259c0d26cc6` passed **43 tests**, zero failures, in 30.220 seconds,
+covering merge review state, creation preconditions, tracked checkout cloning and pipe drain.
+The initial attempt failed compilation on the new internal error type's access level; that was
+corrected before the successful run. One implementation review was addressed. This checkpoint is
+local infrastructure only: actual merge command runtime ownership, front-door provenance and
+required-save acknowledgement remain in progress. No new push/full-suite/live-app/CI claim.
+
+#### M9.2f checkpoint 6 — merge command runtime ownership
+
+`scope.worktrees` now owns the actual preview/apply/continue/abort/status algorithms. VM methods
+are command adapters; MCP and administration retain one canonical command/resource/full-binding
+admission before authorization, discovery and review awaits. Admin preparation remains a counted
+lifetime hold, not writer election. Its endpoint fence validates linked worktree advertisements and
+exact identities rather than comparing linked checkout paths to the main checkout's path. Additional
+host root fences compose the outer mutation journal and physical policy instead of replacing them.
+
+Preview artifacts and operation records receive required-save acknowledgement. Apply/continue/abort
+acknowledge an `.applying` intent before Git and the actual outcome afterward. Final physical fences
+revalidate the originating admission; post-effect bookkeeping and uncancelled required saves target
+only that writer. Partial receipts retain actual commit/conflict/abort/artifact evidence, including
+uncertain admitted attempts. Pre-process refusal restores an actionable prior operation; uncertain
+Git failure remains abortable. No post-await successor lookup or no-effect retry claim is introduced.
+
+Merge and binding changes exclude each other through runtime-owned tokens. Discovery and physical
+work join the existing transition drain; human review does not hold that drain. The existing
+interaction runtime still owns review waits, cancellation and settlement. Caller cancellation settles
+only its review UUID, including unlimited waits. A standalone review restores its captured inactive
+run state on the original run rather than manufacturing `.running`; active-run cleanup retains its
+existing resume behavior. Presentation uses the existing scope hooks with originating-writer fences.
+
+Validation: one implementation review addressed; scoped pinned formatting, strict lint and diff checks
+passed. Final focused Conductor `faf4af65-4743-411b-95d1-ac27d741a3a0` passed **99 tests**, zero
+failures, in **138.332 seconds** (65 admission, 16 interaction, 16 merge-review, one structure authority
+and one cold saved-target journey). Full lint `6db25fef-288b-45b7-8e76-055eed5e9a44` passed with
+zero formatting violations across 2,157 files. Earlier attempts exposed and repaired linked-root
+admission and standalone-review state defects; the existing active-run cleanup fixture now explicitly
+starts a run, preserving its assertion. A durable-intent witness reads acknowledged JSON before
+restoration reconciliation. No assertion or timeout budget was weakened. Both-product, fresh-index,
+per-file warning and broader integration gates for checkpoints 5–6 remain pending. No new push,
+full-suite, live-app, hosted-CI or full M9/#1406 completion is claimed.
+
+Checkpoint 6 qualification: both products `1244a70a-5aa3-4fb2-bbbf-75367152257b` passed;
+fresh compiler-index check passed **1,267/1,360 edges, 53/66 largest component**. Exact published
+base `401b23f00` products/tests (`4dd92380…`, `602c463f…`) and head product/test compilation
+show **13 → 12** distinct line/column/message warnings across the 19 changed Swift files:
+Host 2, VM 2, GitService 3 → 2, VCSService 1, scope-lifecycle tests 5, zero elsewhere.
+The removed GitService closure no longer produces its explicit-self warning. This is an incremental
+per-file comparison, not a clean whole-repository warning ratchet.
+
+Broad `000431b3-36eb-4e66-a695-773cf741c007` executed **2,537 tests**, **19 skipped**, with
+four assertions failing in two cases, in **1,503.246 seconds**; it is **not green**. Three assertions
+are the previously observed LiveDiscovery default-workspace CAS failure. The other exposed an old
+saved-endpoint fixture using fabricated HEAD hashes, now rejected by the earlier exact-identity
+fence. That fixture now supplies real Git HEADs while preserving its operation-state/default-election
+assertions; production code is unchanged. Final isolation `7a85f3b9-80a4-4fa1-90db-441606423067`
+passed **68 tests**, **four skipped**, zero failures in **231.453 seconds** (whole LiveDiscovery
+and worktree-recovery suites). This does not establish that the broad-load CAS intermittent is fixed.
+No assertion/timeout weakening or unrelated production repair was made. Publication remains gated
+by the overseer's #1681 CI timing; no push or full M9 completion is claimed here.
+
+#### M9.2b checkpoint 9 — hook-review runtime ownership (validated locally; push frozen)
+
+The hook gate's actual discovery, waiting, response, refresh and completion bodies now live in
+`AgentSessionInteractionRuntime+HookReview`. The coordinator retains execution-CWD composition and
+an exact-command entry, not response mutations. UI and MCP responses use captured commands; the VM
+response adapter and its post-await MCP publication are retired. Composition installs the existing
+injected settings provider into the scope's interaction runtime without calling the recursive VM
+getter. Read-only coordinator policy queries remain for existing consumers. Unknown placement or
+missing policy stays strict. No M9.3a-owned composition surface changed.
+
+Gate entry requires the unique, restored command, including memo/coalesced paths. The original
+writer/run/attempt and gate generation fence discovery and review results. The continuation is
+installed before publication. A fresh claim on the same object cannot answer the old gate. A lost
+origin settles only its exact gate; no successor audit, memo, transcript, save or successful startup
+resume is produced. Clearing an old card on a still-live rebound/new-run payload uses only the
+existing exact-object interaction projection; derived run state remains fenced to the original run.
+Coalesced waiters remain held until the dispatch owner finishes, not merely until trust is approved.
+
+Only admitted provider list/trust effects enter the existing tracked-effect drain. Consent and
+phase consumption remain synchronous with caller authorization. Stop may therefore wait for an
+already-authorized trust operation's bounded settlement. Native trust remains a one-shot,
+cancellation-shielded write to the admitted candidate/fingerprint set, with postverification; the
+fingerprint check is not an atomic external-file CAS and this change does not claim a physical
+writer fence on that durable write. The pre-existing typed native cancellation/failure policy is
+unchanged. Larger startup/provider dispatch and provider-native cancellation paths remain open.
+
+One review identified live-object repaint and coalesced/successor coverage requirements. Source
+checks confirm VM presentation/MCP/persistence accessors use the same scope runtimes and the existing
+single observer was already Codex; its new reason still updates only the watchdog. Causal tests
+exercise strict consent, exact candidate/fingerprint dispatch, duplicate refusal, held trust versus
+claim loss/rebind/new run/raw conflict, a real successor gate, held initial/retry discovery, refreshed
+inventory, and Stop/drain versus coalesced dispatch. They add no timeout-budget changes or retries.
+Initial focused attempts `f058e6c2-1e15-4e2a-ae86-ce8ff47f6195`,
+`d6cabb13-dabc-49b2-a16c-b32a5a837c13`, and `db21f5c0-c07b-43e2-963d-d69bf7851161`
+failed compilation (DTO run IDs are identity inputs, not stored members; moved code needs the AI
+contracts import; the fixture must use the existing run-ID installer). No tests passed in those
+attempts. Focused `6055a2d7-f333-4e9b-87d7-1a7322521c95` executed **104**, with four
+assertions failing in three existing native-dispatch cases; all five new runtime tests passed.
+Those three fixtures now use the existing restored-binding helper before their ordinary dispatch,
+without changing their recovery or send assertions. `7851540d-e817-4bee-8155-8e7eb98ef9e9`
+executed **104**, with one cold-compaction fixture staging timeout. Its binding setup is limited to
+the later send phase, leaving the cold bootstrap/compaction setup unchanged; wait labels now identify
+the failing phase without changing the four-second budget. The isolated final selection
+`eee7ee5b-f5d5-4d3a-93ee-7dbacaea1c65` passed **six** (five new runtime tests and the cold
+compaction/send case). Full lint `7bd02d79-233d-4b87-881e-a3eb7bd8b719` passed; subsequent
+fixture edits were scoped-formatted and strict-linted. One new unused attachment-result warning was
+fixed; actual final compilation across ten touched Swift files matches retained base occurrence
+counts: **four VM, 17 resume-wedge tests**, zero in the other eight. No positive warning delta.
+Final broad `d0ad94cb-bdd1-4864-9f1f-c79b241e73b3` passed **2,156 executed, 22 skipped,
+zero failures** (2,145 app, seven domain, four provider), including the full affected focused
+families, all SessionLinks and admission/sidebar/lane-policy suites. Isolated handoff
+`0a08c05a-baa7-4e8b-830a-159e0bfb72fb` passed **104**. Both products
+`0eb5519b-6947-4ddb-90ff-e003f79b0a90` passed. Fresh post-build index is **1,245/1,360
+wrong-way edges, 53/66 largest-cycle components**, with no baseline change. The new app-local hook
+runtime retains the compiler-confirmed edge to `ViewModels/AgentTabSession`; this is ownership
+routing, not M10 target relocation. No live-app, full-suite, release or hosted-CI qualification is
+claimed. The overseer's push freeze on `255d2650e` remains in force; this validated checkpoint must
+stay local until explicitly released. The remaining M9.2b inventory is not complete.
+
+Commit preflight first encountered a sandbox-denied SwiftPM manifest evaluation; the unsandboxed
+retry reached the actual guards and rejected a new testable-app file (**340 > 339**). The five
+`CodexHookReviewRuntimeTests` methods and their fixtures were moved verbatim into the existing
+`CodexHookReviewCardStateTests.swift` file, retaining both suite names and every assertion. No
+ratchet baseline changed. After consolidation, focused
+`b22bfa36-4131-4bb3-93ff-509fed1d500f` passed **nine tests** (four card-state, five runtime),
+scoped formatting/strict lint passed, and the consolidated test file compiled with zero warnings.
+The broad, isolated-handoff and product receipts above precede this test-only file consolidation;
+production source is unchanged.
+
+#### M9.2b checkpoint 10 — exact instruction-wait routing (validated locally; push frozen)
+
+Instruction wait installation, timeout and physical continuation consumption are routed
+through the existing link execution runtime. A single originating wait record replaces three
+mutable payload fields; legacy names are read-only projections. The VM captures the writer before
+hydration, admits the same writer afterwards, and passes the captured command to runtime ownership.
+Local send and auto-wake retain the command and wait ID across preparation awaits. User versus
+lane-update accounting and physical continuation acceptance remain distinct.
+
+The existing cancellation admission gains a precise instruction-timeout case, claimed inside the
+run service before cancellation preparation. It preserves legitimate waits with no run ownership
+without loosening ordinary active-run Stop. The timeout takes only its own record, does not cancel
+its own timer while joining terminal publication, and settles the captured continuation afterwards.
+A lost claim/run settles only the original wait; a terminal commit already in progress is not
+cancelled again. Existing execution services are composed before installing a timed wait, rather
+than requiring a live VM to construct them when the timer fires. No M9.3a surface is changed.
+
+One review identified three fixes: terminal-commit exclusion, exact-wake cancellation rather than
+endpoint-only successor cancellation, and preserving dequeued input across new command refusals.
+Those fixes are applied with additional causal coverage. The queued immediate augmentation/proof
+body remains in the VM: its new-command dispatch is fenced, while the original input's recovery
+continues to require the same object and binding. Caller-task cancellation behavior and the legacy
+non-waiting-state timeout no-op are unchanged, not claimed solved. Negative timeout values remain
+rejected at MCP ingress; the direct VM conversion is not redesigned here.
+
+Initial focused `7326495a-2abf-4703-93d3-edadd01b997c` failed compilation because the new fixture
+accessed private `runtimeSessionStore`; it now uses the captured command's scope. No test pass is
+claimed for that attempt. Retry `a083ad82-60d7-4601-83ee-57c4de7a43a4` also failed compilation:
+the synthetic successor-wake fixture used memberwise arguments instead of the existing initializer.
+After that correction, `4491ac16-85a0-49d3-a79f-bf3ebef168eb` executed **96** tests with three
+assertion failures in two cases. The notification fixture now supplies its newly installed session
+ID to the resolver. The terminal-owner fixture explicitly drains its independent approval-store
+subscription before testing instruction timeout, so asynchronous approval projection does not
+reconcile that fixture's state after the waiter returns. Neither assertion was weakened; broader
+approval-snapshot/terminal ownership is not claimed repaired by this instruction-wait slice.
+The method-qualified patterns in that first filter selected neither new auto-wake nor queued-input
+case; the final focused selection uses their complete suites instead.
+
+Final focused `9c4238e4-d6e6-4a40-b08c-fe8c63937850` passed **254 tests**, including every new
+instruction-wait, real timer, terminal join, successor-wake and queued-input recovery witness.
+Full lint `d5d376af-77d7-4b69-99a2-dc762667fdb8` passed; subsequent fixture-only corrections
+were scoped-formatted and strict-linted. All new suites are in existing test files; assertions and
+timeout budgets are preserved. Broad `049197c4-5806-4dab-bbcd-2aaf5b8126e3` passed **2,161
+executed, 22 skipped, zero failures** (2,150 app, seven domain, four provider), including all
+SessionLinks and admission/sidebar/lane-policy suites. Isolated handoff
+`4f1a0b50-93d9-4dd7-8a0e-ea3f143c4db5` passed **104**. Both products
+`dc96177a-6bdc-4535-8a88-5d85174704bc` passed. Fresh post-build index remains **1,245/1,360
+wrong-way edges, 53/66 largest-cycle components**, with no baseline change. Actual compilation
+across the 15 touched Swift files matches retained base warning occurrence counts: **four VM,
+11 auto-wake tests, six prompt-adapter tests, five steer-transaction tests, one MCP steer/resume
+test**, zero in the other ten files. No positive warning-count delta; this is not a claim of zero
+total warnings. No live-app, full-suite, release or hosted-CI qualification is claimed.
+The push freeze on `255d2650e` remains active; this checkpoint stays local until explicitly released.
+The remaining M9.2b inventory and the injected VM hydration-await race witness remain open.
+
+#### M9.2b checkpoint 11 — self-compaction admission and exact required-save writer (in progress)
+
+The actual reservation, admission and duplicate-response bodies move from the VM into the existing
+link execution runtime. The MCP scheduling callback calls that runtime directly. Read-only context
+projection and the terminal/native completion pipeline remain separate. New admission captures a
+command before provider support; an existing durable duplicate can still be read during retirement.
+Required persistence now accepts an explicit exact-writer expectation through its existing queue,
+preparation and physical-write chain. The legacy current-owner mode is unchanged. An exact flush
+cannot select a reacquired writer after its queue wait or credit that writer on return.
+
+The physical payload writer already fenced its captured writer before and after storage; this
+checkpoint fixes which writer reaches that boundary, not a missing physical-write fence. Failed
+admission disarms only its own still-scheduled attempt on the original record, preserving recovery
+notes. Only the originating claim may schedule the admission's cleanup save. A rebound record is
+untouched: assigning even a cleared `selfCompactState` would mark its new payload dirty. Existing
+owner/binding checks and decoded-state reconciliation keep that old request non-executable.
+Independently requested generic saves may still drain for a reacquired owner; no global single-write
+claim is made for that case. The exact operation itself cannot dirty or request a fresh save through
+a replacement after losing its claim. The native completion owner's post-ack incarnation gap remains open.
+
+Scoped formatting and strict lint passed. First focused compaction/persistence run
+`f12dff1a-4092-48ae-865d-c514eae0102f` executed **50 tests with one failure**: the stale exact
+save's generic retry path marked the replacement object dirty. The production retry request is now
+conditional on the original exact-writer expectation still holding; independently queued requests
+are not discarded. The successor assertion is unchanged. Focused retry
+`2e773157-8f55-4c8b-9aa4-b33b65994a95` passed **50** tests. Broad
+`59610fcb-d525-4f10-858d-72c84a64051d` passed **2,178 executed, 22 skipped, zero failures**
+(2,167 app, seven domain, four provider), including all SessionLinks and admission/sidebar/lane-policy
+suites. Isolated handoff `3a49f61d-2d50-4114-92cf-dd8a0e9516b8` passed **104**. Both products
+`881bf395-093b-4554-bd58-3252c6b84cc8` and full lint
+`d9295ec3-63b7-4a81-b538-6fbc0e968d66` passed. Fresh post-build index is **1,247/1,360
+wrong-way edges, 53/66 largest-cycle components**, with no baseline change. The two added file edges
+are the new self-compaction runtime file's existing VM read projections and `AgentTabSession` types;
+this is disclosed file-placement debt, not an M10 relocation. Actual compile warning occurrence
+counts across the six touched Swift files show four MCPServerViewModel warnings versus eleven in
+the retained base, and zero in the other five files: no positive delta, not zero total warnings.
+
+The checkpoint review request (snapshot `2026-11-10/0235`) and its refreshed retry (`0259`) both
+failed before any response because Oracle reported expired OAuth credentials that could not
+refresh. Neither was a review verdict. The local execution gates passed while the checkpoint was
+held uncommitted pending review. The later M9.2c review and integration entry below supersedes that
+hold. No live-app, full-suite or release qualification is claimed.
+
+**Updated remaining M9.2b inventory for the next push handoff.** Sizes mean affected surfaces,
+not elapsed estimates: **M** roughly 3–5 files, **L** 6+ or broad caller/fixture migration, **XL**
+multiple provider-specific pipelines. These checkpoints do not put M9.2b near closeout.
+
+| Remaining group | Rough size | Still-open boundary |
+| --- | --- | --- |
+| Binding, creation and hydration | L | Run-start preparation, persisted-load and first-save callbacks; exact creation/restoration authority across awaits. |
+| Startup and inner provider execution | XL | Factory/lease/controller install and physical provider release; continuation/start environment callbacks across Codex, Claude, ACP and headless. |
+| Managed Steer, local/provider input and self-compaction | L–XL | Managed-Steer and prepared-turn bodies, queued immediate-input body, native compaction scheduler/completion and its wake callbacks; checkpoint 11 covers admission only. |
+| MCP metadata and tool routing | L | Remaining VM compatibility/reactivation/host-preparation callers and target routing; copied-resource protection is delivered, first-setup activation progression remains open. |
+| Administration and worktree commands | L | Fork/owning-VM mutation selection, worktree transition and VCS preview/apply/continue/abort await boundaries; review waits are delivered. |
+| Provider event/tool hooks and terminal follow-ups | L–XL | Remaining coordinator event installation, Claude tool-hook callbacks, terminal self-compact/provider-switch/relocation follow-ups. |
+| Persistence and payload forwarding | L | Remaining save/proxy/mutable aliases and draft/usage/timing/transcript forwarders; exact-save expectation is not yet a cutover of every caller. |
+| Residual interaction cleanup | M | Provider-native cancellation and shared approval projection/terminal boundaries, plus direct VM readiness-wrapper race witnesses. |
+
+M9.3a's prepared host/census/persistence-composition/attachment configuration files, M9.4
+close/handoff/drain and M10 target relocation are still excluded.
+
+#### M9.2b checkpoint 12 — remaining captured-writer required-save callers (in progress)
+
+The link send/provider-switch transaction's tab-ID required-save adapter now requires the captured
+writer, derives its workspace/tab from that capability and calls exact persistence. Its staged-row,
+compensating-removal, pre-dispatch handoff and physical-acceptance saves cannot reacquire authority
+while queued. Cross-session compaction's request/removal saves, Stop's audit flush and committed
+delegation-placement writes now pass their already-captured writers too. Retirement still permits
+an originating writer's final save; it does not admit a new dispatch. This does not cut over the
+remaining VM provider-switch, execution-location, native self-compaction or close-drain callers.
+
+A new live-send witness holds the existing persistence queue after the attributed row is staged,
+then reacquires the same object, replaces it, or retires the original writer. Lost claims must not
+write or start a provider; the original retiring writer must persist the row without dispatching.
+Successor payload and dirty state remain untouched. Existing rollback/acknowledgement assertions
+are unchanged. Focused `4e636727-4e02-4adc-a8cb-ad7cfa862010` passed **222** tests. Broad
+`66517d43-a30c-4e58-a0b2-cb7fa79e99b8` passed **2,179 executed, 22 skipped, zero failures**
+(2,168 app, seven domain, four provider). Isolated handoff
+`330b9b72-248c-4c98-928d-e7527a5373eb` passed **104**. Both products
+`8ae86779-417f-492b-9041-726f36dab663` and full lint
+`3e5fafe0-ae42-40e2-917e-1212b4eb40fd` passed. Scoped pinned formatting and strict lint passed;
+actual focused compilation emitted zero warning occurrences in these five touched Swift files,
+matching the retained base. Fresh post-build index remains **1,247/1,360 wrong-way edges,
+53/66 largest-cycle components**, with no baseline changes. Whitespace checks pass.
+
+At this checkpoint, 11 and 12 were held uncommitted because Oracle authentication failed before a
+response. The later M9.2c review/integration entry below supersedes that hold. No hosted-CI,
+full-suite, live-app or release result is claimed for this tree.
+
+#### M9.2c — checkpoints 9–12 follow-up after the M9.2b squash
+
+M9.2b merged at checkpoint 8 (`255d2650e`, squash `5505a0a63`). Checkpoints 9–10 were local
+commits and 11–12 were held changes; none of those four checkpoints is credited to that squash.
+The publication freeze was explicitly lifted for a new draft M9.2c PR, not another push to #1662.
+
+Oracle review `untitled-chat-C269F8`, snapshot `2026-11-10/0816`, reviewed checkpoints 11–12
+successfully after authentication recovery. It found one P1: an exact flush could cancel an owner's
+pending debounce and then drop that independent request when the same object reacquired its claim.
+The fix delays exact-mode cancellation until after queue admission, records actual pending timer
+identity separately from save revisions, and restores only a previously pending same-object,
+same-record request when the exact writer is lost. It neither dirties a replacement nor credits the
+stale operation. Completed/cancelled timers cannot masquerade as pending requests. Existing tests
+now assert preservation during the queue wait and successful ordinary-owner persistence after
+an in-flight exact write is superseded. The default current-owner path is unchanged.
+
+The review's writer-only persistence overload suggestion was also applied to production exact-save
+callers. Post-return/current-writer checks remain deliberately conservative: presentation and phase
+callbacks can re-enter synchronously, and a returned storage URL alone is not an acknowledgment.
+The generalized `session_not_exclusive` refusal for failed self-compact command admission stays
+fail-closed; it does not widen authority. Dedicated queued-reacquisition tests for Stop audit and
+placement remain a coverage limitation; the shared queue fence, their existing suites and the
+live-send call-site witness are exercised. No assertion or timeout budget was weakened.
+
+Review-fix focused `b3490cf4-b39c-40da-832f-22864a7f1405` passed **132 tests**, including both
+pending-save preservation witnesses, live-send queue drift, Stop and placement suites. Scoped
+pinned formatting and strict lint passed for all 12 touched Swift files. Checkpoints 11 and 12
+were committed separately as `4d9d858d3` and `b55e7fa074b7` after mandatory commit preflights.
+M9.4 and M10 remain outside this follow-up.
+
+Main integration used normal merge `a72f6786e` for `968e21bdf`, then verified that
+`merge-tree(255d2650e, 968e21bdf)` produced tree `611efffd04f03b9c0a1059cdf9e0902f4f313db3`,
+identical to the exact M9.2b squash `5505a0a63`. Ancestry-only merge `b495ea2e3` targeted that
+squash commit alone, with no first-parent tree changes. Normal merge `d5dea6212` then brought in
+main `534e2c759`, including M9.3a, without conflicts. The incoming saved-target loader,
+attachment/storage inputs and persistence fixtures were preserved byte-for-byte. The main-relative
+diff contains only the follow-up checkpoints; merge-tree with that main is clean. No rebase or
+published-history rewrite was used. Publication moves to a new M9.2c branch and draft PR.
+
+Exact-main baseline `ce2dbcec-ed4c-4044-baf5-652271bcc4fc` passed **27 tests** and supplied an
+actual-compilation warning baseline. The first merged focused (`1071c7a7-aa38-4c70-8b74-eb837f7b4638`),
+broad (`4c2ce11d-8d71-4df0-84f9-2a99fb9acf6b`) and isolated handoff
+(`67f14c73-8143-40f5-b7ba-ce958575817d`) attempts failed compilation, not assertions:
+main's new lane-board fixture assigned instruction-wait fields that checkpoint 10 made read-only.
+The fixture now installs the atomic originating wait through the existing runtime test seam and
+settles that exact record. It retains stale-prompt, complete-wait, teardown and hook-review
+assertions; no mutable production compatibility bypass or timeout increase was added. Initial
+products `13c167d9-ff4c-4bcd-9f5b-8a7b4e31222b` and full lint
+`529d64f8-cce3-4a9f-ba04-7d25c4fdc329` passed. The fixture was scoped-formatted and strict-linted
+before repeating every merged-tree execution gate.
+
+The overseer subsequently assigned the administration/worktree-command group to parallel M9.2d:
+`session_admin` fork/owning-VM mutation, worktree transitions, and VCS preview/apply/continue/abort
+are no longer M9.2c's remaining work. Checkpoint 12's already-completed exact-writer threading at
+the existing delegation-placement save is retained; this follow-up does not start the reassigned
+administrative/VCS pipeline. The seven remaining M9.2c groups are binding/creation/hydration (L),
+startup/inner provider execution (XL), managed Steer/input/self-compaction (L–XL), MCP metadata/tool
+routing (L), provider event/tool hooks and terminal follow-ups (L–XL), persistence/payload
+forwarding (L), and residual interaction cleanup (M). Sizes describe surfaces, not elapsed time.
+
+Merged-tree focused `2461999f-618d-4f12-ad02-c17e51f9824a` passed **143 tests**, including
+saved-target loading/persistence and the migrated lane-board fixture. Broad
+`5583fe5d-1bc5-41a4-a883-6c35bc74e591` executed **2,241 tests, 22 skipped, one failure**:
+`testSwitchExpandedSkillAndTaggedFileRefusalsRetainClaimedComposer`, handoff fixture line 944,
+failed its real-content expansion precondition. This is not reported as an all-green broad run.
+The overseer supplied prior main evidence from the #1665 lane: main `48b0d82ad` reproduced the
+same skill/tagged-file assertion under broad load (then line 894), while isolation passed. The
+requested comparison here also passes unchanged: merged-head isolated handoff
+`2f15c0b8-02ed-47e1-b8b2-5c501b9cf952` passed **104**, including that case in **2.079 s**;
+exact-main `534e2c759` isolation `89852c94-2a85-46c6-8207-9e7841656bbb` passed **104**, including
+that case in **1.681 s**. Per overseer classification, this is a pre-existing broad-load intermittent,
+not root-caused here; no expansion, assertion or budget change is made. All other broad cases pass.
+
+Both products `5e634bca-7111-4644-8a1a-4e0955716735` and full lint
+`11a00a25-d01d-41f0-b04d-cedd20468abc` passed. The actual-compilation warning occurrence audit
+against exact-main baseline `ce2dbcec-ed4c-4044-baf5-652271bcc4fc` covers all **34 touched Swift
+files**: VM **4→4**, MCPServerViewModel **11→8**, CodexResumeWedgeCommitTests **17→17**,
+auto-wake tests **11→11**, prompt-adapter tests **6→6**, steer-transaction tests **5→5**, MCP
+steer/resume tests **1→1**, and zero in the other 27 files. There is no positive per-file count
+delta; this is not a zero-total-warning claim. The head audit uses actual compilation from the
+first merged attempt plus the corrected fixture recompile, not empty incremental product logs.
+After the isolated-main comparison, the exact local branch and preserved fixture/ledger edits were
+restored without dropping the recovery stash. Final restored-tree products
+`803ef502-cf6d-4ada-bd01-0942150e45e0` passed, followed by a fresh index check:
+**1,253/1,360 wrong-way file edges, 53/66 largest-cycle components**. No ratchet baseline changed.
+Its actual compile diagnostics were also included in the warning audit with no positive deltas.
+No CI logs were read; no full-suite, live-app, release or sanitizer qualification is claimed.
+
+#### M9.2e — configured first-save transaction (validated locally; publication held)
+
+M9.2c is isolated for review as draft #1676 at `c4397ec3d`; no feature work is added to that
+branch. M9.2e starts locally at that exact head and must not be pushed until the overseer directs
+main integration after #1676 merges. The first bounded binding/creation/hydration slice moves the
+actual configured first-save transaction into `AgentSessionPersistenceRuntime`. Run start removes
+its VM commit callback and supplies the writer captured synchronously at binding. The VM retains
+thin receipt ingress for existing callers, including M9.2d's administrative caller; that caller's
+body and all administrative/worktree behavior remain untouched.
+
+The transaction retains its writer through the existing save queue, configured physical save and
+acknowledgement. Even an already-durable fast path requires a current unique writer. Same-object
+reacquisition is not credited after the queue wait or acknowledgement. Cancellation alone after
+acknowledgement still preserves the durability fact. A shared private debounce-preservation helper
+retains the M9.2c independent-owner-save rule; generic required-flush semantics are unchanged.
+
+One Oracle review (`untitled-chat-27CBAF`, snapshot `2026-11-10/1029`) confirmed the production
+writer/debounce boundaries and requested direct run-start coverage. Queue cancellation is
+preservation coverage; the reacquisition variants distinguish the old late-owner behavior.
+Only an exact current writer may fail creation preparation: cancellation with a stale/conflicting
+writer now refuses without mutating that claim's creation state. A valid pre-write dirty mutation
+is not rolled back through a reacquired successor after storage returns. Neither behavior grants
+new admission or schedules a stale retry. Read-only creation catalog policy, binding installation,
+hydration, first-bind preparation and inner provider execution remain open. M9.3 composition,
+M9.4 handoff/drain and M10 relocation are not claimed here.
+
+The review-requested run-start witness now uses the actual blank-tab binding admission and runtime
+creation commit: exactly one configured acknowledgement precedes intercepted dispatch, while
+same-object reacquisition at that acknowledgement prevents dispatch without erasing the saved
+payload. It supplements (rather than claiming equivalent coverage from) the retired callback
+fixtures' acknowledgement hooks. Caller/body search finds no `Environment.commitCreation` or
+`environment.commitCreation`; the VM result method is a one-line receipt ingress, not an alternate
+transaction body. No new coordinator, save queue, lifecycle authority or mutable fallback exists.
+
+Initial focused `3890a3e0-29ec-4f92-a5af-9a8f7cb201a5` passed **288 tests**. Final focused
+`c01e3c72-fe3a-4a23-90dc-0fbdb183a70a` passed **289 tests**, including the new direct run-start
+witness, restoration/creation, auto-wake, compact/send required-save, persistence and first-save
+regressions. Pinned scoped formatting and strict lint passed on all five touched Swift files;
+the final two-file review correction was checked again. Actual compiler warning occurrence counts
+match the M9.2c base: VM **4→4**, auto-wake tests **11→11**, other three files **0→0**. A fresh
+post-test compiler-index check remains **1,253/1,360 wrong-way edges, 53/66 largest cycle**, with no
+baseline change. These are local-commit gates: no new full broad selection, both-product build,
+full lint, live-app smoke, release or hosted-CI result is claimed for this slice. The publication
+gates will run before the explicitly authorized next draft PR; nothing is pushed now.
+
+#### M9.2e — hydration field/readiness writer capture (local follow-up)
+
+Hydration now captures an operation-local `AgentSessionHydrationRuntime.Attempt` containing the
+existing canonical writer and binding transition before the disk read. The transition token alone
+survives removal/re-addition of the same object; the writer incarnation does not. Full field apply
+requires this attempt, and the applied-payload receipt retains it through readiness publication.
+Revision-only drift is still classified separately, but only while the originating writer remains
+current; payload, nil, error and source-superseded results cannot publish proofs to a reacquisition.
+Hydration deliberately does not require restored-command admission, which it is supposed to earn.
+
+The VM captures before its producer task and automatic presentation admission, matches the read
+workspace to the binding, and settles an already-admitted Retry as cancelled if capture refuses.
+An unscoped/conflicting/retiring bound object does not gain even the suppressed-persistence loaded
+latch through this path: suppression is not a bypass around canonical mutation ownership. Unbound
+fresh-session suppression remains unchanged. Existing presentation coalescing, stale-drop recovery,
+explicit Retry entry scheduling, deletion policy, route pre-binding catalog reads and VM loader/body
+retirement remain open. In particular, this slice does not grant a later read permission to replace
+new local input: the stale-result test pins its preservation and does not initiate that separate read.
+
+The only overlap with M9.3 is necessary hydration-API wiring in
+`AgentSavedSessionTargetLoader+Runtime`: capture its newly installed writer before `readPayload`,
+never adopt a post-read resolution, and release a failed clean loading claim only while its original
+persistent claim still belongs to it. Retirement can release the original clean claim; reacquisition
+or raw conflict retains it rather than evicting a successor. A fresh resolution after refusal is
+used only to preserve failure classification, never as replacement authority. Storage inputs,
+composition, prepared owners and attachment configuration are untouched.
+
+One Oracle review (`untitled-chat-27CBAF`, snapshot `2026-11-10/1114`) requested the Retry settlement
+and failure-taxonomy corrections, which are applied. The existing auto-edit projection keeps its
+revision/binding predicate and tab-store compensation unchanged, adding only an originating-writer
+entry check. Its physical setter ordering and successor compensation remain explicitly open; this
+is not an approval-store receipt cutover or a host-lifetime/drain claim. Attempt values are local to
+operations, not added to the session store or presentation records.
+
+The first two compile attempts found missing explicit main-actor isolation on the new nested
+attempt type and a test-local apply helper respectively; both are corrected at those declarations,
+without package settings, blanket annotations or unchecked sendability. The third run was cancelled,
+not counted as a pass: `testOldAttemptUnwindDoesNotClearSuccessorLoadTaskAfterRebind` installed an
+unscoped test binding, then awaited a second preparation the canonical boundary correctly refused.
+The fixture now preserves its workspace while performing the same real transition, asserts the
+successor writer, and retains every existing task-ownership assertion and timing budget.
+
+Final focused `dba11dc3-030a-407d-9cc5-1f435c8ae037` passed **175 tests** across all eight selected
+families: window-free runtime loading (12), target lookup (7), restoration admission (23), transcript
+runtime (9), sidebar restoration stability (14), pane classification (42), snapshot publication (4)
+and real restoration lifecycle (64). The new VM disk-result matrix covers payload, missing, error
+and revision drift; the loader matrix covers both old-read hydration and failed cleanup after
+same-object reacquisition. Runtime tests cover the pre-apply and pre-readiness boundaries plus
+retirement without requiring restored admission. No test budgets or behavioral assertions were
+weakened. The earlier compile/cancelled tickets are not validation passes.
+
+Full lint `4db5c0cb-8129-4bfa-a6c4-4c86169377fb` and pinned scoped formatting/strict lint passed.
+The final fixture correction was formatted before the full lint began. Actual compilation across
+the successful source compile and corrected fixture recompile matches the M9.2c per-file warning
+occurrence baseline: VM **4→4**, the other six touched Swift files **0→0**. The fresh post-test
+compiler-index check remains **1,253/1,360 wrong-way edges, 53/66 largest cycle**, without baseline
+changes. These remain local checkpoint receipts: no full SessionLinks publication selection,
+both-product build, live-app smoke, release or new hosted-CI qualification is claimed. Nothing is
+pushed; #1676 remains scoped to checkpoints 9–12.
+
+#### M9.2e — runtime-owned hydration read and terminal settlement (local follow-up)
+
+The concrete persisted-hydration storage read and its writer/revision/cancellation classification
+now live in `AgentSessionHydrationRuntime.read`, directly awaited on the existing loader task.
+It validates the request's tab, session and workspace before IO, never resolves a replacement writer,
+and returns a typed result without mutating readiness. `settleTerminal` owns the existing terminal
+proof followed by the loaded latch, rechecking the original writer at that separate mutation boundary.
+The VM retains the exact presentation-attempt check for revision-only candidates, provider/payload
+application, and optional projection; it no longer owns the storage `do/catch` or those proof writes.
+Cancellation still precedes nil/missing, and a failed read with local revision drift preserves local
+projection without manufacturing a restoration proof. No new task, callback owner or state manager
+was added. Full payload/provider-repair retirement, AutoEdit's physical setter fence, binding,
+coalescing/presentation recovery and deletion admission remain open.
+
+One Oracle review (`untitled-chat-27CBAF`, snapshot `2026-11-10/1213`) checked branch equivalence
+and requested tighter superseded-proof evidence, independent reacquisition coverage, presentation-gate
+coverage and preserved diagnostic labels. The superseded proof now also requires actual revision
+drift: both automatic admission and explicit Retry capture their start revision and transition in
+one synchronous operation, so the retained late payload guard cannot legitimately grant that proof
+without drift. The matrix independently refuses superseded settlement after reacquisition, including
+reacquisition plus revision drift, before retirement could mask the cause. A narrow DEBUG seam calls
+the real presentation admission path without rotating the writer or starting a producer; the VM test
+uses it during payload/error reads and verifies the old producer cannot settle the replacement.
+No runtime fallback or test timing budget was introduced. Restore-trace cancellation labels are kept;
+the error print now identifies the runtime owner. No tests or diagnostic scripts consume those labels.
+
+The first focused ticket `6ea07216-d5ea-4ab2-9b93-f076356478ba` passed **177 tests** before the
+review follow-ups. The next build caught a pinned-formatter transformation of `&&` inside a ternary
+guard into a comma; the condition is now a local Boolean followed by its guard. The subsequent run
+compiled and passed 177 of 178 cases, exposing that the new presentation replacement test had used
+a first-save fixture with no presentation owner. That test now uses the existing saved-tab lifecycle
+fixture and its real owner adoption/read gate, without changing production admission or weakening
+any assertion or budget. Failed build/test tickets are not counted as validation passes.
+
+Final focused `985e7abd-bcde-49e4-9e7e-aa110fbadce0` passed **178 tests**, no skips or failures,
+across the same eight runtime-loading/target-lookup/restoration/transcript/sidebar/presentation
+families. The read matrix covers 18 payload/missing/error and revision/cancellation/reacquisition
+combinations; a separate identity test refuses wrong workspace, session and tab before storage.
+The real presenter test covers both successful and failed obsolete read results while the canonical
+writer remains current. Full lint `0271feb8-08b2-40ff-901d-5bb32a4811dd` passed; the later guard and
+fixture corrections passed pinned scoped formatting and strict lint. Actual compilation of all four
+touched Swift files matches the M9.2c per-file warning occurrence baseline: VM **4→4**, the other
+three **0→0**. The fresh compiler-index check is **1,254/1,360 wrong-way edges, 53/66 largest
+cycle**, with the baseline unchanged. The added edge is the runtime read's explicit workspace-ID
+validation against `Features/Workspaces/WorkspaceModel.swift` (`id`); this is disclosed cross-feature
+placement debt, not a target-extraction claim or a reason to weaken the identity check. These are
+local checkpoint gates, not a new both-product/full SessionLinks/live-app/release/hosted-CI
+qualification. Nothing is pushed; binding and startup work remains in progress.
+
+#### M9.2e — runtime-owned hydration commit (local follow-up)
+
+`AgentSessionHydrationRuntime.commit` now owns the app-composed field/attachment/provider-repair/
+migration-save/readiness sequence formerly in the VM. It uses the captured writer's existing usage,
+attachment, persistence and optional presentation owners, with incarnation/binding checks between
+synchronous external stages. Source-revision checks are intentionally not used after applying the
+payload, which itself advances that revision. The sort-date projection still precedes Codex repair;
+active-model/index projection follows it; readiness still precedes Claude effort repair. The VM
+installs its existing attachment/persistence composition and supplies concrete provider dependencies,
+not a callback containing the old mutation body. Migration save now deliberately uses the exact
+session overload rather than re-resolving a tab. Provider-internal refresh/save mutation fences and
+full binding/startup retirement remain open. No M9.3 storage or cold-loader behavior was changed.
+
+The former AutoEdit task was removed rather than made newly effective: its first guard compared the
+pre-application source revision, but every hydration, including an empty payload, increments that
+revision. The property is writable (not `private(set)`); the production-source audit found only its
+initialization and four increment sites, no resetting assignment. This does not claim that other
+permission-store setters are fenced. The VM attachment-repair wrapper remains test-used in the
+other lane's file; there is no production caller after this cutover.
+
+One Oracle review (`untitled-chat-D9F4D8`, snapshot `2026-11-10/1324`) found no new correctness
+regression and requested a real VM projection witness, a direct source-revision assertion, and
+updated ownership wording. Those changes are applied. The direct runtime matrix covers optional
+presenter absence and same-object writer reacquisition at each projection boundary, checking provider
+repair order and refusal of later migration saves/readiness. A second test keeps the actual VM sink
+and checks that normal hydration replaces stale index, sort-date and model display state. No test
+budget or existing assertion was weakened. Two initial focused tickets were explicitly cancelled
+before global heavy admission to finish review coverage and correct the new fixture's sort-date
+expectation to the existing last-user-message-only policy; neither is a test result.
+
+Final focused `ee620fc0-9d51-48a3-96e7-ecba6e59d196` passed **180 tests**, no skips or failures,
+across the same eight loading/restoration/transcript/sidebar families. Both new cases passed, using
+real provider repair and the real VM sink respectively. Full lint
+`b9519454-ea43-4bc3-8d47-749b97e9ce52` passed; the final fixture-only expectation correction also
+passed pinned scoped formatting and strict lint. Actual compiler warning occurrences match the
+M9.2c baseline across all four touched Swift files: VM **4→4**, the other three **0→0**. The fresh
+index check remains **1,254/1,360 wrong-way edges, 53/66 largest cycle**, with no baseline change.
+These are local checkpoint gates only, not a new both-product/full SessionLinks/live-app/release/
+hosted-CI qualification. Nothing is pushed; #1676 remains untouched and binding/startup is ongoing.
+
+#### M9.2e — exact membership during binding preparation (local follow-up)
+
+The existing runtime claim registry now gives unbound members an incarnation as well. Only bound
+members enter the reverse persistent-session index; unbound membership neither elects a writer nor
+grants workspace, restoration, save or command authority. `Membership` is an operation-local receipt
+from that same registry, not another owner. Structural currency is shared with persistent writers;
+new binding preparation additionally refuses retirement, a competing persistent claim, or the same
+object held by another scope. Republishing an unchanged member preserves its receipt, while removal
+and reacquisition, replacement and every binding install invalidate it.
+
+The VM's async rebind preparation captures the target before its first await and the source before
+its drain, then checks both after preparation awaits and before touching carriers/unbinding. Deferred
+generation-latch completion remains originating cleanup, but requalifying the unchanged source's
+old restoration proof now requires its exact membership. This checkpoint deliberately stops at the
+pre-install boundary: synchronous install/callout fencing, source-unbind/target-install rollback,
+the later worktree await, the caller's earlier `expectedTransition` awaits and the M9.3 queued-visit
+closure remain open. It does not retire the actual VM binding body or claim that this group is done.
+No admin/VCS implementation, prepared-owner registry or saved-host composition was changed.
+
+One Oracle review (`untitled-chat-D9F4D8`, snapshot `2026-11-10/1423`) requested verification of new
+refusal assumptions, a shared structural predicate, a loud test-barrier failure and positive bound-
+target coverage. Those changes/checks are applied. The VM's `sessions` directly gets/sets the scope's
+map, so a VM member cannot be absent from that scope. The production rebind caller obtains its target
+through `session(for:)`; the DEBUG entry follows the same contract. Production membership insertion
+sites are VM-created fresh objects and the cold loader's `scope.makeSession`; no production insertion
+shares one object across scopes. The store still represents deliberate/raw duplicate ownership as a
+conflict, rather than electing one owner. Future host adoption must transfer, not overlap, authority.
+
+The new store witnesses cover unbound ABA, explicit nil installs, unchanged publication, unscoped
+qualification without command admission, conflicts, retirement and release. The real VM rebind matrix
+covers successful bound/unbound targets and same-object target/source reacquisition at the registration-
+check boundary, asserting unchanged carriers/payload bytes and no stale readiness grant. Early prepared-
+owner/no-op and synchronous transition-observer reentry are source-checked, not separately injected in
+this checkpoint.
+
+Focused `14239920-de45-4010-a2d1-b054c92b3cfe` passed **165 tests**, no skips or failures:
+runtime-store 12, restoration-admission 28, lane first-save 48, saved-runtime loading 12 and restoration
+lifecycle 65. The real rebind matrix passed all five variants. Full lint
+`8fd7cc57-30d1-491b-a465-4d202500450b` passed. Actual compilation of all four touched Swift files
+matches the M9.2c warning occurrence baseline: VM **4→4**, other three **0→0**. The fresh index
+check remains **1,254/1,360 wrong-way edges, 53/66 largest cycle**, baseline unchanged. These are
+local checkpoint receipts, not full publication qualification. The overseer subsequently confirmed
+#1676's squash merge and authorized exact-squash ancestry reconciliation, broader gates and a new
+M9.2e draft PR; that integration/publication is recorded below.
+
+#### M9.2e — main reconciliation and publication gates
+
+The receipt checkpoint is `43d4554b2`. Normal merge `e224fcc9c` brings #1673 (`52cfc603c`)
+without conflicts. Recomputed `git merge-tree --write-tree c4397ec3d 52cfc603c` yields tree
+`8dd4fdba975f6ddad9f0bca16ab4323919462a56`, exactly equal to squash `e8e49c5d4`.
+Ancestry-only merge `29d28068d` targets that exact squash, **not** `origin/main`. The following
+normal merge of `origin/main` was already up to date at `e8e49c5d4`. Main-relative changes are
+only M9.2e's five checkpoints (14 files); merge-tree with that main is clean. The incoming keychain
+fix remains intact. No rebase, force push or published-history rewrite occurred.
+
+Process deviation: the receipt commit passed its staged preflight, but the two merge commits were
+then created in the same command without separate staged preflights before each merge commit.
+This is not represented as satisfying that per-commit requirement. The final outgoing-range safety
+check will cover all outgoing commits before publication; future merges must use `--no-commit`
+and a staged preflight. No protected investigation/export artifact entered a commit.
+
+Integrated broad, isolated handoff, both-product and full-lint gates are in progress. The broad filter
+contains all SessionLinks families plus admission/sidebar/lane policy, all affected creation/hydration/
+save/persistence families and #1673's keychain/provider-error coverage. It includes 133 existing suite
+names plus one inert legacy `SessionAdminProductionOrganizerTests` filter name; no such suite exists
+and no coverage is claimed for it. The saved future filter removes that inert name.
+
+Publication is held: broad ticket `779d1e16-925d-418e-a479-4e3d83ca4615` failed two app cases
+(resident Steer `CancellationError`, and restoration's `index batch applied` precondition). Its app
+selection executed 2,376 tests, 22 skipped, with two failures. Isolated handoff ticket
+`d491e011-fba0-4152-9ee0-a46f5a539382` executed 104 tests with two assertions failing in one
+restored provider-switch refusal case (disconnected Claude rather than handover-length refusal).
+None is classified as the previously known render/scale or skill-expansion intermittent. Exact-case
+head/main isolation is pending; no assertion, precondition or timeout has been changed.
+Both products `ffb048ac-134e-4cab-865a-416e7675a514` and full lint
+`c8b9f4fb-31f0-4a20-ad9f-97af96daf44c` passed. The actual broad compilation has no positive
+warning-occurrence deltas across 13 changed Swift files: VM 4→4, AutoWake tests 11→11, others 0→0.
+Shared `origin/main` subsequently advanced to `fafdc9050` (#1669 and #1672); the tested head remains
+`29d28068d`, and comparisons must record the exact main SHA rather than assume the ref stayed fixed.
+
+Exact single-case isolation passed on both revisions, without changing code, assertions or budgets:
+
+| Case | M9.2e `29d28068d` | Main `fafdc9050` |
+| --- | --- | --- |
+| Resident Steer | `ae31bf57-e9b7-4b81-a044-1e3db76ed307`, 1.355s | `71a403b1-6bfb-4291-8731-f89863e5efe3`, 1.351s |
+| Transcript index batch | `7a5d79e3-b35b-4845-846c-be06b804dff7`, 0.876s | `0ddb0d05-695c-46c9-a163-3536738f7ab7`, 0.725s |
+| Restored provider-switch refusal | `f04ea34d-5f50-48ce-ab67-2351cdf96ebd`, 4.908s | `8e068458-75e4-44c8-ba1e-834bfa69de11`, 14.013s |
+
+Each isolation executed one test with no failures. The main comparison used a ledger-only recovery
+stash, restored afterward; the four local investigation/export artifacts were untouched. The overseer
+explicitly authorized publication with the classification **broad-run only, not root-caused, isolated
+pass on head and main**, under watch in the PR. This does not prove inheritance or repair. A reported
+CI recurrence belongs to this lane for production root-cause work. No CI logs were read.
+The index check attempted while validation was active refused to attest freshness (zero stale/unindexed
+source files but freshness unproven); the last successful checkpoint check was 1,254/1,360 wrong-way
+edges and 53/66 largest cycle. This is not recorded as a fresh integrated index pass.
+
+### M9.4 phase 0: presentation-lifetime groundwork (refs #1406)
+
+Base `534e2c759`. This slice does **not** implement close-preserves-run, host leases,
+workspace-switch detach, handoff UI or pending-start cancellation capability. Legacy close and
+workspace switch still cancel. At the initial groundwork checkpoint, the pending-start capability
+waited for M9.2c and explicit lane coordination; it is implemented in the follow-up below.
+Visible/no-window host composition remains a separate prerequisite.
+
+- Characterization pins the two legacy cancelling paths in `AgentSessionRuntimeStoreTests` and
+  strengthens `SessionAdminInventoryReadTests/testVisitDuringManagedRunAutomaticallyHandsOffAfterCompletion`:
+  an active prepared owner keeps its exact writer, the visitor has no target writer, and the queued
+  visit hydrates after settlement. No new app-importing test file was added.
+- The teardown audit in `docs/testing.md` distinguishes 35 asynchronous Agent Mode calls from 60
+  unrelated/comment references. Thirty cleanup-only sites use `test_retireAndCancelFixture()`;
+  five deliberate close-contract sites remain. Fixture retirement names the cancelling lifetime
+  explicitly rather than depending on a future presentation-only close policy.
+- Continuation producers are indexed by exact session object, not tab/persistent UUID alone.
+  `drainPendingStarts(for:)` joins only that object's producers, including for a cancelled waiter.
+  `releaseWriterClaim(for:)` is a scope-only primitive under the **existing scope-wide retirement
+  fence**; it has no production caller yet. A held sibling effect does not block it, and a stale map
+  cannot resurrect its released tab. Per-session admission fencing belongs to host cutover.
+- `Scope.settlement(for:)` consolidates synchronous run/start/provider/effect/durability facts.
+  Provider-controller and domain-registration awaits remain explicit in the prepared-owner path.
+  Compatibility projections preserve the prior prepared busy/handoff and scope-wide release
+  predicates; adopting the stronger full predicate there before effect wakeups/drain ownership
+  would strand existing queued visits. The new per-session release uses the full synchronous
+  predicate only after the caller has joined provider/domain teardown and acknowledged its save.
+  The query itself creates neither a durable receipt nor admission.
+- A scope-installed detached sink projects outcomes/attention through the existing notification
+  coordinator, never VM state. Exact live presenters take precedence; stale detach tokens cannot
+  re-enable fallback over a successor. Detached attention has a separate derived scope bucket,
+  with visible-tab deduplication, so window removal cannot erase an independent host's attention.
+  Legacy retirement **removes** that sink before presentation detaches: close must not gain new
+  background notifications or retain closed-window attention. A later host-owned detach will
+  deliberately keep it installed. Without an explicit detach, presenter loss is recognized on
+  the next projection event, not by a new lifetime observer.
+
+The bounded review identified the stricter-legacy-predicate and post-close-notification policy
+changes; both were narrowed rather than silently adopting later-phase behavior. Tests additionally
+cover held continuation/interaction effects, sibling independence, release resurrection, fallback
+terminal routing, attention withdrawal/visibility precedence and late notifications after close.
+
+Initial characterization ticket `24cef73d-c056-4618-863d-b05b4dc8fd3b` passed **12 runtime-store
+cases**, including both new legacy cancellation cases. Its prepared-visit filter named the file's
+wrong test class and selected no such case; that receipt is not prepared-handoff qualification.
+Groundwork focused ticket `61209803-8c7d-4209-a4ea-31e9f11092bd` then passed **49 tests**,
+including the corrected prepared-owner visit case (one), runtime store (16), presentation (five),
+notification coordinator (15) and notification planner (12). Full lint
+`fdb3ba6e-3fcd-4566-ad9d-8ea4dba50a45` passed. These tickets survived the host-app restart;
+their terminal state and exact selected cases were reconciled before more work was submitted.
+
+#### M9.2i checkpoint 1 — exact apply-edits caller cancellation
+
+Caller cancellation in `ApplyEditsApprovalStore` now settles the captured review UUID, not whichever
+review later occupies the same scope. The existing replace-on-new-request behavior is unchanged.
+A held-cancellation witness replaces the original review before releasing its caller's cancellation;
+the successor still accepts. A positive witness checks that cancellation still settles its own pending
+review with the caller-cancellation reason and clears the projection. Snapshot/completion waits are
+bounded and teardown joins both callers and the snapshot consumer.
+
+Focused `a11e4e67-66d3-4e60-adcd-6ff2a5acb7e7` passed **18 interaction-runtime tests**, zero failures.
+Scoped pinned formatting, strict lint and whitespace checks passed. This is the first bounded slice,
+not completion of interaction/provider command routing or residual projection/terminal cleanup.
+
+#### M9.2i checkpoint 2 — originating terminal cleanup and VM readiness witnesses
+
+Terminal apply-edits cancellation captures whether the caller held its runtime slot **at Stop**.
+A detached caller cannot gain namespace cancellation authority by being re-added before its deferred
+effect executes. An originally admitted cleanup still settles undisplayed pre-Stop work after claim
+rotation; requiring the old membership to remain current would leave that review pending but hidden
+by the projection cutoff. The existing actor-side admission cutoff protects all post-Stop reviews;
+a caller without original namespace authority may settle only its known review UUID.
+
+A direct VM `askUser` test suspends actual persisted hydration through the existing data-service hook.
+The unchanged owner earns restoration authority and can skip its installed question. Same-object
+reacquisition rejects the obsolete hydration/readiness result; replacement and rebind reject the
+captured target identity. Specific refusal messages are checked, no provider starts, and no question
+or continuation reaches a successor. This is readiness-wrapper coverage, not a claim that the pending
+reacquisition case reaches the later `writer.admitCommand()` check.
+
+Final focused `bc89e0ad-a2a0-474c-8841-5c703d62c678` passed **48 tests**, zero failures (19 interaction,
+29 restoration-admission). Scoped pinned formatting, strict lint and whitespace checks passed.
+Shared approval subscription/seed/teardown provenance, manual auto-edit command routing, and the
+remaining provider-native/VM-forwarding inventory are still open; other lanes' provider execution,
+MCP host composition, persistence/payload, Steer and self-compaction ownership is unchanged.
+
+### M9.3b PR1 — shared host route and resource ownership (refs #1406)
+
+Base `99d4e718d` (#1679). This is the first resource extraction in the expanded visible-and-saved
+host plan, **not executable host cutover**. Prepared-window execution, visible scope/coordinator
+composition and explicit close/switch cancellation remain unchanged. No M9.2f/g/h command,
+worktree or provider-execution body is moved in this slice.
+
+- `MCPRouteIdentityAllocator` supplies one non-reusing integer namespace for presentation windows
+  and independently allocated host routes. Host allocation does not change the latest presentation
+  window selector. `MCPHostRouteIdentity` adds exact resource identity; the explicit `legacyWindow`
+  adapter preserves existing transport IDs until visible composition changes atomically.
+- `MCPHostRouteResources` now owns the existing run-route bindings/lifetime, tool-execution runtime,
+  domain route registration, exact connection receipts and catalog handle. The legacy MCP server
+  forwards to that same owner. Catalog transitions serialize independently of a presenter and use
+  the captured domain runtime, including the existing protected-mutation/long-running wrappers;
+  no second router, tool registry or lifecycle manager is introduced. Domain protocol route slots
+  still use the wire name `window`; constructing one does not construct or register a UI window.
+- Domain admission close is deliberately separate from full owner withdrawal: legacy window
+  teardown unregisters its domain route **before** its existing explicit run drain, so mappings
+  retain their prior lifetime through that drain. Transport disconnect retains its existing
+  cross-server resolution behavior; owner teardown consumes only previously retained exact
+  connection generations and cannot retract a successor. Resource close does not cancel tools
+  or assert provider/session settlement. The M3 source-layout guard now checks that retained
+  connection receipt storage and exact cleanup live in this owner, plus server retain/disconnect/close
+  delegation, instead of requiring the removed VM-owned UUID set.
+- `AgentHostWorkspaceResources` builds the same production file store used by windows, reads the
+  existing domain context authority and acquires exact root-lifetime retention with post-await
+  validation. Requested roots must cover canonical workspace paths; an empty workspace may have
+  an empty set. Retained roots defer unload before any teardown effect. Last release joins deferred
+  unload, a newer load cancels old unload intent, and stale tokens cannot unload replacement roots.
+  This is read/resource currency, **not** writer, mutation, consent or worktree admission.
+- `APISettingsRuntimeLease` retains an explicitly supplied existing live settings owner, never a
+  first-window election, credentials snapshot or second settings catalog. The prepared adapter uses
+  it at the existing acquire/drained-release boundaries. Both settings and workspace resources can
+  be acquired with no window construction; presentation invalidation remains later work.
+
+Tests exercise zero-window identity/domain/catalog/settings/context acquisition, registration
+failure, runtime affinity, exact connection replacement and cross-owner disconnect, unchanged legacy
+mapping lifetime, settings close deferral/idempotence, root unload/last-release and replacement
+fences, and refusal without partial root retention. Root-store cases use the existing app composition
+test suite because its production convenience initializer lives in the app module; no new app-import
+file or lower-module test-only factory was added. The single review found the premature lifetime
+withdrawal and cross-owner disconnect regressions; both were corrected before publication.
+
+**Next cutovers, in order:** PR2 composes every visible session through one executable host before
+creation, keyed by `(window, workspace activation epoch)`, not workspace UUID alone. It installs the
+host's route/link endpoints, real MCP capabilities, settings/context leases and coordinators, while
+leaving a presentation lease and explicit legacy stop adapter on the window. This requires the
+M9.2g startup/provider completion and an explicit inventory/ownership agreement for the M9.2f/h
+admin/worktree bodies (`SessionAdminWindowsHosts`, `AgentSessionWorktreeRuntime`,
+`AgentModeViewModel+SelfWorktreeRelocation`, `MCPWorktreeToolProvider`, `VCSService`). Retain their
+exact admission across IO; do not wrap VM-only effects as a hidden host. This PR does not touch them.
+
+PR3 then reuses that same executable factory plus phase-A `loadRuntime`/storage composition for
+saved-only targets, resolves the canonical writer, settles required saves and retires the prepared
+branches **together**: `WindowStatesManager+AgentSessionLinks` preparation/window-catalog adapter,
+`WindowState` prepared constructor/teardown, `WindowStateManager` prepared/retiring maps and
+logout/shutdown enumeration, and `AgentSessionCarrierResolver` weak prepared-owner augmentation.
+Visit, deletion, consent revocation and links must use the actual writer's host, with no fake window
+or fallback to the latest window. All-run survival, last-window background mode and presentation
+handoff/drain policy remain M9.4. PR1 does not complete M9.3b or #1406.
+
+Validation receipts (all local, no CI logs or visible app lifecycle actions):
+
+- Base `99d4e718d` ticket `5734f137-3b92-4df1-9706-a141f473a18f`: 15 tests passed and the
+  pre-edit compiler warning occurrence baseline was captured.
+- Final resource/route/close/prepared-target/root-catalog selection
+  `9e9b7938-1e21-4dff-9a74-fafaf353787f`: **270 tests passed**, zero failures. This includes
+  existing 200,001-file root fixtures, not only the new small lease cases. Catalog coverage uses a
+  deterministic canonical binding through the actual registry and app binder; it is not provider
+  execution or saved-host activation qualification.
+- Additional link/admission ticket `af706df9-a729-4636-83b5-ff5356707012` executed **393 tests**:
+  236 runtime-bridge and 98 tool-service cases passed; admission passed 58/59. The one failing
+  `testCanonicalDirtyAdmissionErrorIncludesEvidenceAndDoesNotMaskLaterFailure` had three assertions:
+  its setup `replaceWorking` returned `.conflict` instead of `.applied`, so the intended dirty state
+  was not installed and the later refusal assertions also failed. Isolated head ticket
+  `15720872-7b85-41c3-8629-1b31eb6d19a8` passed that one case. This is **broad-run-only observed,
+  not root-caused**, not a green batch or proof of inheritance; an exact-base execution of this case
+  was not performed. No assertion, retry or admission implementation was changed to obtain green.
+  The fixture separately drains scheduled saves but does not join its working-document publisher;
+  that is a source-grounded race hypothesis, not a demonstrated cause. The draft remains unqualified
+  for merge pending resolution/acceptance of this evidence gap.
+- Fresh compiler-index check after all jobs settled passed: **1,261/1,360 wrong-way file edges,
+  53/66 largest cycle components**. No ratchet baseline was changed. No full-suite, live-app,
+  real-provider, release or hosted-CI qualification is claimed.
+- Both products (`RepoPrompt`, `repoprompt-mcp`):
+  `524ade5c-ac01-4bc1-8855-1c4e8c26404e` passed. Final full-tree lint
+  `b277a521-77fd-42b6-87ce-63317dbc396a` passed (0/2,161 Swift files needed formatting).
+- Earlier iterations are not green receipts: `4b1df425-edf4-4238-a308-c3b8e020ff4a` exposed the
+  module fixture's missing app factory, and `ad2d43e4-8b13-4a81-bcad-26ac5f985e24` compiled but
+  passed 53/54 cases because the real registry rejected the empty catalog fixture. Both were fixed;
+  no production guard or assertion was weakened. Queued product ticket `a5f470f9-5995-41ea-a3b7-3b7b129c1d07`
+  was cancelled before execution to include the final readiness correction.
+
+Touched-file compiler warning **occurrences**, not deduplicated diagnostics, are below. B is the
+pre-edit base compile; H is the completed app/test compilation in `ad2d43e4`; F is the final
+incremental compilation in `9e9b7938`. Zero emissions in an incremental run do not mean an existing
+warning was fixed or that every file recompiled. The product gate emitted no file-qualified Swift
+warnings. The F increase in `MCPServerViewModel` is explicitly retained: its unchanged `workspaceSearch`
+function-value conversion at line 1732 emitted ten times versus nine at base; its unchanged implicit
+`self` at line 1032 emitted once in each. There are **no new diagnostic sites**, but this is not a
+claim that every raw occurrence count decreased. No warning or architecture baseline was raised.
+
+| File | B | H | F |
+| --- | ---: | ---: | ---: |
+| `AppDomainRuntimeRegistration.swift` | 1 | 1 | 0 |
+| `WindowState.swift` | 1 | 1 | 0 |
+| `WindowStateComposition.swift` | 2 | 2 | 2 |
+| `APISettingsViewModel.swift` | 9 | 9 | 2 |
+| `MCPRunRouteBindings.swift` | 0 | 0 | 0 |
+| `MCPServerViewModel+DomainRouting.swift` | 2 | 2 | 2 |
+| `MCPServerViewModel+TabContext.swift` | 3 | 3 | 3 |
+| `MCPServerViewModel.swift` | 10 | 7 | 11 |
+| `WorkspaceFileContextStore.swift` | 0 | 0 | 0 |
+| `ContextBuilderSelectionTransactionTests.swift` | 0 | 0 | 0 |
+| `WorkspaceRootCatalogAdmissibilityTests.swift` | 1 | 1 | 0 |
+| `AgentHostWorkspaceResources.swift` (new) | 0 | 0 | 0 |
+| `APISettingsRuntimeLease.swift` (new) | 0 | 0 | 0 |
+| `MCPHostRouteResources.swift` (new) | 0 | 0 | 0 |
+| `MCPRouteIdentity.swift` (new) | 0 | 0 | 0 |
+
+Groundwork was published in draft PR #1678 at normal merge `aaef76bc3`, integrating M9.2c's
+main `e8e49c5d4` without rewriting the lane commits. Both products
+`ebcfd66a-4fe5-4291-999d-0e32b668d42a` and full lint
+`32ab653a-6d4a-46d9-92ff-5a8727d4fa81` passed. Broad selection
+`8ad8b943-e0a2-4ecb-a698-09740ddbb60e` passed **1,936 tests, 18 skipped, zero failures**;
+isolated handoff `d6ae4342-b777-41ac-9574-a2126981da83` passed **104**. Fresh index check was
+**1,256/1,360 wrong-way file edges, 53/66 largest-cycle components**. Actual compilation
+occurrences across the 25 touched Swift files were VM **4→4**, auto-wake tests **11→11**,
+admin lifecycle tests **5→5**, and zero in the other 22 files; normalized diagnostic signatures
+had no positive delta. That retained baseline is the original lane compilation with only
+characterization/helper changes, not a fresh exact-clean-main build. Mandatory push preflight
+passed after the nested SwiftPM sandbox restriction was resolved through approved execution;
+local investigation copies and Oracle exports were preserved outside the clean push boundary
+and restored afterward, never staged.
+
+### M9.4 phase 0 follow-up: pending-start capability (refs #1406)
+
+After #1676 merged and the lane was unblocked, the existing composer claim gained one exact
+pre-prologue cancellation receipt. The session stores it before publishing its claim; a newly
+created, already-bound destination aliases that same receipt before showing preparation. It
+uses weak session/runtime back references and existing writer identities, not a second session
+registry or lifecycle manager. Creation, hydration and provider runner ownership remain unchanged.
+
+- A pending Stop withdraws only that exact source/destination claim, invalidates its deferred start
+  generations, removes its owned optimistic input and restores the owed source draft once, above
+  newer typing. A stale writer, recycled object or successor attempt cannot be withdrawn through
+  an old target. Unrelated execution-location changes and the existing native self-compact
+  busy-until-dispatch policy remain fail-closed.
+- Suspended executors and child producers retain the receipt before awaiting or scheduling. UI
+  withdrawal is not drain acknowledgment: settlement and managed Stop keep the real effect until
+  its finalizer runs. A managed deadline returns an honest incomplete-teardown result while that
+  effect remains installed. Local teardown uses the existing bounded deadline as well.
+- The narrow `beginRunAttempt` hook observes installed provider-run ownership before running is
+  published. Active-run cancellation then takes precedence, and the composer claim can unlock
+  without waiting for the provider transport to return. Synthetic cancellation/startup-failure
+  bookkeeping does not upgrade a pending input into an actual provider start. Deferred producers
+  capture a fresh fence at the final synchronous claim handoff, never after suspension; an explicit
+  Stop prevents that handoff, while internal preparation invalidation does not lose an input.
+- Cancelling an unsent prospective steer is row-only cancellation, not Stop on the existing run;
+  it preserves that run's continuation generations. Blocked-executor draft recovery is cleanup,
+  not new-command admission, and therefore survives writer retirement/rebinding on the original
+  object without restoring into a replacement. Optional metadata recovery stays in a presentation
+  sink, never a VM capture in the runtime command.
+- Existing typed ACP/plain continuation tasks retain their session-keyed producer/fence ownership.
+  Self-compact admission remains owned by its existing active run; no new generic startup owner
+  was introduced. Prepared-owner busy/handoff projections remain compatible. The legacy drain
+  projection additionally sees a newly withdrawn composer producer until its real release.
+
+The bounded step-4 review identified blocked-steer draft loss, row-only Cancel regressions,
+post-prologue claim retention, premature fence capture, orphan destination cleanup and bounded
+local-wait/UI ordering issues. These were corrected before qualification, without weakening
+existing assertions or increasing timeout budgets. Added cases live in existing test files;
+there is no new app-importing test file or ratchet-baseline change.
+
+The first three step-4 attempts were cancelled rather than credited: the first exposed an old
+routing fixture's unbound fake destination and unbounded backend wait; the second was stopped
+while correcting the stale-target setup; the third was still waiting for heavy admission when
+the terminal-only attempt hook correction was included. The routing fixture now binds its fake
+destination before routing, captures the stale target before alias publication and uses a bounded
+wait plus teardown release. The production first-send Computer Use case instead exercises the real
+configured creation transaction and asserts its binding. Focused attempt
+`008937de-df30-4ef0-b778-f233f819d1b3` failed compilation because the new startup-gate fixture
+returned `nil` from a string-valued provider-switch refusal callback. That fixture type mismatch
+was corrected; it is not an assertion failure or a completed test qualification.
+Focused `2af5df0e-6c90-457a-8ed2-9c9cec63c5f2` then executed **274 tests with 15 failures**.
+Those exposed fixture expectations, not a passing qualification: draft joins use the existing
+single newline, a pending Stop must join Stop effects rather than Send effects, a UI-only test
+must model the executor's release explicitly, fake destinations must satisfy configured creation's
+bound-writer contract, and real foreground creation needs the prompt/carrier plus isolated durable
+storage that the endpoint-only fixture intentionally omitted. These setups were corrected while
+retaining dispatch, exactly-once recovery, stale-target and real-producer-drain assertions.
+The creation-only reruns additionally exposed the fixture's missing `RepoPromptShared` import,
+restored-versus-fresh provenance and availability updates completing across creation's awaits.
+Both creation cases now use real configured creation with isolated durable storage; fake-provider
+availability is published at its returned boundary. Creation-path ticket
+`e9fe365a-6e62-40fb-abb3-adfbb0068ce6` passed **two tests**, including actual first-provider
+Computer Use approval command admission without post-creation binding repair.
+
+Local step-4 products `86daf60a-4123-4a75-b82d-b724deecfb8f` and full lint
+`d5cd72c4-85c1-4ca8-87cb-9a396898ca54` passed. The fresh index check remains
+**1,256/1,360 wrong-way file edges, 53/66 largest-cycle components**. Expanded actual-compilation
+warning audit across **41 owned Swift files** is VM **4→4**, Codex resume tests **17→17**,
+auto-wake tests **11→11**, admin lifecycle tests **5→5**, and zero in the other 37 files.
+Counts use retained compilation receipts rather than empty incremental product logs; repeated
+compilations are not summed. Complete later diagnostics confirm the same count where an earlier
+log truncated a diagnostic suffix. There is no positive per-file or normalized-signature delta.
+
+The first broad step-4 ticket `76b5af49-1e22-44c0-825d-664427c7905f` executed **2,121 tests,
+18 skipped, three assertion failures in one case**: forced provider switch with queued work but
+no active run. Its internal mutation claim was incorrectly withdrawn by its own quiescence's
+explicit-Stop queue cleanup. Claim installation now distinguishes that lifecycle mutation from
+cancellable pending input before publication; the forced-switch queue/auto-wake withdrawal stays
+unchanged, and an exact mutation claim remains busy to managed Stop. A runtime case pins this
+policy alongside the existing full forced-switch regression. The handoff-model/worktree selection
+`98c3171c-88ef-477c-8a33-f01a70e033dc` passed **26**, but its filter was not the isolated
+`AgentSessionLinkHandoffInheritanceTests` suite and is not credited as that gate.
+
+Correction-focused `93e075a8-539f-4654-a8d3-11a6efbf6577` passed **120 tests**: composer
+runtime **16** and the actual handoff-inheritance suite **104**, including the forced-switch
+regression. Full lint `bf35d8f8-05b9-47f2-98ec-0a53fea4ff52` and corrected-tree products
+`4eb420cf-8b93-4655-af94-602bca4accaa` passed. The expanded audit now includes the provider-switch
+adapter: **42 owned Swift files**, the same four nonzero counts above, and zero in the other
+38 files; no positive count or normalized-signature delta. At local checkpoint `3bed4d24b`, this
+work was withheld from #1678 by lane instruction for a separate phase-0b PR after groundwork merged. No CI logs were
+read; no full-suite, live-app, release or sanitizer qualification is claimed.
+
+Final corrected-tree broad selection `6c13992a-4462-455f-a952-9df921472d35` passed
+**2,122 tests, 18 skipped, zero failures**, including the new pending-start cases, real creation
+paths, SessionLinks, self-compaction, restoration/admission, handoff, sidebar, runtime store and
+the actual prepared-owner visit. The post-product fresh index check remains **1,256/1,360 edges,
+53/66 largest-cycle components**; no baseline changed. All owned validation tickets were terminal
+before the local checkpoint. Publication then waited for #1678's merge and the instructed squash
+integration into a separate phase-0b draft PR.
+
+After #1678 merged as `ac8a6f3a9`, integration used normal merge `d50e898a0` of checkpoint
+`884fda621`. The actual tree from `merge-tree(aaef76bc3, 884fda621)` was
+`df5c3f9c53dcbad8675902c233e68d21828238f6`, identical to the exact #1678 squash. Only after
+that empty-diff proof, ancestry-only merge `3a6418aee` adopted that squash commit alone, with
+no tree changes. Normal `merge origin/main` was then already up to date. Main is an ancestor;
+merge-tree with main is clean and equals HEAD's tree. The main-relative diff contains only
+step 4 and its tests/ledger, on new branch `runtime/20261111-m9-4-phase0b`. No published
+history was rewritten and no additional work was pushed to #1678.
+
+Merged runtime tree `3a6418aee` then passed **385 focused tests** in ticket
+`14b7c115-0853-430e-8e04-7e37d0253e02`, covering composer, pending Stop/drain, first-send
+creation, self-compaction, runtime store and all 104 handoff-inheritance cases. All 22 changed
+Swift files passed scoped pinned formatting and strict SwiftLint; the latter used an explicit
+`/tmp` cache after the default cache directory refused a sandboxed write. Fresh merged-tree
+compilation retained VM **4**, Codex resume tests **17**, auto-wake tests **11** and admin
+lifecycle tests **5**, with no positive count/signature delta across the 42 audited Swift files.
+The 2,122-case broad, both-product and full-lint receipts above qualify the pre-integration
+step-4 checkpoint; they are not misrepresented as a new merged-tree full-suite run. No source
+changed after merged-tree execution; this final addition records its integration receipts.

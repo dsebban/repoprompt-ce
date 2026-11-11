@@ -793,7 +793,7 @@ final class AgentModeRunService {
     }
 
     private func failBeforeProviderStartup(session: AgentTabSession, message: String) async {
-        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.startupFailure")
+        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.startupFailure", beginsProviderRun: false)
         hooks.providerInput.recordPendingHandoffSendOutcome(session, false)
         await terminalCommitBarrier.commit(.init(
             binding: hooks.bindTerminalSession(session),
@@ -1484,7 +1484,7 @@ final class AgentModeRunService {
     ) async {
         if let admission {
             // Pending starts are withdrawn synchronously by their producer owner, not terminalized.
-            guard admission.scope == .activeRun, admission.claim(for: session) else { return }
+            guard admission.scope != .pendingStart, admission.claim(for: session) else { return }
             outcomeRecorder?.recordCancellationInitiated()
         }
         let withdrawingProviderAdoption = dependencies.claudeCoordinator.hasPendingProviderAdoption(for: session)
@@ -1596,7 +1596,7 @@ final class AgentModeRunService {
             reason: intent.cancellationReason
         )
 
-        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.cancel")
+        let ownership = session.activeRunOwnership ?? session.beginRunAttempt(source: "runService.cancel", beginsProviderRun: false)
         let cancellationLifecycle = session.runLifecycle
         let expectedRunID = session.runID
         let provider = session.provider
