@@ -557,7 +557,19 @@ let package = Package(
         "RepoPromptFileSystem", "RepoPromptFileSystemTests",
         "RepoPromptPersistence", "RepoPromptPersistenceTests",
         "RepoPromptSettingsCore", "RepoPromptSettingsCoreTests",
-        "RepoPromptSecureStorage", "RepoPromptSecureStorageTests"
+        "RepoPromptSecureStorage", "RepoPromptSecureStorageTests",
+        // Depend on SwiftOpenAI/SwiftAnthropic/RepoPromptAgentProviders, removed below.
+        "RepoPromptClaudeProvider", "RepoPromptClaudeProviderTests",
+        "RepoPromptHTTPProviders", "RepoPromptHTTPProvidersTests",
+        // Depend on RepoPromptFileSystem/Persistence/SettingsCore, removed above.
+        "RepoPromptWorkspaceContext", "RepoPromptWorkspaceContextTestSupport",
+        "RepoPromptWorkspaceContextTests",
+        // Only app/test consumers remain; its owning tests depend on RepoPromptFileSystem.
+        "RepoPromptACPProviders", "RepoPromptACPProvidersTests",
+        // App-owned UNIX socket server (LOCAL_PEERPID, SO_NOSIGPIPE); the headless CLI does not use it.
+        "RepoPromptMCPServer", "RepoPromptMCPServerTests",
+        // Only app/test consumers; its app-server client is written against Darwin.
+        "RepoPromptCodexProvider", "RepoPromptCodexProviderTests"
     ]
     let macOSOnlyPackages: Set<String> = [
         "keyboardshortcuts", "swift-markdown-ui", "swift-markdown", "swiftanthropic",
@@ -590,6 +602,9 @@ let package = Package(
         }
         if target.name == "RepoPromptC" {
             target.cSettings = (target.cSettings ?? []) + [.define("_GNU_SOURCE")]
+            // The ICU bidi shim serves only the macOS Markdown renderer; libicucore is Apple-only.
+            target.exclude.append("src/Utils/unicode_bidi_class.c")
+            target.linkerSettings = [.linkedLibrary("sqlite3")]
         }
     }
 #endif

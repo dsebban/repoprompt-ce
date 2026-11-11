@@ -111,10 +111,10 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(lockFD, 0)
         XCTAssertEqual(flock(lockFD, LOCK_EX | LOCK_NB), 0)
         // Teardown order of BootstrapSocketServer.stop(): close, unlink owned socket, unlock.
-        Darwin.close(listener)
+        POSIXSystem.close(listener)
         XCTAssertEqual(unlink(socketURL.path), 0)
         XCTAssertEqual(flock(lockFD, LOCK_UN), 0)
-        Darwin.close(lockFD)
+        POSIXSystem.close(lockFD)
         XCTAssertTrue(FileManager.default.fileExists(atPath: lockPath))
 
         let error = await Self.handshakeError(socketURL: socketURL)
@@ -127,7 +127,7 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         let directory = try makePrivateDirectory()
         let socketURL = directory.appendingPathComponent("s.sock")
         let listener = try Self.bindSocket(at: socketURL, listen: false)
-        Darwin.close(listener)
+        POSIXSystem.close(listener)
         let error = await Self.handshakeError(socketURL: socketURL)
         guard case let .bootstrapSocketUnavailable(code) = error else {
             return XCTFail("stale socket must be retryable, got \(String(describing: error))")
@@ -139,7 +139,7 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         let directory = try makePrivateDirectory()
         let socketURL = directory.appendingPathComponent("s.sock")
         let listener = try Self.bindSocket(at: socketURL, listen: true)
-        defer { Darwin.close(listener) }
+        defer { POSIXSystem.close(listener) }
         let path = socketURL.path
         let error = await Self.handshakeError(socketURL: socketURL) {
             XCTAssertEqual(unlink(path), 0)
@@ -164,14 +164,14 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         // A symlink to an otherwise valid socket.
         let target = directory.appendingPathComponent("t.sock")
         let listener = try Self.bindSocket(at: target, listen: true)
-        defer { Darwin.close(listener) }
+        defer { POSIXSystem.close(listener) }
         XCTAssertEqual(symlink(target.path, socketURL.path), 0)
         try await Self.assertHardValidationFailure(socketURL: socketURL, "symlinked socket")
         XCTAssertEqual(unlink(socketURL.path), 0)
 
         // A socket with permissions wider than owner-only.
         let wide = try Self.bindSocket(at: socketURL, listen: true, mode: 0o666)
-        defer { Darwin.close(wide) }
+        defer { POSIXSystem.close(wide) }
         try await Self.assertHardValidationFailure(socketURL: socketURL, "world-writable socket")
     }
 
@@ -190,7 +190,7 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
     }
 
     private static func bindSocket(at url: URL, listen shouldListen: Bool, mode: mode_t = 0o600) throws -> Int32 {
-        let fd = socket(AF_UNIX, SOCK_STREAM, 0)
+        let fd = POSIXSystem.socket(AF_UNIX, POSIXSystem.streamSocketType, 0)
         guard fd >= 0 else { throw POSIXError(.EIO) }
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -202,12 +202,12 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         }
         let bound = withUnsafePointer(to: &addr) {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
+                POSIXSystem.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size))
             }
         }
-        guard bound == 0, chmod(path, mode) == 0, !shouldListen || Darwin.listen(fd, 4) == 0 else {
+        guard bound == 0, chmod(path, mode) == 0, !shouldListen || POSIXSystem.listen(fd, 4) == 0 else {
             let code = errno
-            Darwin.close(fd)
+            POSIXSystem.close(fd)
             throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
         }
         return fd
@@ -220,7 +220,7 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         let session = InteractiveMCPClientSession(sessionToken: "test", clientName: "handshake-classification")
         do {
             let fd = try await session.test_performBootstrapHandshake(socketURL: socketURL, afterConnect: afterConnect)
-            Darwin.close(fd)
+            POSIXSystem.close(fd)
             return nil
         } catch let error as InteractiveSessionError {
             return error
@@ -234,7 +234,7 @@ final class MCPCLIConnectionFailureClassificationTests: XCTestCase {
         let session = InteractiveMCPClientSession(sessionToken: "test", clientName: "handshake-classification")
         do {
             let fd = try await session.test_performBootstrapHandshake(socketURL: socketURL)
-            Darwin.close(fd)
+            POSIXSystem.close(fd)
             XCTFail("\(label) must be rejected")
         } catch let error as MCPBootstrapDirectory.DirectoryError {
             XCTAssertFalse(error.isMissing, label)

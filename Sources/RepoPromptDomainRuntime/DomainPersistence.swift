@@ -2406,7 +2406,7 @@ package enum DomainPersistenceLock {
             case externalReload
         }
 
-        private static let armed = OSAllocatedUnfairLock<Set<Site>>(initialState: [])
+        private static let armed = DomainLockedState<Set<Site>>(initialState: [])
 
         package static func arm(_ sites: Set<Site>) {
             armed.withLock { $0 = sites }

@@ -5,8 +5,9 @@ Usage: python3 Scripts/linux_headless_smoke.py --binary <path-to-repoprompt-mcp>
 
 Creates a throwaway repo and isolated headless profile, then exercises real MCP
 initialization, repository reads, search, parsing, selected context, explicit
-mutation consent, edits, restart persistence and clean EOF shutdown. Also checks
-the terminal CLI modes and rejects outside-root paths and deleted-image decoys.
+mutation and provider consent, a manually supplied review, edits, restart
+persistence and clean EOF shutdown. Also checks the terminal CLI modes and
+rejects outside-root paths and deleted-image decoys.
 Exits non-zero at the first failure. Python stdlib only.
 """
 
@@ -17,6 +18,7 @@ import os
 import pty
 import queue
 import select
+import shlex
 import signal
 import shutil
 import subprocess
@@ -146,6 +148,8 @@ def policy_grant(binary, env, fingerprint, root):
         proc = subprocess.Popen(
             [binary, "policy", "grant", "--principal-fingerprint", fingerprint,
              "--operation", "file_actions.create", "--operation", "apply_edits.*",
+             "--operation", "context_builder.ai_cost",
+             "--operation", "context_builder.external_process",
              "--root", root, "--expires-in", "600"],
             stdin=slave, stderr=slave, stdout=subprocess.PIPE, env=env,
             start_new_session=True,
@@ -198,6 +202,16 @@ def run_smoke(binary, base):
     env = headless_env(base)
     repo = env["REPOPROMPT_MCP_WORKING_DIRS"]
     hello, created = os.path.join(repo, "hello.txt"), os.path.join(repo, "new.txt")
+    provider_log = os.path.join(base, "provider-input.txt")
+    provider = os.path.join(base, "codex-stub")
+    with open(provider, "w") as handle:
+        handle.write(
+            "#!/bin/sh\n"
+            f"/bin/cat >> {shlex.quote(provider_log)}\n"
+            "printf '%s\\n' '{\"type\":\"message\",\"text\":\"review completed\"}'\n"
+        )
+    os.chmod(provider, 0o700)
+    env["REPOPROMPT_CODEX_COMMAND"] = provider
     with open(hello, "w") as handle:
         handle.write("hello linux\n")
     with open(os.path.join(repo, "example.py"), "w") as handle:
@@ -218,6 +232,7 @@ def run_smoke(binary, base):
 
     is_error, text = server.call_tool("read_file", {"path": hello})
     require("read_file", not is_error and "hello linux" in text, text[:200])
+    review_prompt = "Review this explicitly supplied file context:\n" + text
 
     is_error, text = server.call_tool("get_file_tree", {"type": "files"})
     require("file tree", not is_error and "example.py" in text, text[:300])
@@ -244,8 +259,21 @@ def run_smoke(binary, base):
             is_error and "no active grant covers this operation" in text
             and not os.path.exists(created), text[:200])
 
+    review = {"instructions": review_prompt, "response_type": "review"}
+    is_error, text = server.call_tool("context_builder", review)
+    require("review denied without provider grant",
+            is_error and "no active grant covers this operation" in text
+            and not os.path.exists(provider_log), text[:300])
+
     rc, out, prompt = policy_grant(binary, env, driver_fingerprint(), repo)
     require("policy grant", rc == 0 and "stored at policy revision" in out, f"exit={rc} out={out!r} tty={prompt!r}")
+
+    is_error, text = server.call_tool("context_builder", review)
+    require("manual-context review", not is_error and "review completed" in text, text[:300])
+    with open(provider_log, "rb") as handle:
+        delivered_prompt = handle.read()
+    require("review receives supplied context", delivered_prompt == review_prompt.encode("utf-8"),
+            repr(delivered_prompt[:300]))
 
     is_error, text = server.call_tool("file_actions", create)
     require("create allowed after grant", not is_error and os.path.isfile(created), text[:200])
@@ -254,6 +282,20 @@ def run_smoke(binary, base):
     with open(hello) as handle:
         edited = handle.read()
     require("apply_edits allowed after grant", not is_error and "hello granted" in edited, text[:200])
+
+    example = os.path.join(repo, "example.py")
+    is_error, text = server.call_tool("apply_edits", {
+        "path": example, "search": "return 'hello linux'", "replace": "return 'hello reviewed'"
+    })
+    with open(example, encoding="utf-8") as handle:
+        edited_example = handle.read()
+    require("scripted fixture edit after review",
+            not is_error and edited_example == "def linux_port_smoke():\n    return 'hello reviewed'\n",
+            text[:300])
+    build_env = dict(env, PYTHONPYCACHEPREFIX=os.path.join(base, "pycache"))
+    result = subprocess.run([sys.executable, "-m", "py_compile", example], capture_output=True,
+                            text=True, env=build_env, timeout=TIMEOUT_SECONDS)
+    require("compile edited Python fixture", result.returncode == 0, result.stderr[-1000:])
 
     rc = server.close()
     require("stdin EOF exits cleanly", rc == 0, f"exit={rc}")

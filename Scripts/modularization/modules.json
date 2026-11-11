@@ -65,12 +65,14 @@
       ]
     },
     "RepoPromptClaudeProvider": {
+      "platforms": ["macos"],
       "source_root": "Sources/RepoPromptClaudeProvider",
       "allowed_dependencies": ["RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation", "RepoPromptProcess", "RepoPromptProviderQuota"],
       "test_target": "RepoPromptClaudeProviderTests",
       "app_free_tests": true
     },
     "RepoPromptClaudeProviderTests": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptClaudeProviderTests",
       "allowed_dependencies": ["RepoPromptClaudeProvider", "RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptProcess"]
     },
@@ -85,32 +87,38 @@
       "allowed_dependencies": ["RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime"]
     },
     "RepoPromptHTTPProviders": {
+      "platforms": ["macos"],
       "source_root": "Sources/RepoPromptHTTPProviders",
       "allowed_dependencies": ["RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation"],
       "test_target": "RepoPromptHTTPProvidersTests",
       "app_free_tests": true
     },
     "RepoPromptHTTPProvidersTests": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptHTTPProvidersTests",
       "allowed_dependencies": ["RepoPromptHTTPProviders", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation"]
     },
     "RepoPromptCodexProvider": {
+      "platforms": ["macos"],
       "source_root": "Sources/RepoPromptCodexProvider",
       "allowed_dependencies": ["RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptMCPCore", "RepoPromptProcess", "RepoPromptProviderQuota", "RepoPromptShared", "RepoPromptAgentProviderContracts", "RepoPromptFoundation"],
       "test_target": "RepoPromptCodexProviderTests",
       "app_free_tests": true
     },
     "RepoPromptCodexProviderTests": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptCodexProviderTests",
       "allowed_dependencies": ["RepoPromptCodexProvider", "RepoPromptAIContracts", "RepoPromptShared", "RepoPromptDomainRuntime", "RepoPromptProcess"]
     },
     "RepoPromptACPProviders": {
+      "platforms": ["macos"],
       "source_root": "Sources/RepoPromptACPProviders",
       "allowed_dependencies": ["RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFoundation", "RepoPromptMCPCore", "RepoPromptProcess"],
       "test_target": "RepoPromptACPProvidersTests",
       "app_free_tests": true
     },
     "RepoPromptACPProvidersTests": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptACPProvidersTests",
       "allowed_dependencies": ["RepoPromptACPProviders", "RepoPromptAgentProviderContracts", "RepoPromptAIContracts", "RepoPromptDomainRuntime", "RepoPromptFileSystem", "RepoPromptFoundation", "RepoPromptProcess"]
     },
@@ -410,6 +418,7 @@
       ]
     },
     "RepoPromptWorkspaceContext": {
+      "platforms": ["macos"],
       "source_root": "Sources/RepoPromptWorkspaceContext",
       "allowed_dependencies": [
         "RepoPromptC",
@@ -429,6 +438,7 @@
       "app_free_tests": true
     },
     "RepoPromptWorkspaceContextTestSupport": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptWorkspaceContextTestSupport",
       "allowed_dependencies": [
         "RepoPromptWorkspaceContext",
@@ -440,6 +450,7 @@
       ]
     },
     "RepoPromptWorkspaceContextTests": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptWorkspaceContextTests",
       "allowed_dependencies": [
         "RepoPromptWorkspaceContext",
@@ -452,6 +463,7 @@
       ]
     },
     "RepoPromptMCPServer": {
+      "platforms": ["macos"],
       "source_root": "Sources/RepoPromptMCPServer",
       "allowed_dependencies": [
         "RepoPromptDomainRuntime",
@@ -462,6 +474,7 @@
       "app_free_tests": true
     },
     "RepoPromptMCPServerTests": {
+      "platforms": ["macos"],
       "source_root": "Tests/RepoPromptMCPServerTests",
       "allowed_dependencies": [
         "RepoPromptMCPServer",

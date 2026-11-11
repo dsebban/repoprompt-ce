@@ -4,8 +4,8 @@ import XCTest
 
 final class OracleGroupRuntimeTests: XCTestCase {
     func testFinalLaneDurationsExcludePreparationProgressAndPublicationAcrossBackwardWallClock() async throws {
-        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
-        let wall = OSAllocatedUnfairLock(initialState: Date(timeIntervalSince1970: 1000))
+        let clock = DomainTestLockedState(initialState: ContinuousClock.now)
+        let wall = DomainTestLockedState(initialState: Date(timeIntervalSince1970: 1000))
         let fixture = try makeRuntime(
             now: { wall.withLock { $0 } },
             elapsedNow: { clock.withLock { $0 } },
@@ -239,7 +239,7 @@ final class OracleGroupRuntimeTests: XCTestCase {
     }
 
     func testContinuationRecoversInterruptedTurn() async throws {
-        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
+        let clock = DomainTestLockedState(initialState: ContinuousClock.now)
         let fixture = try makeRuntime(elapsedNow: { clock.withLock { $0 } }, mutationObserver: { phase in
             if case .journalPersisted = phase {
                 clock.withLock { $0 = $0.advanced(by: .seconds(10)) }

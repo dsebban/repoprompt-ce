@@ -401,7 +401,10 @@ runner, checks installation, then repeats the runtime smoke against the installe
 executable from outside the checkout. The smoke covers real file reads, search,
 CodeMaps, selection and prompt persistence, context snapshots, mutation consent,
 root confinement, terminal CLI modes and rejection of detached one-shot agent
-starts. The Swift gate covers Linux portability and the Process, MCP transport
+starts. It also exercises a one-shot review with manually supplied file context
+and a fake provider, checks provider consent, then makes a scripted edit and
+compiles a Python fixture. This does not test autonomous discovery or a live
+provider. The Swift gate covers Linux portability and the Process, MCP transport
 and VCS suites, plus protected mutation, file-reader, Oracle runtime/persistence
 and parser tests. This selection does not assert that every legacy test suite
 has Linux coverage. Finally, the archive runtime job checks actual ELF dependencies,

@@ -22,26 +22,24 @@ package class OptimalLineFinderUtility {
         let queue = DispatchQueue(label: "com.repoprompt.linesearch", attributes: .concurrent)
         let group = DispatchGroup()
 
-        var bestScore = -1
-        var bestLine = startLine
-        let lock = NSLock()
+        let best = DomainLockedState(initialState: (score: -1, line: startLine))
 
         for line in searchRange {
             group.enter()
             queue.async(group: group) {
                 let score = self.scoreMatch(diffChunk: change.diffChunk, in: content, startingAt: line)
-                lock.lock()
-                if score > bestScore {
-                    bestScore = score
-                    bestLine = line
+                best.withLock { best in
+                    if score > best.score {
+                        best = (score, line)
+                    }
                 }
-                lock.unlock()
                 group.leave()
             }
         }
 
         group.wait()
-        return bestScore > -1 ? bestLine : startLine // Return original line if no better match found
+        let result = best.withLock { $0 }
+        return result.score > -1 ? result.line : startLine // Return original line if no better match found
     }
 
     private static func scoreMatch(diffChunk: DiffChunk, in content: [String], startingAt line: Int) -> Int {
@@ -76,21 +74,19 @@ package class OptimalLineFinderUtility {
         let queue = DispatchQueue(label: "com.repoprompt.optimallinefinder", attributes: .concurrent)
         let group = DispatchGroup()
 
-        let result = Array(repeating: NSLock(), count: changes.count)
-        var optimalLines = [UUID: Int]()
+        // One lock for the shared dictionary: per-change locks did not exclude concurrent writers.
+        let optimalLines = DomainLockedState<[UUID: Int]>(initialState: [:])
 
-        for (index, change) in changes.enumerated() {
+        for change in changes {
             group.enter()
             queue.async(group: group) {
                 let optimalLine = self.findOptimalLine(for: change, in: content, around: change.startLine, searchRadius: searchRadius)
-                result[index].lock()
-                optimalLines[change.id] = optimalLine
-                result[index].unlock()
+                optimalLines.withLock { $0[change.id] = optimalLine }
                 group.leave()
             }
         }
 
         group.wait()
-        return optimalLines
+        return optimalLines.withLock { $0 }
     }
 }

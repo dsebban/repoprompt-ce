@@ -1,11 +1,10 @@
 import Foundation
-import os
 @testable import RepoPromptDomainRuntime
 import XCTest
 
 final class OracleGroupCoordinatorTests: XCTestCase {
     func testFinalLaneDurationsExcludeProgressAndFreezeBeforeFailureNormalization() async throws {
-        let clock = OSAllocatedUnfairLock(initialState: ContinuousClock.now)
+        let clock = DomainTestLockedState(initialState: ContinuousClock.now)
         let release = TimingEntryGate()
         let replyID = UUID()
         let fixture = try makeFixture(count: 2) { lane in
