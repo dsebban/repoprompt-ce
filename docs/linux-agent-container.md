@@ -12,7 +12,9 @@ server, but RepoPrompt never starts them. For what the headless backend supports
 see [Linux feature boundaries](linux.md#feature-boundaries).
 
 You need Docker (or a Docker-compatible CLI set in `DOCKER`), `bash`, `git` and
-`python3` on the host. Every command has help: `Scripts/linux_agent_container.sh --help`.
+`python3` on the host. Building the image needs BuildKit: Docker Desktop includes
+it, and Docker Engine needs the buildx plugin (`docker-buildx-plugin` from Docker's
+package repository). Every command has help: `Scripts/linux_agent_container.sh --help`.
 
 ## First setup
 
@@ -431,6 +433,8 @@ export RPCE_AGENT_EXTRA_CA=~/corp-root.pem   # default for every command
   inside the container, can mean the Docker VM disk is full: check
   `docker system df`.
 - `No such image`: build first, or set `RPCE_AGENT_IMAGE` to the tag you built.
+- `the --mount option requires BuildKit` during `build`: install the buildx
+  plugin (`docker-buildx-plugin`); without it Docker uses the legacy builder.
 - `curl: (60)` or certificate errors from every CLI: you are behind a
   TLS-inspecting proxy; see [Proxy and corporate CA](#proxy-and-corporate-ca).
 - `host-auth: could not write the ... credential`: the import failed (often a
