@@ -55,7 +55,8 @@ final class AgentSessionRunStartRuntime {
             }
         }
         guard let owner = scope, owner.sessions[session.tabID] === session,
-              !owner.isRetiring, !owner.hasReleasedWriterClaims else { return nil }
+              !owner.isRetiring, !owner.hasReleasedWriterClaims,
+              let originalMembership = owner.membership(of: session) else { return nil }
         defer { withExtendedLifetime(owner) {} }
         let tabID = session.tabID
         var writer: AgentSessionRuntimeStore.Writer?
@@ -85,7 +86,10 @@ final class AgentSessionRunStartRuntime {
             guard owner.sessions[tabID] === session, !owner.isRetiring, !owner.hasReleasedWriterClaims,
                   resourcesAreCurrent() else { return false }
             if let writer { return writer.isCurrent }
-            return session.currentRestorationBindingToken == originalBindingToken
+            // A blank draft has no persistent Writer yet. Its slot still has exact provenance:
+            // preparation must not adopt a remove/re-add of the same unbound object.
+            return originalMembership.permitsBindingPreparation
+                && session.currentRestorationBindingToken == originalBindingToken
         }
         if let writer, let originalWorkspaceID, originalWorkspaceID != writer.identity.workspaceID {
             startOutcome?.recordStartFailure(message: "Workspace resources do not belong to the session's runtime writer.")
@@ -260,9 +264,15 @@ final class AgentSessionRunStartRuntime {
                 return nil
             }
         }
+        func inputIsCurrent() -> Bool {
+            command.isCurrent && resourcesAreCurrent() && stopFence.permitsStart(of: session) && periodicStartIsCurrent()
+        }
+        func runInputIsCurrent() -> Bool {
+            periodicStartIsCurrent() && stopFence.permitsStart(of: session) && command.isCurrent && resourcesAreCurrent()
+                && session.operationAdmissionFailureMessage == nil
+        }
         guard await owner.mcp.prepareWaitTrackingForRunStart(session: session, stopFence: stopFence) else { return nil }
-        guard periodicStartIsCurrent(), stopFence.permitsStart(of: session), command.isCurrent, resourcesAreCurrent(),
-              session.operationAdmissionFailureMessage == nil else { return nil }
+        guard runInputIsCurrent() else { return nil }
         // A lane update has no user-authored base instruction, so every augmentation this applies —
         // skill context, tagged-file expansion, attachment rendering, staged handoff — is user-only
         // work with nothing to act on. Skipping it is what keeps the turn's only new provider input
@@ -270,7 +280,7 @@ final class AgentSessionRunStartRuntime {
         let switchMessages: (user: String, initial: String)?
         if session.pendingHandoff.providerSwitchDelivery != nil {
             switchMessages = await links.prepareProviderSwitchHandoverForSend(providerSwitchPreparation, session: session, stopFence: stopFence)
-            guard command.isCurrent, resourcesAreCurrent(), stopFence.permitsStart(of: session), periodicStartIsCurrent() else { return nil }
+            guard inputIsCurrent() else { return nil }
             guard switchMessages != nil else {
                 let message = environment.providerSwitchRefusal(session)
                 startOutcome?.recordStartFailure(message: message)
@@ -278,9 +288,6 @@ final class AgentSessionRunStartRuntime {
             }
         } else {
             switchMessages = nil
-        }
-        func inputIsCurrent() -> Bool {
-            command.isCurrent && resourcesAreCurrent() && stopFence.permitsStart(of: session) && periodicStartIsCurrent()
         }
         let augmentedInitialMessage = if let switchMessages { switchMessages.user } else if directStartOptions.skipsUserAugmentation {
             initialMessage
@@ -293,7 +300,7 @@ final class AgentSessionRunStartRuntime {
                 skipsSlashExpansion: directStartOptions.skipsSlashExpansion, isCurrent: inputIsCurrent
             )
         }
-        guard command.isCurrent, resourcesAreCurrent(), stopFence.permitsStart(of: session), periodicStartIsCurrent() else { return nil }
+        guard inputIsCurrent() else { return nil }
         // A provider control command is exactly its fixed native text: prepending initial-thread
         // context would make it ordinary prose the provider no longer recognizes as a command.
         let initialMessageForRun = if let switchMessages { switchMessages.initial } else { directStartOptions.providerControlCommand != nil
@@ -304,8 +311,7 @@ final class AgentSessionRunStartRuntime {
                 input: { environment.initialThreadInput(session) }, isCurrent: inputIsCurrent
             )
         }
-        guard periodicStartIsCurrent(), stopFence.permitsStart(of: session), command.isCurrent, resourcesAreCurrent(),
-              session.operationAdmissionFailureMessage == nil else { return nil }
+        guard runInputIsCurrent() else { return nil }
         let preparedCodexFallbackContext = codexFallbackContext.map { context in
             AgentTabSession.CodexFallbackSubmissionContext(
                 queueID: context.queueID,
@@ -323,12 +329,12 @@ final class AgentSessionRunStartRuntime {
 
         #if DEBUG
             if await environment.test_startOverride?(session, augmentedInitialMessage, initialMessageForRun) == true {
-                guard command.isCurrent, resourcesAreCurrent(), stopFence.permitsStart(of: session), periodicStartIsCurrent() else { return nil }
+                guard inputIsCurrent() else { return nil }
                 startOutcome?.recordAccepted()
                 return nil
             }
         #endif
-        guard command.isCurrent, resourcesAreCurrent(), stopFence.permitsStart(of: session), periodicStartIsCurrent() else { return nil }
+        guard inputIsCurrent() else { return nil }
         guard preparedClaudeEvents?.listener.isCurrent() != false else {
             recordClaudeStartRefusal()
             return nil
@@ -338,6 +344,7 @@ final class AgentSessionRunStartRuntime {
         return await environment.composition().startRun(
             tabID: tabID,
             session: session,
+            origin: command,
             initialUserMessage: augmentedInitialMessage,
             initialMessageForRun: initialMessageForRun,
             attachments: attachments,

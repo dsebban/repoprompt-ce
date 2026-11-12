@@ -81,7 +81,21 @@ extension AgentSessionMCPRuntime {
         }
         // Even an already-enabled resource needs an exact owner. Its value may be the
         // predecessor's override awaiting release, not the user's underlying preference.
-        let autoEditOverride = await resources.approvalStore.prepareAutoEditOverride(for: resources.approvalScope)
+        let autoEditOverride: ApplyEditsApprovalStore.AutoEditOverride
+        if let interactions = writer.scope.installedInteractions,
+           interactions.approvalStore === resources.approvalStore,
+           interactions.approvalScope(for: session) == resources.approvalScope
+        {
+            guard let prepared = await interactions.prepareControlAutoEditOverride(command: activationCommand) else {
+                await AgentRunSessionStore.cleanup(registration: registration)
+                throw MCPError.invalidParams("The requested agent session writer changed during MCP control activation.")
+            }
+            autoEditOverride = prepared
+        } else {
+            // Explicit resources without an installed interaction composition retain their
+            // existing resource-only preparation path.
+            autoEditOverride = await resources.approvalStore.prepareAutoEditOverride(for: resources.approvalScope)
+        }
         let priorAutoEditEnabled = autoEditOverride.restoreValue
         do {
             try requireActivationOwner()
@@ -126,6 +140,15 @@ extension AgentSessionMCPRuntime {
         session.mcpControlContext = activatedContext
         // Publication transfers ownership from the app-owned admission to this exact control context.
         activationOwnership = .installed(context: activatedContext, generation: activationGeneration)
+        func requireInstalledActivation() throws {
+            guard cancellation.permitsPublication,
+                  writer.scope.sessions[tabID] === session,
+                  session.currentRestorationBindingToken == activationBindingToken,
+                  session.mcpControlActivationGeneration == activationGeneration,
+                  session.mcpControlContext == activatedContext
+            else { throw MCPError.invalidParams("The MCP control activation was superseded during setup.") }
+            try requireActivationOwner()
+        }
         func releaseFailedInstalledActivation() async {
             // The exact provisional write belongs to this object even after removal or
             // claim loss. A copied context in its former tab slot is not a successor.
@@ -161,16 +184,7 @@ extension AgentSessionMCPRuntime {
         #if DEBUG
             await test_afterMCPControlSetupAwait?(session)
         #endif
-        guard cancellation.permitsPublication,
-              writer.scope.sessions[tabID] === session,
-              session.currentRestorationBindingToken == activationBindingToken,
-              session.mcpControlActivationGeneration == activationGeneration,
-              session.mcpControlContext == activatedContext
-        else {
-            await releaseFailedInstalledActivation()
-            throw MCPError.invalidParams("The MCP control activation was superseded during setup.")
-        }
-        do { try requireActivationOwner() } catch {
+        do { try requireInstalledActivation() } catch {
             await releaseFailedInstalledActivation()
             throw error
         }
@@ -207,16 +221,7 @@ extension AgentSessionMCPRuntime {
         #if DEBUG
             await test_afterMCPControlSetupAwait?(session)
         #endif
-        guard cancellation.permitsPublication,
-              writer.scope.sessions[tabID] === session,
-              session.currentRestorationBindingToken == activationBindingToken,
-              session.mcpControlActivationGeneration == activationGeneration,
-              session.mcpControlContext == activatedContext
-        else {
-            await releaseFailedInstalledActivation()
-            throw MCPError.invalidParams("The MCP control activation was superseded during setup.")
-        }
-        do { try requireActivationOwner() } catch {
+        do { try requireInstalledActivation() } catch {
             await releaseFailedInstalledActivation()
             throw error
         }

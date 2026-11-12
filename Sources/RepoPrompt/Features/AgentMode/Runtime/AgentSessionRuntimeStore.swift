@@ -67,6 +67,32 @@ final class AgentSessionRuntimeStore {
         }
     }
 
+    /// Persistent tasks remember their admitted writer without retaining the scope through its
+    /// session/task graph. This is not new admission and cannot adopt a replacement writer.
+    @MainActor
+    struct WriterReceipt {
+        enum Disposition {
+            case current, ownedSuspended, claimLost
+        }
+
+        private weak var scope: Scope?
+        private let identity: WriterIdentity
+
+        init?(_ command: Command) {
+            guard case .restored = command.requirement else { return nil }
+            scope = command.writer.scope
+            identity = command.identity
+        }
+
+        func disposition(for session: AgentTabSession) -> Disposition {
+            guard let writer = scope?.originatingWriter(identity: identity, session: session) else {
+                return .claimLost
+            }
+            if case .success = writer.admitCommand(.restored) { return .current }
+            return .ownedSuspended
+        }
+    }
+
     /// Exact-object capability. Holding one keeps its scope alive across suspension; it does
     /// not grant consent, bypass restoration, or survive replacement/rebinding in the store.
     @MainActor
@@ -122,12 +148,23 @@ final class AgentSessionRuntimeStore {
     /// Provenance for binding preparation, including an unbound local draft. This is not a
     /// restored command or permission to save. Keeping it across an await cannot adopt a
     /// remove/re-add of the same object, even when its persistent binding is unchanged.
+    /// Reference-free provenance for long-lived projections. This is not command authority.
+    struct MembershipIdentity: Equatable {
+        fileprivate let scopeID: UUID
+        fileprivate let incarnationID: UUID
+        fileprivate let binding: AgentPersistentSessionBindingIdentity?
+    }
+
     @MainActor
     struct Membership {
         fileprivate let scope: Scope
         fileprivate let session: AgentTabSession
         fileprivate let incarnationID: UUID
         fileprivate let binding: AgentPersistentSessionBindingIdentity?
+
+        var identity: MembershipIdentity {
+            .init(scopeID: scope.id, incarnationID: incarnationID, binding: binding)
+        }
 
         var isCurrent: Bool {
             scope.holdsSlot(session: session, incarnationID: incarnationID, binding: binding)
@@ -463,6 +500,10 @@ final class AgentSessionRuntimeStore {
             !hasReleasedWriterClaims && sessions[session.tabID] === session
                 && liveClaimByTabID[session.tabID]?.incarnationID == incarnationID
                 && session.persistentSessionBindingIdentity == binding
+        }
+
+        func holds(_ identity: MembershipIdentity, for session: AgentTabSession) -> Bool {
+            identity.scopeID == id && holdsSlot(session: session, incarnationID: identity.incarnationID, binding: identity.binding)
         }
 
         func membership(of session: AgentTabSession) -> Membership? {

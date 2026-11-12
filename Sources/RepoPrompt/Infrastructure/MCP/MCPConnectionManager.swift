@@ -508,7 +508,7 @@ final class MCPBecomeOverseerActivationProof: @unchecked Sendable {
               window.mcpServer.hasCurrentRunRouteMapping(
                   runID: routeToken.runID, connectionID: routeToken.connectionID, expectedTabID: endpoint.tabID
               ),
-              window.agentModeViewModel.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
+              window.agentModeViewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: endpoint.tabID) == endpoint
         else {
             valid = false
             return false
@@ -3002,58 +3002,53 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         else {
             return nil
         }
+        // The bridge's two predicates only forward to this exact canonical authority.
+        // Read it directly: no presentation/MainActor state participates in membership.
+        let linkAuthority = AgentSessionLinkRuntimeBridge.sharedLinkAuthority
         let hasAnyActiveLink: Bool
         let hasActiveOutboundLink: Bool
         #if DEBUG
             if let debugAnyActiveSessionLinkEndpointsForTesting {
                 hasAnyActiveLink = debugAnyActiveSessionLinkEndpointsForTesting.contains(routeToken.observerEndpoint)
             } else {
-                hasAnyActiveLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveLink(
+                hasAnyActiveLink = await linkAuthority.hasActiveLink(
                     endpoint: routeToken.observerEndpoint
                 )
             }
             if let debugOutboundSessionLinkEndpointsForTesting {
                 hasActiveOutboundLink = debugOutboundSessionLinkEndpointsForTesting.contains(routeToken.observerEndpoint)
             } else {
-                hasActiveOutboundLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveOutboundLink(
+                hasActiveOutboundLink = await linkAuthority.hasActiveOutboundLink(
                     observerEndpoint: routeToken.observerEndpoint
                 )
             }
         #else
-            hasAnyActiveLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveLink(
+            hasAnyActiveLink = await linkAuthority.hasActiveLink(
                 endpoint: routeToken.observerEndpoint
             )
-            hasActiveOutboundLink = await AgentSessionLinkRuntimeBridge.shared.hasActiveOutboundLink(
+            hasActiveOutboundLink = await linkAuthority.hasActiveOutboundLink(
                 observerEndpoint: routeToken.observerEndpoint
             )
         #endif
-        let bootstrapState = await AgentSessionLinkRuntimeBridge.shared.overseerBootstrapState(for: routeToken.observerEndpoint)
-        // One main-actor read, before route revalidation: no new suspension after the fences below.
-        let (oversightEnabled, globalOverseer) = await MainActor.run {
-            (
+        // One immutable, request-local sample from the owning actor; never a capability cache.
+        // Scope discovery is read-only. Collecting it alongside the other role facts removes
+        // an intermediate route fence, not the final fence after all owner reads below.
+        let (bootstrapState, oversightEnabled, globalOverseer, holdsLiveScope) = await MainActor.run {
+            let bridge = AgentSessionLinkRuntimeBridge.shared
+            return (
+                bridge.overseerBootstrapState(for: routeToken.observerEndpoint),
                 ToolAvailabilityStore.shared.isEnabled(MCPWindowToolName.agentSessionLink),
-                OverseerAuthorizationEngine.current.listsFullOversightSurface
+                OverseerAuthorizationEngine.current.listsFullOversightSurface,
+                bridge.delegationScopes.hasLiveScopeForCatalog(grantedTo: routeToken.observerEndpoint.sessionID)
             )
         }
+        // Still qualify the complete sample against the exact current run/endpoint and bootstrap
+        // incarnation after suspension. A tab rebind or activation change must fail closed.
         guard let revalidatedRouteToken = await (
             modelOnly
                 ? cachedModelCatalogRouteToken(connectionID: connectionID)
                 : authoritativeRunCatalogRouteToken(runID: routeToken.runID, windowID: runState.windowID, tabID: tabID)
         ), revalidatedRouteToken == routeToken,
-        await AgentSessionLinkRuntimeBridge.shared.overseerBootstrapState(for: routeToken.observerEndpoint) == bootstrapState else {
-            return nil
-        }
-        // Scopes bind durable session identity; routing still binds the exact run endpoint.
-        let callerSessionID = routeToken.observerEndpoint.sessionID
-        let holdsLiveScope = await MainActor.run {
-            AgentSessionLinkRuntimeBridge.shared.delegationScopes.hasLiveScopeForCatalog(grantedTo: callerSessionID)
-        }
-        // Scope lookup suspends too: a tab rebind must not publish the old run's grants.
-        guard let scopeRevalidatedRouteToken = await (
-            modelOnly
-                ? cachedModelCatalogRouteToken(connectionID: connectionID)
-                : authoritativeRunCatalogRouteToken(runID: routeToken.runID, windowID: runState.windowID, tabID: tabID)
-        ), scopeRevalidatedRouteToken == routeToken,
         await AgentSessionLinkRuntimeBridge.shared.overseerBootstrapState(for: routeToken.observerEndpoint) == bootstrapState else {
             return nil
         }
@@ -3239,6 +3234,8 @@ actor ServerNetworkManager: MCPServerConnectionHost {
         guard let runID else { return }
 
         let initialRevision = runCatalogObservationByRunID[runID]?.projectionRevision ?? 0
+        // Advertisement crossed other owners above. This fresh read is intentional: reusing its
+        // initial role sample could qualify a catalog after revocation, rebind or activation change.
         let finalSnapshot = await liveSessionLinkGrantSnapshot(connectionID: connectionID)
         let currentOfferInputs: MCPRunCatalogOfferInputs? = if let route = finalSnapshot?.routeToken {
             await runCatalogOfferInputs(route: route)
@@ -4165,7 +4162,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                       connectionID: connectionID,
                       expectedTabID: tabID
                   ),
-                  let endpoint = window.agentModeViewModel.agentSessionLinkObserverEndpoint(tabID: tabID)
+                  let endpoint = window.agentModeViewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: tabID)
             else { return nil }
             return (connectionID, endpoint)
         }
@@ -4188,7 +4185,7 @@ actor ServerNetworkManager: MCPServerConnectionHost {
                       expectedTabID: tabID
                   )
             else { return false }
-            return window.agentModeViewModel.agentSessionLinkObserverEndpoint(tabID: tabID) == endpoint
+            return window.agentModeViewModel.linkExecutionRuntime.agentSessionLinkObserverEndpoint(tabID: tabID) == endpoint
         }
         guard mappingIsStillCurrent,
               let revalidatedActorSnapshot = authoritativeRunRouteActorSnapshot(
