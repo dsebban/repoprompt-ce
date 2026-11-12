@@ -63,11 +63,11 @@ package enum DirectHeadlessChildBridge {
 
         try await withThrowingTaskGroup(of: PumpDirection.self) { group in
             group.addTask {
-                try pump(from: STDIN_FILENO, to: fd)
+                try await pump(from: STDIN_FILENO, to: fd)
                 return .upstream
             }
             group.addTask {
-                try pump(from: fd, to: STDOUT_FILENO)
+                try await pump(from: fd, to: STDOUT_FILENO)
                 return .downstream
             }
             while let completed = try await group.next() {
@@ -139,15 +139,15 @@ package enum DirectHeadlessChildBridge {
         return fd
     }
 
-    private static func pump(from source: Int32, to destination: Int32) throws {
+    private static func pump(from source: Int32, to destination: Int32) async throws {
         var buffer = [UInt8](repeating: 0, count: 16 * 1024)
         while !Task.isCancelled {
-            var descriptor = pollfd(fd: source, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
-            let polled = POSIXSystem.poll(&descriptor, 1, 100)
+            let descriptor = pollfd(fd: source, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
+            let (polled, pollErrno) = await POSIXSystem.pollOffPool(descriptor, timeout: 100)
             if polled == 0 { continue }
             if polled < 0 {
-                if errno == EINTR { continue }
-                throw BridgeError.read(errno: errno)
+                if pollErrno == EINTR { continue }
+                throw BridgeError.read(errno: pollErrno)
             }
             let count = POSIXSystem.read(source, &buffer, buffer.count)
             if count == 0 { return }

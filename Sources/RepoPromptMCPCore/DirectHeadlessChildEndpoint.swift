@@ -163,11 +163,11 @@ actor DirectHeadlessChildEndpoint {
         handler: @escaping ClientHandler
     ) async {
         while !Task.isCancelled {
-            var descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
-            let polled = POSIXSystem.poll(&descriptor, 1, 100)
+            let descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
+            let (polled, pollErrno) = await POSIXSystem.pollOffPool(descriptor, timeout: 100)
             if polled == 0 { continue }
             if polled < 0 {
-                if errno == EINTR { continue }
+                if pollErrno == EINTR { continue }
                 return
             }
             var address = sockaddr_un()
@@ -196,7 +196,7 @@ actor DirectHeadlessChildEndpoint {
             defer { POSIXSystem.close(fd) }
             do {
                 guard let peerPID = Self.peerPID(fd: fd) else { throw EndpointError.invalidHandshake }
-                let handshake = try Self.readHandshake(fd: fd)
+                let handshake = try await Self.readHandshake(fd: fd)
                 await handler(fd, peerPID, handshake)
             } catch {
                 logger.warning("Rejected private child endpoint connection", metadata: ["error": "\(error)"])
@@ -210,17 +210,17 @@ actor DirectHeadlessChildEndpoint {
         clientTasks.removeValue(forKey: id)
     }
 
-    private nonisolated static func readHandshake(fd: Int32) throws -> Handshake {
+    private nonisolated static func readHandshake(fd: Int32) async throws -> Handshake {
         let deadline = ContinuousClock().now.advanced(by: .seconds(5))
         var bytes: [UInt8] = []
         var byte: UInt8 = 0
         while ContinuousClock().now < deadline {
-            var descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
-            let polled = POSIXSystem.poll(&descriptor, 1, 100)
+            let descriptor = pollfd(fd: fd, events: Int16(POLLIN | POLLERR | POLLHUP), revents: 0)
+            let (polled, pollErrno) = await POSIXSystem.pollOffPool(descriptor, timeout: 100)
             if polled == 0 { continue }
             if polled < 0 {
-                if errno == EINTR { continue }
-                throw EndpointError.handshakeRead(errno: errno)
+                if pollErrno == EINTR { continue }
+                throw EndpointError.handshakeRead(errno: pollErrno)
             }
             let count = POSIXSystem.read(fd, &byte, 1)
             if count == 0 { throw EndpointError.invalidHandshake }

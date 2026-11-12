@@ -4,6 +4,7 @@ import RepoPromptC
 #else
     import Glibc
 #endif
+import Dispatch
 
 package enum POSIXSystem {
     package static var shutdownRead: Int32 {
@@ -138,6 +139,22 @@ package enum POSIXSystem {
         #else
             Glibc.poll(descriptors, nfds_t(count), timeout)
         #endif
+    }
+
+    /// Polls one descriptor without occupying a Swift concurrency-pool thread. That pool has
+    /// one thread per CPU, so a polling loop on it starves every other task on a one-CPU host.
+    /// Each call gets its own serial queue because serial queues target dispatch's
+    /// overcommitting root queue, which starts a thread on demand; concurrent queues share
+    /// the CPU-sized worker pool. Returns `poll`'s result and the `errno` it set, because
+    /// `errno` belongs to the polling thread.
+    package static func pollOffPool(_ descriptor: pollfd, timeout: Int32) async -> (result: Int32, errno: Int32) {
+        await withCheckedContinuation { continuation in
+            DispatchQueue(label: "com.repoprompt.posix.blocking-poll").async {
+                var descriptor = descriptor
+                let result = poll(&descriptor, 1, timeout)
+                continuation.resume(returning: (result, result < 0 ? errno : 0))
+            }
+        }
     }
 
     package static func bind(_ descriptor: Int32, _ address: UnsafePointer<sockaddr>, _ length: socklen_t) -> Int32 {

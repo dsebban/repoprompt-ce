@@ -7,6 +7,7 @@ import Foundation
 import Logging
 import MCP
 import RepoPromptDomainRuntime
+import RepoPromptShared
 
 actor MCPStdioServerTransport: Transport {
     enum TerminalError: Error, Equatable {
@@ -135,16 +136,16 @@ actor MCPStdioServerTransport: Transport {
                     terminalState.record(terminal, finishing: captured)
                     return
                 }
-                var descriptor = pollfd(fd: stdinFD, events: Int16(POLLIN | POLLHUP | POLLERR), revents: 0)
-                let pollResult = poll(&descriptor, 1, pollIntervalMilliseconds)
+                let descriptor = pollfd(fd: stdinFD, events: Int16(POLLIN | POLLHUP | POLLERR), revents: 0)
+                let (pollResult, pollErrno) = await POSIXSystem.pollOffPool(descriptor, timeout: pollIntervalMilliseconds)
                 if pollResult == 0 {
                     continue
                 }
                 if pollResult < 0 {
-                    if errno == EINTR {
+                    if pollErrno == EINTR {
                         continue
                     }
-                    let terminal = TerminalError.stdinPoll(errno: errno)
+                    let terminal = TerminalError.stdinPoll(errno: pollErrno)
                     terminalState.record(terminal, finishing: captured)
                     return
                 }
