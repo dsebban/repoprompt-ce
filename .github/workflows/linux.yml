@@ -74,6 +74,30 @@ jobs:
           binary="$(swift build -c release --show-bin-path)/repoprompt-mcp"
           python3 Scripts/linux_headless_smoke.py --binary "$binary"
 
+      - name: Exercise MCP with one reported CPU
+        run: |
+          # Swift runs async tasks on one thread per reported CPU. Reporting one CPU
+          # catches loops that hold that thread, which hang one-vCPU hosts.
+          shim="$(mktemp -d "$RUNNER_TEMP/one-cpu-XXXXXXXX")"
+          cat > "$shim/one_cpu.c" <<'EOF'
+          #define _GNU_SOURCE
+          #include <dlfcn.h>
+          #include <unistd.h>
+          long sysconf(int name) {
+              static long (*real)(int);
+              if (name == _SC_NPROCESSORS_ONLN || name == _SC_NPROCESSORS_CONF) return 1;
+              if (!real) real = (long (*)(int))dlsym(RTLD_NEXT, "sysconf");
+              return real(name);
+          }
+          int get_nprocs(void) { return 1; }
+          int get_nprocs_conf(void) { return 1; }
+          EOF
+          clang -shared -fPIC -O2 -o "$shim/one_cpu.so" "$shim/one_cpu.c" -ldl
+          binary="$(swift build -c release --show-bin-path)/repoprompt-mcp"
+          printf '#!/bin/sh\nLD_PRELOAD=%s exec %s "$@"\n' "$shim/one_cpu.so" "$binary" > "$shim/repoprompt-mcp"
+          chmod +x "$shim/repoprompt-mcp"
+          python3 Scripts/linux_headless_smoke.py --binary "$shim/repoprompt-mcp"
+
       - name: Verify Linux build tooling and installation behavior
         run: python3 -m unittest discover -s Scripts/tests -p 'test_*linux*.py'
 

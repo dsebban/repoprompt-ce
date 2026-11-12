@@ -488,13 +488,15 @@ CodeMaps, selection and prompt persistence, context snapshots, mutation consent,
 root confinement, terminal CLI modes and rejection of detached one-shot agent
 starts. It also exercises a one-shot review with manually supplied file context
 and a fake provider, checks provider consent, then makes a scripted edit and
-compiles a Python fixture. This does not test autonomous discovery or a live
-provider. The Swift gate covers Linux portability and the Process, MCP transport
-and VCS suites, plus protected mutation, file-reader, Oracle runtime/persistence
-and parser tests. This selection does not assert that every legacy test suite
-has Linux coverage. Finally, the archive runtime job checks actual ELF dependencies,
-verifies the bundled runtime license checksums and runs the same smoke without
-Swift installed. macOS build and app tests remain in the existing CI workflow.
+compiles a Python fixture. The smoke runs again with the engine seeing one CPU,
+which catches loops that hold Swift's async threads and hang one-vCPU hosts. This
+does not test autonomous discovery or a live provider. The Swift gate covers
+Linux portability and the Process, MCP transport and VCS suites, plus protected
+mutation, file-reader, Oracle runtime/persistence and parser tests. This
+selection does not assert that every legacy test suite has Linux coverage.
+Finally, the archive runtime job checks actual ELF dependencies, verifies the
+bundled runtime license checksums and runs the same smoke without Swift installed.
+macOS build and app tests remain in the existing CI workflow.
 
 The Swift image/version and native runner labels are documented in
 [Swift's Ubuntu download list](https://www.swift.org/install/linux/ubuntu/24_04/)
