@@ -921,6 +921,7 @@ print_matches \
 # promoted into the contributor-facing documentation set.
 allowed_tracked_docs=(
   "docs/linux.md"
+  "docs/linux-agent-container.md"
   "docs/architecture/actionable-macos-notifications.md"
   "docs/architecture/agent-orchestration-guidance.md"
   "docs/architecture/agent-session-oversight-auto-wake.md"

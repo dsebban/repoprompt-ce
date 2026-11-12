@@ -1,0 +1,69 @@
+# Fallback only. Scripts/linux_agent_container.sh build streams a context of
+# git-tracked files (build_context.py), which never contains untracked files and
+# does not use this file. This file applies only if someone runs
+# `docker build -f Scripts/linux_agent_container/Dockerfile .` from the repo
+# root, and pattern rules cannot exclude every possible untracked secret there.
+#
+# Allow-list: exclude everything, then include only what the image build reads.
+# Untracked files inside an included tree are still sent, so the deny rules at
+# the end drop dotfiles and credential-shaped names at any depth. Keep the deny
+# rules after the allow rules; the last matching rule wins.
+*
+
+# SwiftPM manifest and the source/test trees it declares.
+!Package.swift
+!Package.resolved
+!Packages/
+!Sources/
+!Tests/
+!Vendor/
+# Notices and documentation installed into the image.
+!LICENSE
+!THIRD_PARTY_NOTICES.md
+!ThirdPartyLicenses/
+!docs/linux.md
+# Image scripts and the bundled smoke test.
+!Scripts/linux_agent_container/
+!Scripts/linux_headless_smoke.py
+
+# Build output and VCS metadata inside included trees.
+**/.build
+**/.swiftpm
+**/.git
+**/node_modules
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+
+# Dotfiles and dot-directories at any depth (.env*, .claude/, .codex/,
+# .devin/, .config/, .aws/, .ssh/, .netrc, .npmrc, .pypirc, .git-credentials,
+# .envrc, ...). No tracked file inside the included trees needs one.
+**/.*
+
+# Credential-shaped names at any depth.
+**/*.env
+**/env.local
+**/auth.json
+**/credentials
+**/credentials.*
+**/*credentials*.json
+**/*credentials*.toml
+**/secrets
+**/secrets.*
+**/*.secret
+**/*.secrets
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/*.keystore
+**/*.kdbx
+**/*.tfvars
+**/*.tfstate
+**/id_rsa*
+**/id_ecdsa*
+**/id_ed25519*
+**/*.ovpn
+**/kubeconfig
+**/service-account*.json

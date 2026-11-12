@@ -4,14 +4,25 @@ import RepoPromptDomainRuntime
 /// Backend projection only: the app keeps the canonical discovery/export contract.
 /// Direct-headless advertises only capabilities its actual adapter can honor.
 enum DirectHeadlessToolAdvertisement {
+    static let oracleModelSyntax =
+        "Direct-headless model syntax: codexExec:<model>, claudeCode:<model> or devin:<model>, where <model> may be default; a value without a provider prefix is a Codex model."
+
     static func project(_ definition: MCPDomainToolDefinition) -> (description: String, inputSchema: Value) {
         if definition.name == "agent_run" || definition.name == "agent_explore" {
             return (
                 definition.description + " Direct-headless agent processes belong to this runtime: " +
                     "keep its MCP connection or interactive REPL open until they finish. " +
                     "They stop when it exits and cannot be resumed by another CLI invocation. " +
-                    "Linux --exec and --call reject detached starts.",
+                    "Linux --exec and --call reject detached starts. " +
+                    "Direct-headless agents run Codex CLI (codexExec) only; Claude Code and Devin CLI serve Oracle and Context Builder inference.",
                 definition.inputSchema
+            )
+        }
+        if definition.name == "ask_oracle" || definition.name == "oracle_send" {
+            return (
+                definition.description + " Direct-headless Oracles run Codex CLI, Claude Code or Devin CLI one-shot, " +
+                    "chosen per model identifier; Claude Code and Devin CLI run without edit, shell or MCP tools. \(oracleModelSyntax)",
+                withModelDescription(definition.inputSchema, suffix: oracleModelSyntax)
             )
         }
         guard definition.name == "context_builder",
@@ -27,7 +38,7 @@ enum DirectHeadlessToolAdvertisement {
         ])
         properties["model"] = .object([
             "type": .string("string"), "minLength": .int(1), "pattern": .string("\\S"),
-            "description": .string("Optional primary Oracle model override; does not alter additional configured Oracles.")
+            "description": .string("Optional primary Oracle model override; does not alter additional configured Oracles. \(oracleModelSyntax)")
         ])
         properties["response_type"] = .object([
             "type": .string("string"),
@@ -49,8 +60,20 @@ enum DirectHeadlessToolAdvertisement {
             ])
         ])
         return (
-            "Direct-headless Context Builder performs one-shot Oracle inference. With a single Oracle supply instructions; multiple Oracles require a persisted canonical context_pack_ref from this profile's artifact store. It does not discover files, commit selections, or create frozen packs, and does not export responses. App presets and clarify/discovery require the app-backed tool. Omitted response_type defaults to question for frozen-pack matching; in single-Oracle instruction mode response_type does not change the provider prompt, so specify the desired output in instructions.",
+            "Direct-headless Context Builder performs one-shot Oracle inference over caller-supplied context with Codex CLI, Claude Code or Devin CLI, chosen by the Oracle model identifier (\(oracleModelSyntax)) With a single Oracle supply instructions; multiple Oracles require a persisted canonical context_pack_ref from this profile's artifact store. It does not discover files, commit selections, or create frozen packs, and does not export responses. App presets and clarify/discovery require the app-backed tool. Omitted response_type defaults to question for frozen-pack matching; in single-Oracle instruction mode response_type does not change the provider prompt, so specify the desired output in instructions.",
             .object(schema)
         )
+    }
+
+    private static func withModelDescription(_ inputSchema: Value, suffix: String) -> Value {
+        guard case var .object(schema) = inputSchema,
+              case var .object(properties)? = schema["properties"],
+              case var .object(model)? = properties["model"]
+        else { return inputSchema }
+        let canonical = model["description"]?.stringValue.map { $0 + " " } ?? ""
+        model["description"] = .string(canonical + suffix)
+        properties["model"] = .object(model)
+        schema["properties"] = .object(properties)
+        return .object(schema)
     }
 }

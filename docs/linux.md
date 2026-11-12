@@ -334,6 +334,9 @@ and needs no listening TCP port.
 server's standard input and output. Running `--backend headless` with either
 stream attached to a terminal prints quick-start usage and exits.
 
+To run the headless server and the Claude Code, Codex and Devin CLIs in a
+container against a mounted project, see [Linux agent container](linux-agent-container.md).
+
 ### Profiles and permissions
 
 Without an explicit profile directory, Linux stores release data under
@@ -369,9 +372,10 @@ existing limitations into desktop feature parity.
 | `workspace_context` export | Writes prompt text and a selected-path list; assembled selected-file contents and frozen-pack creation remain unavailable |
 | File creation, edits, moves | Requires the existing explicit mutation policy and root checks |
 | File deletion | Currently refused by the direct backend |
-| Agent execution | The direct provider catalog currently supports Codex CLI; provider installation and authentication are separate |
+| Agent execution | `agent_run` and `agent_explore` run Codex CLI (`codexExec`) only; provider installation and authentication are separate |
+| Oracle providers | `ask_oracle`, `oracle_send` and Context Builder run Codex CLI, Claude Code or Devin CLI one-shot; see [Oracle providers](#oracle-providers) |
 | Agent management | `agent_manage` supports provider/session listing, workflow listing and cancellation; `create_session` and `resume_session` remain unavailable |
-| Context Builder | One-shot Oracle inference; autonomous discovery, app presets, selection commits and response export require the app-backed implementation |
+| Context Builder | One-shot inference by a single Oracle over the context the caller supplies in `instructions`; it does not discover files. Autonomous discovery, app presets, selection commits and response export require the app-backed implementation |
 | Multiple Oracle models | Requires an existing canonical frozen context pack; the direct backend does not create these packs |
 | Overseer / session links / window selection | App-dependent operations remain unavailable |
 | Interactive user-input UI | No elicitation-capable client adapter is currently registered |
@@ -380,6 +384,87 @@ existing limitations into desktop feature parity.
 Use the normal capability results and explicit errors when deciding what a
 client may invoke. Installing a provider does not add all of the macOS app's
 provider integrations to the headless runtime.
+
+### Oracle providers
+
+The headless runtime starts each provider CLI itself, once per Oracle turn, with
+the prompt on standard input. `agent_manage op=list_agents` and `oracle_utils`
+report whether each CLI was found and, if not, how to configure it.
+
+| Provider | Found as | Started as |
+| --- | --- | --- |
+| `codexExec` | `REPOPROMPT_CODEX_COMMAND`, else `codex` on `PATH` | `codex [--model M] exec --skip-git-repo-check --sandbox workspace-write --json -` (`read-only` for Oracle groups) |
+| `claudeCode` | `REPOPROMPT_CLAUDE_COMMAND`, else `claude` on `PATH` | `claude --print --output-format json --no-session-persistence --permission-mode dontAsk --tools=Read,Grep,Glob --disallowedTools=mcp__* --strict-mcp-config --setting-sources "" --settings '{"disableAllHooks":true}' --disable-slash-commands [--model=M]` |
+| `devin` | `REPOPROMPT_DEVIN_COMMAND`, else `devin` on `PATH` | `devin --print --prompt-file /dev/stdin --permission-mode normal --respect-workspace-trust=false --config=<private config> --export=<private file> [--model=M]`, run in a private empty directory |
+
+Select the provider in the Oracle model identifier, using the same
+`<agent>:<model>` form as the app's `model_id` values: `claudeCode:sonnet`,
+`devin:opus`, `codexExec:gpt-5.4`. Use `default` as the model for the CLI's own
+default, for example `claudeCode:default`. A value without one of these
+prefixes still selects Codex, so existing `models.planning_model` settings and
+`model` arguments keep their meaning. The same syntax applies to the `model`
+argument of `ask_oracle`, `oracle_send` and `context_builder`, and to
+`models.planning_model` and `models.additional_oracle_models`. An Oracle group
+may mix providers. A direct conversation keeps the provider and model it started
+with.
+
+Claude Code and Devin CLI run **without edit, shell or MCP tools**:
+
+- Claude Code gets only its built-in Read, Grep and Glob tools and no MCP tools.
+  `dontAsk` denies anything that would need approval, including reads outside
+  the working directory. No settings file is loaded (`--setting-sources ""`), so
+  user, project and local hooks, permission rules, `env` blocks, status-line and
+  `apiKeyHelper` commands do not apply, and `disableAllHooks` also stops plugin
+  hooks. Skills and slash commands, whose frontmatter can add hooks or
+  pre-approve tools, are disabled. Authentication still comes from `ANTHROPIC_*` / `CLAUDE_CODE_OAUTH_TOKEN`
+  or the CLI's `~/.claude/.credentials.json`; an `apiKeyHelper` in your settings is
+  not used.
+- Devin CLI runs in a new private directory per call. Its working directory is an
+  empty repository root, and `XDG_CONFIG_HOME` and `--config` point at a private
+  config file, so no user or project Devin configuration, Claude/Cursor/Windsurf
+  imports, hooks, rules or MCP servers load. That config removes the edit, write,
+  shell, web and subagent tools from the model, denies `edit`, `exec`, `Write(**)`
+  and `mcp__*` (Devin's deny rules override allow rules), and allows reads under
+  the workspace roots. Devin's workspace-trust check is skipped because the
+  private directory contains nothing to trust. The prompt is passed through
+  `--prompt-file /dev/stdin` because Devin's `-p` does not read piped input. The
+  final answer is read from its ATIF trajectory export, falling back to standard
+  output.
+
+These postures rely on each vendor's own controls, not an OS sandbox, and
+organization-managed settings (Claude managed settings, Devin team settings) still
+apply. Devin's MCP meta-tools stay listed but have no configured servers to call.
+Because Devin starts in the private directory, it reaches workspace files only
+through absolute paths, so include the paths or contents the Oracle should read
+in the prompt. Neither runner is given more write access than Codex's
+`workspace-write`.
+
+Provider processes get a filtered environment: basic process variables such as
+`HOME`, `PATH`, `XDG_CACHE_HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`,
+`SSL_CERT_FILE`, locale and RepoPrompt's private launch variables. Each CLI
+additionally gets its own documented variables:
+
+- Claude Code: `ANTHROPIC_*`, `CLAUDE_CODE_*` (except `CLAUDE_CODE_SIMPLE` and
+  `CLAUDE_CODE_EVEN_MORE_DANGEROUSLY_SKIP_PERMISSIONS`), `CLAUDE_CONFIG_DIR`,
+  `NODE_EXTRA_CA_CERTS`, `DISABLE_AUTOUPDATER`, `DISABLE_TELEMETRY`,
+  `DISABLE_ERROR_REPORTING` and the proxy variables.
+- Devin CLI: `WINDSURF_API_KEY`, `DEVIN_MODEL`, `DEVIN_VERBOSITY`,
+  `DEVIN_SESSIONS_DIR`, `DEVIN_SESSION_STORE`, `DEVIN_REFUSAL_FALLBACK`, `XDG_*`
+  and the proxy variables. `DEVIN_PERMISSION_MODE` and `DEVIN_SANDBOX` are not
+  forwarded because the permission mode is set on the command line.
+- Codex CLI: only `CODEX_HOME` beyond the basic set, as before.
+
+To forward more variables, set `REPOPROMPT_PROVIDER_PASSTHROUGH_ENV` to a
+comma-separated list of exact variable **names**, for example
+`HTTPS_PROXY,CORP_CA_TOKEN`. Those variables are passed to every provider
+process, including Codex. An entry that is not a variable name, or names a
+dynamic-loader or private launch variable, stops the call with an error that
+does not repeat the entry. Values are never logged, and provider diagnostics
+have forwarded values longer than seven characters replaced with `[redacted]`
+before they are shortened to their last 2000 characters.
+
+`agent_run` and `agent_explore` always use Codex CLI: an agent needs
+workspace-write access, which these one-shot runners do not grant.
 
 ## Verification
 

@@ -28,12 +28,18 @@ actor DirectHeadlessProviderCoordinator {
         let executable: String?
         let unavailableReason: String?
 
+        var kind: DirectHeadlessProviderKind? {
+            DirectHeadlessProviderKind(rawValue: id)
+        }
+
         var value: Value {
             .object([
                 "id": .string(id),
                 "name": .string(displayName),
                 "available": .bool(executable != nil),
-                "reason": unavailableReason.map(Value.string) ?? .null
+                "reason": unavailableReason.map(Value.string) ?? .null,
+                "agent_run": .bool(kind?.supportsAgentRuns == true),
+                "oracle_model_syntax": .string("\(id):<model>")
             ])
         }
     }
@@ -63,6 +69,9 @@ actor DirectHeadlessProviderCoordinator {
     struct ConversationReference: Equatable {
         let id: UUID
         let updatedAt: Date
+        let providerID: String
+        /// The Oracle roster model identifier this conversation was started with.
+        let modelID: String
     }
 
     private struct Conversation {
@@ -123,18 +132,16 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     func providerCatalog() -> [ProviderDescriptor] {
-        let codex = Self.findExecutable(
-            named: environment["REPOPROMPT_CODEX_COMMAND"] ?? "codex",
-            path: environment["PATH"]
-        )
-        return [
-            ProviderDescriptor(
-                id: "codexExec",
-                displayName: "Codex CLI",
-                executable: codex,
-                unavailableReason: codex == nil ? "Codex CLI was not found on PATH." : nil
+        DirectHeadlessProviderKind.allCases.map { kind in
+            let override = environment[kind.commandEnvironmentKey]
+            let executable = Self.findExecutable(named: override ?? kind.defaultCommand, path: environment["PATH"])
+            return ProviderDescriptor(
+                id: kind.rawValue,
+                displayName: kind.displayName,
+                executable: executable,
+                unavailableReason: executable == nil ? kind.unavailableReason(commandOverridden: override != nil) : nil
             )
-        ]
+        }
     }
 
     static func codexExecArguments(model: String?, purpose: ExecutionPurpose) -> [String] {
@@ -149,12 +156,14 @@ actor DirectHeadlessProviderCoordinator {
     func validateOracleRoster(_ roster: OracleRoster) throws {
         for model in roster.orderedModels {
             let descriptor = try resolveProvider(model.providerID)
+            _ = try Self.oracleSelection(model: model.modelID, descriptor: descriptor)
             guard descriptor.executable != nil else {
                 throw MCPError.invalidRequest(
                     "Provider '\(descriptor.id)' is unavailable: \(descriptor.unavailableReason ?? "not configured")"
                 )
             }
         }
+        _ = try DirectHeadlessProviderPassthrough.names(from: environment)
     }
 
     func runProviderOnce(
@@ -169,9 +178,15 @@ actor DirectHeadlessProviderCoordinator {
         guard !isShuttingDown else { throw CancellationError() }
         try ProviderProcessLaunchPolicy.check(allowsLaunchInTests: allowsProviderProcessLaunchForTesting)
         let descriptor = try resolveProvider(providerID)
+        guard let kind = descriptor.kind else {
+            throw MCPError.invalidParams("unknown standalone provider '\(descriptor.id)'")
+        }
+        if purpose == .agent, !kind.supportsAgentRuns { throw Self.oracleOnlyProviderError(descriptor) }
+        let selection = try Self.oracleSelection(model: model, descriptor: descriptor)
         guard let executable = descriptor.executable else {
             throw MCPError.invalidRequest("Provider '\(descriptor.id)' is unavailable: \(descriptor.unavailableReason ?? "not configured")")
         }
+        let allowance = try kind.environmentAllowance.adding(DirectHeadlessProviderPassthrough.names(from: environment))
         guard let connectionID = request.securityContext?.connectionID else {
             throw DirectHeadlessDomainContext.Error.routingUnavailable
         }
@@ -182,22 +197,32 @@ actor DirectHeadlessProviderCoordinator {
         )
         guard !isShuttingDown else { throw CancellationError() }
         try Task.checkCancellation()
-        let arguments = Self.codexExecArguments(model: model, purpose: purpose)
         let carrier = carrierEnvironment ?? DomainChildLaunchContext.current?.environment ?? [:]
         var childEnvironment = DirectProcess.withoutPrivateCarrier(from: environment)
         childEnvironment.merge(carrier) { _, supplied in supplied }
+        let redactor = DirectHeadlessSecretRedactor(environment: childEnvironment, allowance: allowance)
+        let launch = ProviderLaunch(
+            kind: kind,
+            executable: executable,
+            vendorModel: selection.vendorModel,
+            purpose: purpose,
+            input: Data(message.utf8),
+            environment: childEnvironment,
+            allowance: allowance,
+            currentDirectory: snapshot.activeRoot,
+            readableRoots: snapshot.roots,
+            redactor: redactor,
+            allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting
+        )
         let taskID = UUID()
         let task = Task {
-            let output = try await DirectProcess.run(
-                executable,
-                arguments: arguments,
-                input: Data(message.utf8),
-                environment: childEnvironment,
-                currentDirectory: snapshot.activeRoot,
-                isProvider: true,
-                allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting
-            )
-            return Self.finalAssistantText(from: output)
+            do {
+                return try await launch.run()
+            } catch let failure as DirectHeadlessProviderFailure {
+                throw MCPError.internalError(redactor.redact(failure.message))
+            } catch let MCPError.internalError(detail) {
+                throw MCPError.internalError(detail.map(redactor.redact))
+            }
         }
         providerTasks[taskID] = task
         defer { providerTasks.removeValue(forKey: taskID) }
@@ -205,6 +230,81 @@ actor DirectHeadlessProviderCoordinator {
             try await task.value
         } onCancel: {
             task.cancel()
+        }
+    }
+
+    /// One provider child: argv, environment allowance and output parser for its CLI.
+    private struct ProviderLaunch {
+        let kind: DirectHeadlessProviderKind
+        let executable: String
+        let vendorModel: String?
+        let purpose: ExecutionPurpose
+        let input: Data
+        let environment: [String: String]
+        let allowance: DirectProcessEnvironmentAllowance
+        let currentDirectory: URL?
+        let readableRoots: [URL]
+        let redactor: DirectHeadlessSecretRedactor
+        let allowsProviderProcessLaunchForTesting: Bool
+
+        func run() async throws -> String {
+            switch kind {
+            case .codexExec:
+                let output = try await DirectProcess.run(
+                    executable,
+                    arguments: DirectHeadlessProviderCoordinator.codexExecArguments(model: vendorModel, purpose: purpose),
+                    input: input,
+                    environment: environment,
+                    currentDirectory: currentDirectory,
+                    isProvider: true,
+                    allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting,
+                    environmentAllowance: allowance
+                )
+                return DirectHeadlessProviderCoordinator.finalAssistantText(from: output)
+            case .claudeCode:
+                let output = try await runCapturing(
+                    DirectHeadlessProviderArguments.claudeOracle(model: vendorModel),
+                    environment: environment,
+                    currentDirectory: currentDirectory
+                )
+                return try DirectHeadlessProviderOutput.claudeText(output, redactor: redactor)
+            case .devin:
+                let isolation = try DirectHeadlessDevinIsolation.create(readableRoots: readableRoots)
+                defer { isolation.remove() }
+                // Set after filtering and passthrough so no inherited value can restore the user config.
+                var devinEnvironment = environment
+                devinEnvironment["XDG_CONFIG_HOME"] = isolation.configHome.path
+                let output = try await runCapturing(
+                    DirectHeadlessProviderArguments.devinOracle(
+                        model: vendorModel,
+                        configPath: isolation.configFile.path,
+                        exportPath: isolation.exportFile.path
+                    ),
+                    environment: devinEnvironment,
+                    currentDirectory: isolation.workingDirectory
+                )
+                return try DirectHeadlessProviderOutput.devinText(
+                    output,
+                    export: try? Data(contentsOf: isolation.exportFile),
+                    redactor: redactor
+                )
+            }
+        }
+
+        private func runCapturing(
+            _ arguments: [String],
+            environment: [String: String],
+            currentDirectory: URL?
+        ) async throws -> DirectProcess.Output {
+            try await DirectProcess.runProvider(
+                executable,
+                arguments: arguments,
+                input: input,
+                environment: environment,
+                allowance: allowance,
+                currentDirectory: currentDirectory,
+                allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting
+            )
         }
     }
 
@@ -229,6 +329,7 @@ actor DirectHeadlessProviderCoordinator {
         )
         let providerID = args["model_id"]?.stringValue ?? args["agent"]?.stringValue ?? "codexExec"
         let descriptor = try resolveProvider(providerID)
+        guard descriptor.kind?.supportsAgentRuns == true else { throw Self.oracleOnlyProviderError(descriptor) }
         guard descriptor.executable != nil else {
             throw MCPError.invalidRequest("Provider '\(descriptor.id)' is unavailable: \(descriptor.unavailableReason ?? "not configured")")
         }
@@ -491,16 +592,16 @@ actor DirectHeadlessProviderCoordinator {
         return current.toValue()
     }
 
+    /// Starts a direct Oracle conversation; the provider is the one the Oracle model selects.
     func createConversation(
-        providerID: String?,
         message: String,
-        model: String?,
+        model: String,
         request: DomainPhysicalToolRequest
     ) async throws -> (UUID, String) {
-        let descriptor = try resolveProvider(providerID)
+        let providerID = try DirectHeadlessOracleModelSelection.parse(model).provider.rawValue
         let text = try await runProviderOnce(
             message: message,
-            providerID: descriptor.id,
+            providerID: providerID,
             model: model,
             request: request,
             purpose: .directOracle
@@ -508,7 +609,7 @@ actor DirectHeadlessProviderCoordinator {
         let id = UUID()
         conversations[id] = Conversation(
             id: id,
-            providerID: descriptor.id,
+            providerID: providerID,
             model: model,
             messages: [("user", message), ("assistant", text)],
             updatedAt: Date()
@@ -563,11 +664,20 @@ actor DirectHeadlessProviderCoordinator {
     }
 
     func conversationReference(id: UUID) -> ConversationReference? {
-        conversations[id].map { ConversationReference(id: $0.id, updatedAt: $0.updatedAt) }
+        conversations[id].map(Self.reference)
     }
 
     func latestConversationReference() -> ConversationReference? {
-        latestConversation().map { ConversationReference(id: $0.id, updatedAt: $0.updatedAt) }
+        latestConversation().map(Self.reference)
+    }
+
+    private static func reference(_ conversation: Conversation) -> ConversationReference {
+        ConversationReference(
+            id: conversation.id,
+            updatedAt: conversation.updatedAt,
+            providerID: conversation.providerID,
+            modelID: conversation.model ?? "default"
+        )
     }
 
     private func latestConversation() -> Conversation? {
@@ -685,7 +795,7 @@ actor DirectHeadlessProviderCoordinator {
             tabID: nil,
             sessionName: record.name,
             agentRaw: record.agentID,
-            agentDisplayName: record.agentID == "codexExec" ? "Codex CLI" : record.agentID,
+            agentDisplayName: DirectHeadlessProviderKind(rawValue: record.agentID)?.displayName ?? record.agentID,
             modelRaw: record.model,
             reasoningEffortRaw: nil,
             status: status,
@@ -715,12 +825,35 @@ actor DirectHeadlessProviderCoordinator {
         let normalized = requested?.trimmingCharacters(in: .whitespacesAndNewlines)
         let id = normalized.flatMap { $0.isEmpty ? nil : $0 } ?? "codexExec"
         let roleAliases: Set = ["pair", "explore", "engineer", "design", "default"]
-        guard let descriptor = providerCatalog().first(where: {
+        let catalog = providerCatalog()
+        guard let descriptor = catalog.first(where: {
             $0.id.caseInsensitiveCompare(id) == .orderedSame || (roleAliases.contains(id.lowercased()) && $0.id == "codexExec")
         }) else {
-            throw MCPError.invalidParams("unknown standalone provider '\(id)'")
+            throw MCPError.invalidParams(
+                "unknown standalone provider '\(id)'; direct-headless providers are \(catalog.map(\.id).joined(separator: ", "))."
+            )
         }
         return descriptor
+    }
+
+    private nonisolated static func oracleOnlyProviderError(_ descriptor: ProviderDescriptor) -> MCPError {
+        MCPError.invalidParams(
+            "Provider '\(descriptor.id)' (\(descriptor.displayName)) runs only direct-headless Oracle and Context Builder inference; agent_run and agent_explore use codexExec."
+        )
+    }
+
+    /// The roster model must select the same provider that runs it; a persisted roster always does.
+    private nonisolated static func oracleSelection(
+        model: String?,
+        descriptor: ProviderDescriptor
+    ) throws -> DirectHeadlessOracleModelSelection {
+        let selection = try DirectHeadlessOracleModelSelection.parse(model ?? "default")
+        guard selection.provider.rawValue == descriptor.id else {
+            throw MCPError.invalidParams(
+                "Model '\(model ?? "default")' selects provider '\(selection.provider.rawValue)', not '\(descriptor.id)'. \(DirectHeadlessOracleModelSelection.syntaxHint)"
+            )
+        }
+        return selection
     }
 
     nonisolated static func resolvedLaunchMessage(
@@ -758,7 +891,7 @@ actor DirectHeadlessProviderCoordinator {
             .first(where: FileManager.default.isExecutableFile)
     }
 
-    private nonisolated static func finalAssistantText(from output: String) -> String {
+    nonisolated static func finalAssistantText(from output: String) -> String {
         var latest: String?
         for line in output.split(separator: "\n") {
             guard let data = line.data(using: .utf8),

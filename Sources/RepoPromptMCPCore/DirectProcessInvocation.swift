@@ -56,6 +56,7 @@ final class DirectProcessInvocation: @unchecked Sendable {
     private let isProvider: Bool
     private let allowsProviderProcessLaunchForTesting: Bool
     private let separatesStandardError: Bool
+    private let returnsNonZeroExit: Bool
     private let lock = NSLock()
     private let completion = DirectProcessCompletion<Result<DirectProcess.Output, Error>>()
     private var child: Child?
@@ -76,7 +77,9 @@ final class DirectProcessInvocation: @unchecked Sendable {
         readBinding: GitReadRepositoryBinding?,
         isProvider: Bool,
         allowsProviderProcessLaunchForTesting: Bool,
-        separatesStandardError: Bool = false
+        separatesStandardError: Bool = false,
+        environmentAllowance: DirectProcessEnvironmentAllowance = .none,
+        returnsNonZeroExit: Bool = false
     ) {
         self.executable = executable
         self.arguments = arguments
@@ -86,7 +89,8 @@ final class DirectProcessInvocation: @unchecked Sendable {
         self.isProvider = isProvider
         self.allowsProviderProcessLaunchForTesting = allowsProviderProcessLaunchForTesting
         self.separatesStandardError = separatesStandardError
-        let sanitized = DirectProcess.childEnvironment(overrides: overrides)
+        self.returnsNonZeroExit = returnsNonZeroExit
+        let sanitized = DirectProcess.childEnvironment(overrides: overrides, allowance: environmentAllowance)
         environment = readBinding?.ownershipProbeEnvironment(sanitized) ?? sanitized
     }
 
@@ -227,6 +231,12 @@ final class DirectProcessInvocation: @unchecked Sendable {
             finish(.failure(MCPError.internalError(
                 [stdout, stderr, "Process pipes did not finish after the owned process family exited."]
                     .filter { !$0.isEmpty }.joined(separator: "\n")
+            )))
+        } else if case let .exited(status)? = outcome, status.terminationStatus != 0, returnsNonZeroExit {
+            finish(.success(.init(
+                standardOutput: stdout,
+                standardError: stderr,
+                terminationStatus: status.normalizedExitCode
             )))
         } else if case let .exited(status)? = outcome, status.terminationStatus != 0 {
             finish(.failure(MCPError.internalError(
