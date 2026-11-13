@@ -212,7 +212,12 @@ final class DirectHeadlessProviderRunnerTests: XCTestCase {
         let cases: [(String, String)] = [
             ("claudeCode", "names a provider without a model; use claudeCode:default or claudeCode:<model>"),
             ("devin:", "has no model after the provider; use devin:default or devin:<model>"),
-            ("cursor:auto", "Oracle provider 'cursor' is available only in the RepoPrompt app")
+            ("cursor:auto", "Oracle provider 'cursor' is available only in the RepoPrompt app"),
+            // Miscased providers must not fall through to Codex as a model name.
+            ("ClaudeCode:opus", "Oracle provider 'ClaudeCode' is spelled 'claudeCode'"),
+            ("DEVIN:default", "Oracle provider 'DEVIN' is spelled 'devin'"),
+            ("Cursor:auto", "Oracle provider 'Cursor' is spelled 'cursor'"),
+            ("claudecode", "names a provider without a model; use claudeCode:default or claudeCode:<model>")
         ]
         for (model, expected) in cases {
             let text = try await fixture.callExpectingError("ask_oracle", ["message": .string("q"), "model": .string(model)])

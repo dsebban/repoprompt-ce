@@ -102,15 +102,22 @@ struct DirectHeadlessOracleModelSelection: Equatable {
     static func parse(_ raw: String) throws -> Self {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard let colon = value.firstIndex(of: ":") else {
-            if DirectHeadlessProviderKind(rawValue: value) != nil || appOnlyProviderIDs.contains(value) {
+            if let provider = knownProviderID(caseInsensitivelyMatching: value) {
                 throw MCPError.invalidParams(
-                    "Oracle model '\(value)' names a provider without a model; use \(value):default or \(value):<model>. \(syntaxHint)"
+                    "Oracle model '\(value)' names a provider without a model; use \(provider):default or \(provider):<model>. \(syntaxHint)"
                 )
             }
             return Self(provider: .codexExec, vendorModel: vendorModel(value))
         }
         let prefix = String(value[..<colon])
         let model = String(value[value.index(after: colon)...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        // Provider IDs are case-sensitive. A miscased one would otherwise become a Codex model
+        // name and send the whole prompt to Codex, so it is refused with the right spelling.
+        if let provider = knownProviderID(caseInsensitivelyMatching: prefix), provider != prefix {
+            throw MCPError.invalidParams(
+                "Oracle provider '\(prefix)' is spelled '\(provider)'; use \(provider):default or \(provider):<model>. \(syntaxHint)"
+            )
+        }
         if appOnlyProviderIDs.contains(prefix) {
             throw MCPError.invalidParams(
                 "Oracle provider '\(prefix)' is available only in the RepoPrompt app. \(syntaxHint)"
@@ -125,6 +132,12 @@ struct DirectHeadlessOracleModelSelection: Equatable {
             )
         }
         return Self(provider: provider, vendorModel: vendorModel(model))
+    }
+
+    private static func knownProviderID(caseInsensitivelyMatching value: String) -> String? {
+        let lowered = value.lowercased()
+        return (DirectHeadlessProviderKind.allCases.map(\.rawValue) + appOnlyProviderIDs)
+            .first { $0.lowercased() == lowered }
     }
 
     private static func vendorModel(_ value: String) -> String? {
