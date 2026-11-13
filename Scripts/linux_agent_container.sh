@@ -78,7 +78,8 @@ Commands:
 
 Run options:
   --project DIR      Project to mount (default: current directory). Mounted at
-                     /workspace/<name>; the home directory and / are refused.
+                     /workspace/<name>; /, the home directory and its parent
+                     directories (such as /home) are refused.
   --writable         Mount the project read-write (default: read-only).
   --state NAME       Persistent state volume suffix (default: default, or
                      $RPCE_AGENT_STATE). Volume: rpce-agent-home-NAME.
@@ -188,8 +189,10 @@ resolve_project() {
   [[ "$dir" != *,* ]] || die "project paths containing commas are not supported by docker --mount: $dir"
   local home_real
   home_real="$(cd -- "$HOME" 2>/dev/null && pwd -P || printf '%s' "$HOME")"
-  if [[ "$dir" == / || "$dir" == "$home_real" ]]; then
-    die "refusing to mount $dir; choose a project directory"
+  # An ancestor of the home directory, such as /home or /Users, would mount the
+  # host's credential folders with it.
+  if [[ "$dir" == / || "$dir" == "$home_real" || "$home_real" == "$dir"/* ]]; then
+    die "refusing to mount $dir: it is / or contains your home directory; choose a project directory"
   fi
   project_dir="$dir"
   local base digest

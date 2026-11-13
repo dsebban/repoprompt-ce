@@ -61,8 +61,9 @@ The project is the current directory, or the directory given with
 - **Read-only by default.** Edits fail with `Read-only file system`.
 - **`--writable` is explicit.** It mounts the project read-write for that run
   only.
-- **Refused directories.** The wrapper refuses your home directory, `/`, and
-  paths that contain commas.
+- **Refused directories.** The wrapper refuses `/`, your home directory, any
+  directory that contains it (such as `/home` or `/Users`), and paths that
+  contain commas.
 - **Nothing else from the host is mounted.** The container never gets your
   home directory or the Docker socket.
 

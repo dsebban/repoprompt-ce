@@ -240,7 +240,8 @@ class WrapperTests(unittest.TestCase):
     def test_refuses_home_root_comma_and_missing_project_directories(self):
         comma = self.root / "a,b"
         comma.mkdir()
-        for project in (self.docker.home, Path("/"), comma, self.root / "missing"):
+        # The home directory's parent stands in for /home: it contains every user's credentials.
+        for project in (self.docker.home, self.docker.home.parent, Path("/"), comma, self.root / "missing"):
             with self.subTest(project=str(project)):
                 result, calls = self.docker.run("run", "--project", str(project), "--", "true")
                 self.assertEqual(result.returncode, 2, result.stderr)
