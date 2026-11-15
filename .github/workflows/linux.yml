@@ -26,7 +26,12 @@ jobs:
           - runner: ubuntu-24.04-arm
             arch: aarch64
     runs-on: ${{ matrix.runner }}
-    container: swift:6.2.3-noble
+    container:
+      image: swift:6.2.3-noble
+      # Actions makes `tail -f /dev/null` PID 1, which never reaps orphans, so a
+      # killed process-group member stays a zombie and the group never vanishes.
+      # docker-init reaps them as a host init does.
+      options: --init
     timeout-minutes: 60
     defaults:
       run:
