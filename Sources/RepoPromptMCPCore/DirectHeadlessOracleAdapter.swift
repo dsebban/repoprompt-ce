@@ -384,12 +384,12 @@ actor DirectHeadlessOracleAdapter {
                 )
             }
             guard let conversationID = UUID(uuidString: chatID),
-                  await provider.conversationReference(id: conversationID) != nil
+                  let conversation = await provider.conversationReference(id: conversationID)
             else {
                 throw MCPError.invalidParams("Unknown direct Oracle chat_id. Use a direct-conversation chat_id or set new_chat=true.")
             }
-            let configured = try await rosterResolver.resolveRoster(for: OracleRosterResolutionRequest(newChat: false))
-            let directRoster = try OracleRoster(primary: configured.primary)
+            // A direct conversation keeps the provider and model it started with.
+            let directRoster = try Self.roster(continuing: conversation)
             try await provider.validateOracleRoster(directRoster)
             let childPlan = try Self.childPlan(runID: runID, roster: directRoster)
             return InvocationPlan(
@@ -413,8 +413,13 @@ actor DirectHeadlessOracleAdapter {
                     input: input
                 )
             }
-            let configured = try await rosterResolver.resolveRoster(for: OracleRosterResolutionRequest(newChat: false))
-            let directRoster = try OracleRoster(primary: configured.primary)
+            let directRoster: OracleRoster = if let latestDirect {
+                try Self.roster(continuing: latestDirect)
+            } else {
+                try await OracleRoster(primary: rosterResolver.resolveRoster(
+                    for: OracleRosterResolutionRequest(newChat: false)
+                ).primary)
+            }
             try await provider.validateOracleRoster(directRoster)
             return try InvocationPlan(
                 invocationID: invocationID,
@@ -428,6 +433,12 @@ actor DirectHeadlessOracleAdapter {
                 childLaunchPlan: Self.childPlan(runID: runID, roster: directRoster)
             )
         }
+    }
+
+    private static func roster(
+        continuing conversation: DirectHeadlessProviderCoordinator.ConversationReference
+    ) throws -> OracleRoster {
+        try OracleRoster(primary: OracleModelReference(providerID: conversation.providerID, modelID: conversation.modelID))
     }
 
     private static func prefersGroup(

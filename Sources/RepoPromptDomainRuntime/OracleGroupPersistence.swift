@@ -1,5 +1,4 @@
 import Foundation
-import os
 
 package enum OraclePersistenceError: Error, LocalizedError, Equatable {
     case alreadyExists
@@ -60,7 +59,7 @@ package struct OracleArtifactReservation {
 }
 
 private final class OracleArtifactReservationRegistry: @unchecked Sendable {
-    private let reservations = OSAllocatedUnfairLock(initialState: [UUID: String]())
+    private let reservations = DomainLockedState(initialState: [UUID: String]())
 
     func reserve(artifactID: String) -> OracleArtifactReservation {
         let reservation = OracleArtifactReservation(id: UUID(), artifactID: artifactID)
@@ -614,8 +613,8 @@ package enum OracleDebugRetention {
             let directory = source.root.appendingPathComponent("groups")
             guard source.exists(directory) else { return [] }
             var result: [Candidate] = []
-            for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-                .filter({ $0.pathExtension == "json" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            for url in try source.groupFileURLs()
+                .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 try checkCancellation()
                 do {
                     let group = try source.decodeGroup(from: url)
@@ -638,8 +637,7 @@ package enum OracleDebugRetention {
             let directory = release.root.appendingPathComponent("groups")
             var knownIDs = Set<OracleGroupID>()
             if release.exists(directory) {
-                for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-                    .filter({ $0.pathExtension == "json" }) {
+                for url in try release.groupFileURLs() {
                     try checkCancellation()
                     let bytes = try Data(contentsOf: url)
                     let group: OracleGroupDocument
@@ -866,6 +864,18 @@ private struct OracleStorageFiles: @unchecked Sendable {
         FileManager.default.fileExists(atPath: url.path)
     }
 
+    private func jsonFiles(in directory: URL) throws -> [URL] {
+        // Use the path form: on Linux, the URL form of contentsOfDirectory returns an
+        // empty list for a non-directory instead of throwing ENOTDIR.
+        try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            .map { directory.appendingPathComponent($0) }
+            .filter { $0.pathExtension == "json" }
+    }
+
+    func groupFileURLs() throws -> [URL] {
+        try jsonFiles(in: groupsDirectory)
+    }
+
     func groupURL(_ id: OracleGroupID) -> URL {
         groupsDirectory.appendingPathComponent("\(id.rawValue.uuidString).json")
     }
@@ -904,10 +914,8 @@ private struct OracleStorageFiles: @unchecked Sendable {
 
     func recoverTransactions() throws {
         guard exists(transactionsDirectory) else { return }
-        let urls = try FileManager.default.contentsOfDirectory(
-            at: transactionsDirectory,
-            includingPropertiesForKeys: nil
-        ).filter { $0.pathExtension == "json" }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let urls = try jsonFiles(in: transactionsDirectory)
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
         for url in urls {
             try checkCancellation()
             let journal = try decode(OracleTransactionJournal.self, from: Data(contentsOf: url))
@@ -968,10 +976,7 @@ private struct OracleStorageFiles: @unchecked Sendable {
 
     func loadAndValidateAllGroups() throws -> [OracleGroupDocument] {
         let urls: [URL] = if exists(groupsDirectory) {
-            try FileManager.default.contentsOfDirectory(
-                at: groupsDirectory,
-                includingPropertiesForKeys: nil
-            ).filter { $0.pathExtension == "json" }
+            try jsonFiles(in: groupsDirectory)
         } else {
             []
         }
@@ -1012,7 +1017,7 @@ private struct OracleStorageFiles: @unchecked Sendable {
             guard turn.state == .terminal, turn.status == nil else { return turn }
             let status: OracleGroupStatus = if turn.results.first?.status != .completed {
                 .failed
-            } else if turn.results.allSatisfy({ $0.status == .completed }) && turn.warnings.isEmpty {
+            } else if turn.results.allSatisfy({ $0.status == .completed }), turn.warnings.isEmpty {
                 .completed
             } else {
                 .partialFailure
@@ -1044,10 +1049,7 @@ private struct OracleStorageFiles: @unchecked Sendable {
 
     func hasGroupFiles() throws -> Bool {
         guard exists(groupsDirectory) else { return false }
-        return try FileManager.default.contentsOfDirectory(
-            at: groupsDirectory,
-            includingPropertiesForKeys: nil
-        ).contains { $0.pathExtension == "json" }
+        return try !jsonFiles(in: groupsDirectory).isEmpty
     }
 
     func validatePreparedCreate(_ group: OracleGroupDocument) throws {

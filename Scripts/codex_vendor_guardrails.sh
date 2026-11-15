@@ -12,6 +12,15 @@ fail() {
     exit 1
 }
 
+# `shasum` is not on PATH everywhere (Arch keeps it in /usr/bin/core_perl); fall back to `sha256sum`.
+verify_sha256_sums() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c "$@"
+    else
+        sha256sum -c "$@"
+    fi
+}
+
 python3 Scripts/codex_runtime_artifact.py validate-manifest
 
 # The release artifact, runtime resolver, schema gate, and CI installer must rotate together.
@@ -78,7 +87,7 @@ done
     awk '{ print $2 }' SHA256SUMS | sort > "$TMP_DIR/legal-sums"
     diff -u "$TMP_DIR/legal-files" "$TMP_DIR/legal-sums" ||
         fail "Codex legal checksum inventory is incomplete"
-    shasum -a 256 -c SHA256SUMS
+    verify_sha256_sums SHA256SUMS
 )
 
 grep -F "## OpenAI Codex" THIRD_PARTY_NOTICES.md >/dev/null ||

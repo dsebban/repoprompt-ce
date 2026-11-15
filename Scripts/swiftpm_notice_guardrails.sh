@@ -21,8 +21,18 @@ fail() {
     exit 1
 }
 
+# `shasum` is not on PATH everywhere (Arch keeps it in /usr/bin/core_perl); fall back to `sha256sum`.
+verify_sha256_sums() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 -c "$@"
+    else
+        sha256sum -c "$@"
+    fi
+}
+
 command -v jq >/dev/null 2>&1 || fail "Missing required command: jq"
-command -v shasum >/dev/null 2>&1 || fail "Missing required command: shasum"
+command -v shasum >/dev/null 2>&1 || command -v sha256sum >/dev/null 2>&1 ||
+    fail "Missing required command: shasum or sha256sum"
 [[ -f "$INVENTORY" ]] || fail "Missing SwiftPM notice inventory: $INVENTORY"
 [[ -f "$CHECKSUMS" ]] || fail "Missing SwiftPM notice checksums: $CHECKSUMS"
 [[ -f "$TREE_SITTER_BUNDLE" ]] || fail "Missing Tree-sitter notice bundle: $TREE_SITTER_BUNDLE"
@@ -60,7 +70,7 @@ done < "$INVENTORY"
     awk '{ print $2 }' SHA256SUMS | sort > "$TMP_DIR/checksummed-files.txt"
     diff -u "$TMP_DIR/copied-files.txt" "$TMP_DIR/checksummed-files.txt" ||
         fail "SwiftPM copied notice checksum inventory is incomplete"
-    shasum -a 256 -c SHA256SUMS
+    verify_sha256_sums SHA256SUMS
 )
 
 (
@@ -71,7 +81,7 @@ done < "$INVENTORY"
     awk '{ print $2 }' SHA256SUMS | sort > "$TMP_DIR/tree-sitter-checksummed-files.txt"
     diff -u "$TMP_DIR/tree-sitter-files.txt" "$TMP_DIR/tree-sitter-checksummed-files.txt" ||
         fail "Tree-sitter copied notice checksum inventory is incomplete"
-    shasum -a 256 -c SHA256SUMS
+    verify_sha256_sums SHA256SUMS
 )
 
 printf 'OK: SwiftPM notice inventory matches Package.resolved (%s packages).\n' \

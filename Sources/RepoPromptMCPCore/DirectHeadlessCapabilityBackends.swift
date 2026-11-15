@@ -798,7 +798,6 @@ actor DirectHeadlessConversationBackend: DomainConversationCapabilityBackend {
             )
         } else {
             try await providerCoordinator.createConversation(
-                providerID: nil,
                 message: message,
                 model: modelID,
                 request: request
@@ -838,7 +837,6 @@ actor DirectHeadlessConversationBackend: DomainConversationCapabilityBackend {
                 throw MCPError.invalidParams("context_builder requires instructions")
             }
             let (id, response) = try await providerCoordinator.createConversation(
-                providerID: args["provider"]?.stringValue,
                 message: instructions,
                 model: modelID,
                 request: request
@@ -1107,10 +1105,36 @@ actor DirectHeadlessHistoryBackend: DomainHistoryCapabilityBackend {
     }
 }
 
+/// Extra provider-child variables beyond the base process allowlist: the provider's own
+/// documented configuration/auth variables plus the explicit passthrough names.
+struct DirectProcessEnvironmentAllowance: Equatable {
+    static let none = Self(exactKeys: [], prefixes: [])
+
+    let exactKeys: Set<String>
+    let prefixes: [String]
+    let deniedKeys: Set<String>
+
+    init(exactKeys: Set<String>, prefixes: [String], deniedKeys: Set<String> = []) {
+        self.exactKeys = exactKeys
+        self.prefixes = prefixes
+        self.deniedKeys = deniedKeys
+    }
+
+    func allows(_ key: String) -> Bool {
+        guard !deniedKeys.contains(key) else { return false }
+        return exactKeys.contains(key) || prefixes.contains { key.hasPrefix($0) }
+    }
+
+    func adding(_ names: Set<String>) -> Self {
+        Self(exactKeys: exactKeys.union(names), prefixes: prefixes, deniedKeys: deniedKeys.subtracting(names))
+    }
+}
+
 enum DirectProcess {
     struct Output {
         let standardOutput: String
         let standardError: String
+        var terminationStatus: Int32 = 0
     }
 
     #if DEBUG
@@ -1131,7 +1155,7 @@ enum DirectProcess {
 
     /// Child providers need basic process/configuration context and the explicit private
     /// launch carrier, but must not inherit arbitrary parent credentials or loader controls.
-    private static let inheritedEnvironmentKeys: Set<String> = [
+    static let inheritedEnvironmentKeys: Set<String> = [
         "CODEX_HOME",
         "COLORTERM",
         "HOME",
@@ -1150,7 +1174,7 @@ enum DirectProcess {
         "XDG_DATA_HOME"
     ]
 
-    private static let childLaunchEnvironmentKeys: Set<String> = [
+    static let childLaunchEnvironmentKeys: Set<String> = [
         DomainChildLaunchCarrier.endpointEnvironmentKey,
         DomainChildLaunchCarrier.launchTokenEnvironmentKey,
         DomainChildLaunchCarrier.credentialEnvelopeEnvironmentKey,
@@ -1171,7 +1195,8 @@ enum DirectProcess {
 
     static func childEnvironment(
         inherited: [String: String] = ProcessInfo.processInfo.environment,
-        overrides: [String: String] = [:]
+        overrides: [String: String] = [:],
+        allowance: DirectProcessEnvironmentAllowance = .none
     ) -> [String: String] {
         var environment = inherited.filter { key, _ in
             inheritedEnvironmentKeys.contains(key) || key.hasPrefix("LC_")
@@ -1179,12 +1204,19 @@ enum DirectProcess {
         for (key, value) in overrides where inheritedEnvironmentKeys.contains(key)
             || childLaunchEnvironmentKeys.contains(key)
             || key.hasPrefix("LC_")
+            || isAllowedProviderKey(key, allowance: allowance)
         {
             environment[key] = value
         }
         environment["GIT_TERMINAL_PROMPT"] = "0"
         environment["LC_ALL"] = "C"
         return environment
+    }
+
+    /// Loader controls stay excluded even when a provider allowance or passthrough names them.
+    private static func isAllowedProviderKey(_ key: String, allowance: DirectProcessEnvironmentAllowance) -> Bool {
+        guard !key.hasPrefix("LD_"), !key.hasPrefix("DYLD_") else { return false }
+        return allowance.allows(key)
     }
 
     static func run(
@@ -1195,7 +1227,8 @@ enum DirectProcess {
         currentDirectory: URL? = nil,
         isProvider: Bool = true,
         allowsProviderProcessLaunchForTesting: Bool = false,
-        readBinding: GitReadRepositoryBinding? = nil
+        readBinding: GitReadRepositoryBinding? = nil,
+        environmentAllowance: DirectProcessEnvironmentAllowance = .none
     ) async throws -> String {
         if isProvider {
             try ProviderProcessLaunchPolicy.check(allowsLaunchInTests: allowsProviderProcessLaunchForTesting)
@@ -1208,8 +1241,36 @@ enum DirectProcess {
             currentDirectory: currentDirectory,
             readBinding: readBinding,
             isProvider: isProvider,
-            allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting
+            allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting,
+            environmentAllowance: environmentAllowance
         ).run().standardOutput
+    }
+
+    /// One-shot provider runner: stdout and stderr stay separate and a non-zero exit is returned
+    /// with its output, because Claude Code reports failures as a JSON result on stdout.
+    static func runProvider(
+        _ executable: String,
+        arguments: [String],
+        input: Data,
+        environment: [String: String],
+        allowance: DirectProcessEnvironmentAllowance,
+        currentDirectory: URL?,
+        allowsProviderProcessLaunchForTesting: Bool
+    ) async throws -> Output {
+        try ProviderProcessLaunchPolicy.check(allowsLaunchInTests: allowsProviderProcessLaunchForTesting)
+        return try await DirectProcessInvocation(
+            executable: executable,
+            arguments: arguments,
+            input: input,
+            environment: environment,
+            currentDirectory: currentDirectory,
+            readBinding: nil,
+            isProvider: true,
+            allowsProviderProcessLaunchForTesting: allowsProviderProcessLaunchForTesting,
+            separatesStandardError: true,
+            environmentAllowance: allowance,
+            returnsNonZeroExit: true
+        ).run()
     }
 
     /// Machine-readable stdout must not be contaminated by successful-command

@@ -1,6 +1,9 @@
-import Darwin
+#if canImport(Darwin)
+    import Darwin
+#else
+    import Glibc
+#endif
 import Foundation
-import os
 
 /// One durable replacement that would discard `discardedBytes` (#335).
 ///
@@ -273,7 +276,7 @@ package enum DomainRecoveryBackup {
     }
 
     #if DEBUG
-        private static let directorySyncFailureForTesting = OSAllocatedUnfairLock<Int32?>(initialState: nil)
+        private static let directorySyncFailureForTesting = DomainLockedState<Int32?>(initialState: nil)
 
         /// Makes every directory sync fail with `errno` (nil restores real syncing).
         package static func setDirectorySyncFailureForTesting(_ errno: Int32?) {
@@ -293,7 +296,7 @@ package enum DomainRecoveryBackup {
                 guard let baseAddress = rawBuffer.baseAddress else { return }
                 var written = 0
                 while written < rawBuffer.count {
-                    let count = Darwin.write(descriptor, baseAddress.advanced(by: written), rawBuffer.count - written)
+                    let count = write(descriptor, baseAddress.advanced(by: written), rawBuffer.count - written)
                     guard count > 0 else {
                         throw DomainRecoveryBackupError.writeFailed("write_failed_\(errno)")
                     }
