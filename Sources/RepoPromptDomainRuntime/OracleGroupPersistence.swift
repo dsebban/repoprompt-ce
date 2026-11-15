@@ -613,8 +613,8 @@ package enum OracleDebugRetention {
             let directory = source.root.appendingPathComponent("groups")
             guard source.exists(directory) else { return [] }
             var result: [Candidate] = []
-            for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-                .filter({ $0.pathExtension == "json" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            for url in try source.groupFileURLs()
+                .sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
                 try checkCancellation()
                 do {
                     let group = try source.decodeGroup(from: url)
@@ -637,8 +637,7 @@ package enum OracleDebugRetention {
             let directory = release.root.appendingPathComponent("groups")
             var knownIDs = Set<OracleGroupID>()
             if release.exists(directory) {
-                for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
-                    .filter({ $0.pathExtension == "json" }) {
+                for url in try release.groupFileURLs() {
                     try checkCancellation()
                     let bytes = try Data(contentsOf: url)
                     let group: OracleGroupDocument
@@ -866,9 +865,15 @@ private struct OracleStorageFiles: @unchecked Sendable {
     }
 
     private func jsonFiles(in directory: URL) throws -> [URL] {
+        // Use the path form: on Linux, the URL form of contentsOfDirectory returns an
+        // empty list for a non-directory instead of throwing ENOTDIR.
         try FileManager.default.contentsOfDirectory(atPath: directory.path)
             .map { directory.appendingPathComponent($0) }
             .filter { $0.pathExtension == "json" }
+    }
+
+    func groupFileURLs() throws -> [URL] {
+        try jsonFiles(in: groupsDirectory)
     }
 
     func groupURL(_ id: OracleGroupID) -> URL {
