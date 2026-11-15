@@ -144,6 +144,10 @@ For a debug build:
 CONFIGURATION=debug ./Scripts/install_linux.sh --prefix "$HOME/apps/repoprompt-ce-debug"
 ```
 
+The build script leaves the committed `Package.resolved` untouched. SwiftPM keeps
+one lockfile per checkout, and a Linux resolution omits pins for dependencies only
+the macOS app declares, so the script restores the committed file after the build.
+
 The build script enables `--static-swift-stdlib` by default for release builds,
 including the Swift runtime in the executable. System libraries remain dynamically
 linked. Debug builds use the ordinary dynamic Swift runtime. Set

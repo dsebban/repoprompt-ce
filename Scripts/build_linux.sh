@@ -31,4 +31,25 @@ build_options=(--product repoprompt-mcp --configuration "$configuration" --jobs 
 if [[ "$configuration" == release && "$static_swift" == 1 ]]; then
   build_options+=(--static-swift-stdlib)
 fi
-exec ./conductor swift-build "${build_options[@]}" "$@"
+
+# SwiftPM resolves one lockfile per checkout, and a Linux resolution drops the
+# pins of dependencies only macOS declares. Restore the committed file so a
+# Linux build leaves the worktree clean and the notice guardrails keep matching.
+resolved="$repo_root/Package.resolved"
+resolved_snapshot=""
+restore_resolved() {
+  if [[ -n "$resolved_snapshot" && -f "$resolved_snapshot" ]]; then
+    if ! cmp -s "$resolved_snapshot" "$resolved"; then
+      cp -p "$resolved_snapshot" "$resolved"
+      printf '%s\n' 'Restored Package.resolved after the Linux dependency resolution.' >&2
+    fi
+    rm -f "$resolved_snapshot"
+  fi
+}
+trap restore_resolved EXIT
+if [[ -f "$resolved" ]]; then
+  resolved_snapshot="$(mktemp "${TMPDIR:-/tmp}/repoprompt-package-resolved.XXXXXX")"
+  cp -p "$resolved" "$resolved_snapshot"
+fi
+
+./conductor swift-build "${build_options[@]}" "$@"
