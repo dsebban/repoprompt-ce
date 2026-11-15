@@ -10,6 +10,15 @@ fail() {
   failures=$((failures + 1))
 }
 
+# `shasum` is not on PATH everywhere (Arch keeps it in /usr/bin/core_perl); fall back to `sha256sum`.
+verify_sha256_sums() {
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 -c "$@"
+  else
+    sha256sum -c "$@"
+  fi
+}
+
 print_matches() {
   local label="$1"
   shift
@@ -136,7 +145,7 @@ if [[ -d "Sources/TreeSitterScannerSupport" ]]; then
     printf '%s\n' "$unexpected_tree_sitter_scanner_support_files" >&2
   fi
 fi
-if ! tree_sitter_scanner_support_checksum_output="$(shasum -a 256 -c ThirdPartyLicenses/tree-sitter/scanner-support.sha256 2>&1)"; then
+if ! tree_sitter_scanner_support_checksum_output="$(verify_sha256_sums ThirdPartyLicenses/tree-sitter/scanner-support.sha256 2>&1)"; then
   fail "TreeSitterScannerSupport compatibility snapshots differ from curated checksums"
   printf '%s\n' "$tree_sitter_scanner_support_checksum_output" >&2
 fi
