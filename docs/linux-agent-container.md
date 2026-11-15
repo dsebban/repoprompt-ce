@@ -5,11 +5,11 @@
 - the headless RepoPrompt CE MCP server (`repoprompt-mcp`, started as `rpce-mcp`);
 - the official Claude Code, Codex CLI and Devin CLI standalone installs.
 
-Codex is the **only** provider of RepoPrompt's headless runtime. The `agent_run`
-tool and Context Builder/Oracle calls start `codex exec`. Claude Code and Devin CLI
-are standalone CLIs that you run yourself. They can use RepoPrompt as an MCP
-server, but RepoPrompt never starts them. For what the headless backend supports,
-see [Linux feature boundaries](linux.md#feature-boundaries).
+Codex is the **only** provider for `agent_run`. Context Builder and Oracle calls
+start a one-shot `codex exec`, `claude --print` or `devin --print` process according
+to the selected model prefix. The agent CLIs are also installed standalone: you can
+run them yourself, and they can use RepoPrompt as an MCP server. For what the
+headless backend supports, see [Linux feature boundaries](linux.md#feature-boundaries).
 
 You need Docker (or a Docker-compatible CLI set in `DOCKER`), `bash`, `git` and
 `python3` on the host. Building the image needs BuildKit: Docker Desktop includes
